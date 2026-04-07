@@ -6,7 +6,7 @@ description: >
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
   code review of any language or framework. Covers 34 vulnerability classes across web, API, auth, mobile, and logic layers.
 metadata:
-  version: "1.3.2"
+  version: "1.4.0"
   domain: application-security
   references: 34 vulnerability knowledge bases
 ---
@@ -245,7 +245,71 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 
 ---
 
-### Step 6: Report Findings
+### Step 6: Adversarial Impact Validation
+
+Every finding that passed the Judge (CONFIRMED or LIKELY) must now survive an adversarial stress test focused on real-world impact. The goal is to actively try to **disprove** each finding before it reaches the report.
+
+For each surviving finding, work through ALL of the following:
+
+#### 1. Why You Might Be Wrong
+- What assumptions are you making about the data flow, environment, or attacker capability?
+- Is there a reasonable interpretation of the code where this is actually safe?
+- Could the surrounding architecture (WAF, API gateway, service mesh, network segmentation) neutralize this in practice?
+- Are you pattern-matching on a known vuln class without sufficient evidence for THIS specific codebase?
+- Did you confuse a defense-in-depth gap with an exploitable weakness?
+
+#### 2. Real Impact Assessment
+- What specifically can an attacker gain — data, access, availability, integrity?
+- Is the impact theoretical or demonstrable with a concrete payload/sequence?
+- What is the blast radius — single user, all users, entire system, adjacent systems?
+- Does exploitation require chaining with other vulnerabilities that may not exist?
+- Quantify: how many users/records/systems are affected in the worst realistic case?
+
+#### 3. Practical Attack Scenarios
+- Write out a concrete, step-by-step attack scenario from the attacker's perspective.
+- What preconditions must hold (network position, auth level, timing, user interaction)?
+- How likely are those preconditions in a real deployment?
+- Would a competent attacker actually pursue this, or are there far easier paths to the same goal?
+- Can the attack be performed reliably, or does it depend on race conditions / timing windows that make it impractical?
+
+#### 4. Real-World Viability
+- Does this bug survive contact with production reality (load balancers, CDNs, containerization, monitoring, rate limiting, WAFs)?
+- Is the vulnerable code path exercised in normal operation, or is it an edge case requiring unusual input or deprecated functionality?
+- Has this class of bug been exploited and confirmed in similar real-world systems, or is it purely academic?
+- Would standard deployment hardening (HTTPS, CSP, network policies) prevent or significantly limit exploitation?
+
+#### 5. Production Impact
+- If exploited, what is the operational impact — downtime, data breach, compliance violation, reputational damage?
+- Is the affected component internet-facing, internal-only, or behind multiple trust boundaries?
+- What detection and response mechanisms exist that would limit damage (logging, alerting, auto-scaling, circuit breakers)?
+- How quickly would exploitation be noticed, and how easily can it be remediated once detected?
+
+#### Adversarial Verdict
+
+| Verdict | Meaning | Action |
+|---------|---------|--------|
+| **STANDING** | Finding survived all challenges — real-world impact is credible and demonstrable | Proceed to report unchanged |
+| **DOWNGRADED** | Finding is real but impact is lower than initially assessed | Adjust severity downward, proceed to report |
+| **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact | Downgrade severity by one level, add explicit caveat to finding |
+| **WITHDRAWN** | Cannot construct a credible real-world attack scenario despite the technical truth of the bug | Drop from report; log internally as "withdrawn after adversarial review" with rationale |
+
+**Only STANDING, DOWNGRADED, and DISPUTED findings proceed to the report.** DISPUTED findings must include the specific doubt rationale so the reader can make their own judgment.
+
+#### Adversarial Output Format (internal, before reporting)
+
+```
+Finding: VULN-NNN — <class>
+Why wrong:       <strongest counter-argument against the finding>
+Real impact:     <concrete impact statement, or "theoretical only">
+Attack scenario: <1-2 sentence practical scenario, or "no credible scenario">
+Real-world:      VIABLE / MARGINAL / IMPRACTICAL — <reason>
+Production:      <impact on live systems>
+Adversarial Verdict: STANDING / DOWNGRADED / DISPUTED / WITHDRAWN — <rationale>
+```
+
+---
+
+### Step 7: Report Findings
 
 #### Severity Classification
 
@@ -269,6 +333,7 @@ Impact: <what an attacker can achieve>
 Evidence:
   <relevant code snippet>
 Judge: <one sentence — why this passed re-verification>
+Adversarial: <one sentence — why this survived the stress test> [STANDING | DOWNGRADED | DISPUTED]
 Remediation: <specific fix — not generic advice>
 Reference: references/<vuln>.md
 ```
@@ -288,7 +353,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.3
+Analyzer: llm-sast-scanner v1.4
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>
