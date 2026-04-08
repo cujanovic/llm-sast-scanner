@@ -245,11 +245,13 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 
 ---
 
-### Step 6: Adversarial Impact Validation
+### Step 6: Adversarial Impact Validation (Critical Findings Only)
 
-Every finding that passed the Judge (CONFIRMED or LIKELY) must now survive an adversarial stress test focused on real-world impact. The goal is to actively try to **disprove** each finding before it reaches the report.
+**Scope:** This step applies only to findings classified as **Critical** severity after Step 5. High, Medium, Low, and Informational findings that passed the Judge proceed directly to Step 7.
 
-For each surviving finding, work through ALL of the following:
+Every Critical finding that passed the Judge (CONFIRMED or LIKELY) must survive an adversarial stress test focused on real-world impact before it can be reported. The goal is to actively try to **disprove** each Critical finding — only those that withstand scrutiny are worth reporting at that severity.
+
+For each Critical finding, work through ALL of the following:
 
 #### 1. Why You Might Be Wrong
 - What assumptions are you making about the data flow, environment, or attacker capability?
@@ -288,12 +290,12 @@ For each surviving finding, work through ALL of the following:
 
 | Verdict | Meaning | Action |
 |---------|---------|--------|
-| **STANDING** | Finding survived all challenges — real-world impact is credible and demonstrable | Proceed to report unchanged |
-| **DOWNGRADED** | Finding is real but impact is lower than initially assessed | Adjust severity downward, proceed to report |
-| **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact | Downgrade severity by one level, add explicit caveat to finding |
+| **STANDING** | Finding survived all challenges — real-world impact is credible and demonstrable | Report as Critical |
+| **DOWNGRADED** | Finding is real but impact is lower than initially assessed | Demote to High (or lower as warranted), proceed to report |
+| **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact | Demote to High, add explicit caveat to finding |
 | **WITHDRAWN** | Cannot construct a credible real-world attack scenario despite the technical truth of the bug | Drop from report; log internally as "withdrawn after adversarial review" with rationale |
 
-**Only STANDING, DOWNGRADED, and DISPUTED findings proceed to the report.** DISPUTED findings must include the specific doubt rationale so the reader can make their own judgment.
+**Only STANDING, DOWNGRADED, and DISPUTED findings proceed to the report.** A Critical finding that is DOWNGRADED or DISPUTED loses its Critical severity — it is reported at High or below. DISPUTED findings must include the specific doubt rationale so the reader can make their own judgment.
 
 #### Adversarial Output Format (internal, before reporting)
 
