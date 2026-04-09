@@ -5,6 +5,7 @@ description: >
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
   code review of any language or framework. Covers 34 vulnerability classes across web, API, auth, mobile, and logic layers.
+  Accepts an optional comma-separated severity argument for adversarial validation, e.g. "llm-sast-scanner critical,high".
 metadata:
   version: "1.4.0"
   domain: application-security
@@ -31,6 +32,27 @@ This skill covers the following 34 vulnerability classes. Each has a dedicated r
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions |
 | **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, Denial of Service, CVE Patterns |
 | **Language/Platform** | PHP Security, Mobile Security (Android/iOS) |
+
+---
+
+## Arguments
+
+This skill accepts an optional severity argument that controls which findings go through **Step 6: Adversarial Impact Validation**.
+
+**Syntax:** `llm-sast-scanner [severity,severity,...]`
+
+| Invocation | Adversarial Validation Applied To |
+|------------|-----------------------------------|
+| `llm-sast-scanner critical,high,medium` | Critical, High, and Medium findings |
+| `llm-sast-scanner critical,high` | Critical and High findings |
+| `llm-sast-scanner critical` | Critical findings only |
+| `llm-sast-scanner high` | High findings only |
+| `llm-sast-scanner` | **None** — Step 6 is skipped entirely; all Judge-passed findings go straight to the report |
+
+- Severity values are **case-insensitive**: `Critical`, `CRITICAL`, and `critical` are all equivalent.
+- Multiple values are **comma-separated** with no spaces: `critical,high,medium`.
+- Only `critical`, `high`, `medium`, `low`, and `info` are valid values. Invalid values are ignored with a warning.
+- When no argument is provided, the scan runs Steps 1–5 and 7 (report) without adversarial validation.
 
 ---
 
@@ -245,13 +267,20 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 
 ---
 
-### Step 6: Adversarial Impact Validation (Critical Findings Only)
+### Step 6: Adversarial Impact Validation
 
-**Scope:** This step applies only to findings classified as **Critical** severity after Step 5. High, Medium, Low, and Informational findings that passed the Judge proceed directly to Step 7.
+**This step is controlled by the severity argument.** If no severity argument was provided, skip this step entirely and proceed to Step 7.
 
-Every Critical finding that passed the Judge (CONFIRMED or LIKELY) must survive an adversarial stress test focused on real-world impact before it can be reported. The goal is to actively try to **disprove** each Critical finding — only those that withstand scrutiny are worth reporting at that severity.
+**Scope:** This step applies only to findings whose severity matches the comma-separated severity argument provided at invocation. All other findings that passed the Judge proceed directly to Step 7.
 
-For each Critical finding, work through ALL of the following:
+For example:
+- `llm-sast-scanner critical,high` → validate Critical and High findings; Medium/Low/Info skip to Step 7
+- `llm-sast-scanner critical` → validate Critical findings only; everything else skips to Step 7
+- `llm-sast-scanner` → skip this step entirely
+
+Every matching finding that passed the Judge (CONFIRMED or LIKELY) must survive an adversarial stress test focused on real-world impact before it can be reported. The goal is to actively try to **disprove** each finding — only those that withstand scrutiny are worth reporting at that severity.
+
+For each matching finding, work through ALL of the following:
 
 #### 1. Why You Might Be Wrong
 - What assumptions are you making about the data flow, environment, or attacker capability?
@@ -290,12 +319,12 @@ For each Critical finding, work through ALL of the following:
 
 | Verdict | Meaning | Action |
 |---------|---------|--------|
-| **STANDING** | Finding survived all challenges — real-world impact is credible and demonstrable | Report as Critical |
-| **DOWNGRADED** | Finding is real but impact is lower than initially assessed | Demote to High (or lower as warranted), proceed to report |
-| **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact | Demote to High, add explicit caveat to finding |
+| **STANDING** | Finding survived all challenges — real-world impact is credible and demonstrable | Report at original severity |
+| **DOWNGRADED** | Finding is real but impact is lower than initially assessed | Demote by one or more severity levels, proceed to report |
+| **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact | Demote by one severity level, add explicit caveat to finding |
 | **WITHDRAWN** | Cannot construct a credible real-world attack scenario despite the technical truth of the bug | Drop from report; log internally as "withdrawn after adversarial review" with rationale |
 
-**Only STANDING, DOWNGRADED, and DISPUTED findings proceed to the report.** A Critical finding that is DOWNGRADED or DISPUTED loses its Critical severity — it is reported at High or below. DISPUTED findings must include the specific doubt rationale so the reader can make their own judgment.
+**Only STANDING, DOWNGRADED, and DISPUTED findings proceed to the report.** A finding that is DOWNGRADED or DISPUTED loses its original severity (e.g., Critical → High or below, High → Medium or below). DISPUTED findings must include the specific doubt rationale so the reader can make their own judgment.
 
 #### Adversarial Output Format (internal, before reporting)
 
