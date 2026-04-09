@@ -5,7 +5,7 @@ description: >
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
   code review of any language or framework. Covers 34 vulnerability classes across web, API, auth, mobile, and logic layers.
-  Accepts an optional comma-separated severity argument for adversarial validation, e.g. "llm-sast-scanner critical,high".
+  Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
   version: "1.4.0"
   domain: application-security
@@ -37,22 +37,26 @@ This skill covers the following 34 vulnerability classes. Each has a dedicated r
 
 ## Arguments
 
-This skill accepts an optional severity argument that controls which findings go through **Step 6: Adversarial Impact Validation**.
+This skill accepts optional tagged arguments using `key=value` syntax.
 
-**Syntax:** `llm-sast-scanner [severity,severity,...]`
+**Syntax:** `llm-sast-scanner [arg=value ...]`
+
+### `adv` — Adversarial Impact Validation severities
+
+Controls which severity levels go through **Step 6: Adversarial Impact Validation**.
 
 | Invocation | Adversarial Validation Applied To |
 |------------|-----------------------------------|
-| `llm-sast-scanner critical,high,medium` | Critical, High, and Medium findings |
-| `llm-sast-scanner critical,high` | Critical and High findings |
-| `llm-sast-scanner critical` | Critical findings only |
-| `llm-sast-scanner high` | High findings only |
+| `llm-sast-scanner adv=critical,high,medium` | Critical, High, and Medium findings |
+| `llm-sast-scanner adv=critical,high` | Critical and High findings |
+| `llm-sast-scanner adv=critical` | Critical findings only |
+| `llm-sast-scanner adv=high` | High findings only |
 | `llm-sast-scanner` | **None** — Step 6 is skipped entirely; all Judge-passed findings go straight to the report |
 
 - Severity values are **case-insensitive**: `Critical`, `CRITICAL`, and `critical` are all equivalent.
-- Multiple values are **comma-separated** with no spaces: `critical,high,medium`.
+- Multiple values are **comma-separated** with no spaces: `adv=critical,high,medium`.
 - Only `critical`, `high`, `medium`, `low`, and `info` are valid values. Invalid values are ignored with a warning.
-- When no argument is provided, the scan runs Steps 1–5 and 7 (report) without adversarial validation.
+- When `adv` is omitted, the scan runs Steps 1–5 and 7 (report) without adversarial validation.
 
 ---
 
@@ -269,14 +273,14 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 
 ### Step 6: Adversarial Impact Validation
 
-**This step is controlled by the severity argument.** If no severity argument was provided, skip this step entirely and proceed to Step 7.
+**This step is controlled by the `adv` argument.** If `adv` was not provided, skip this step entirely and proceed to Step 7.
 
-**Scope:** This step applies only to findings whose severity matches the comma-separated severity argument provided at invocation. All other findings that passed the Judge proceed directly to Step 7.
+**Scope:** This step applies only to findings whose severity matches the `adv=` value provided at invocation. All other findings that passed the Judge proceed directly to Step 7.
 
 For example:
-- `llm-sast-scanner critical,high` → validate Critical and High findings; Medium/Low/Info skip to Step 7
-- `llm-sast-scanner critical` → validate Critical findings only; everything else skips to Step 7
-- `llm-sast-scanner` → skip this step entirely
+- `llm-sast-scanner adv=critical,high` → validate Critical and High findings; Medium/Low/Info skip to Step 7
+- `llm-sast-scanner adv=critical` → validate Critical findings only; everything else skips to Step 7
+- `llm-sast-scanner` → no `adv` argument, skip this step entirely
 
 Every matching finding that passed the Judge (CONFIRMED or LIKELY) must survive an adversarial stress test focused on real-world impact before it can be reported. The goal is to actively try to **disprove** each finding — only those that withstand scrutiny are worth reporting at that severity.
 
