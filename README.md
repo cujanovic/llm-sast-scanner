@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 34 vulnerability classes.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 35 vulnerability classes.
 
 ---
 
@@ -53,11 +53,12 @@ llm-sast-scanner/              ← repo root
 ├── README.md
 └── llm-sast-scanner/          ← skill directory (copy this)
     ├── SKILL.md               # 6-step workflow + Judge verification
-    └── references/            # 34 vulnerability knowledge bases
+    └── references/            # 35 vulnerability knowledge bases
         ├── xss.md
         ├── sql_injection.md
         ├── path_traversal_lfi_rfi.md
-        └── ... (34 files total)
+        ├── client_side_path_traversal.md
+        └── ... (35 files total)
 ```
 
 ### SKILL.md
@@ -76,7 +77,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 
 ## Vulnerability Coverage
 
-34 reference files covering the following categories:
+35 reference files covering the following categories:
 
 ### Injection
 | File | Vulnerability |
@@ -116,6 +117,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 |------|--------------|
 | `ssrf.md` | Server-Side Request Forgery |
 | `path_traversal_lfi_rfi.md` | Path Traversal, LFI, RFI (CWE-22) |
+| `client_side_path_traversal.md` | Client Side Path Traversal (CSPT) across React/Next.js/Vue/Angular/SvelteKit/Nuxt/Ember/SolidStart |
 | `insecure_deserialization.md` | Insecure Deserialization |
 | `arbitrary_file_upload.md` | Arbitrary File Upload |
 | `jndi_injection.md` | JNDI Injection (Log4Shell class) |
