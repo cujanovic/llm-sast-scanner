@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 35 vulnerability classes across web, API, auth, mobile, and logic layers.
+  code review of any language or framework. Covers 37 vulnerability classes across web, API, auth, mobile, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.5.0"
+  version: "1.7.0"
   domain: application-security
-  references: 35 vulnerability knowledge bases
+  references: 37 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,14 +22,14 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 35 vulnerability classes. Each has a dedicated reference file loaded on demand:
+This skill covers the following 37 vulnerability classes. Each has a dedicated reference file loaded on demand:
 
 | Category | Vulnerabilities |
 |----------|----------------|
-| **Injection** | SQL Injection, XSS, SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection |
+| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection |
 | **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation |
 | **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary |
-| **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions |
+| **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions |
 | **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, Denial of Service, CVE Patterns |
 | **Language/Platform** | PHP Security, Mobile Security (Android/iOS) |
 
@@ -83,6 +83,8 @@ references/authentication_jwt.md     — Auth flaws, JWT weaknesses
 references/csrf.md                   — Cross-site request forgery
 references/path_traversal_lfi_rfi.md — Path traversal, LFI/RFI
 references/client_side_path_traversal.md — Client Side Path Traversal (CSPT) across React/Next/Vue/Angular/SvelteKit/Nuxt/Ember/SolidStart
+references/server_side_prototype_pollution.md — Server-Side Prototype Pollution (Node.js / Deno / NPM gadget catalog)
+references/client_side_prototype_pollution.md — Client-Side Prototype Pollution (BlackFan PP/gadget catalog, browser-API gadgets, sanitizer bypasses)
 references/ssti.md                   — Server-side template injection
 references/xxe.md                    — XML external entity
 references/insecure_deserialization.md    — Insecure deserialization
@@ -113,7 +115,7 @@ references/session_fixation.md           — Session fixation
 
 **Loading strategy:**
 - For a targeted review (e.g., "check for SQL injection"), load only the relevant reference(s).
-- For a full audit, load all 35 references and scan systematically.
+- For a full audit, load all 37 references and scan systematically.
 - Always load references for the top OWASP risks even if not explicitly requested.
 
 ---
@@ -389,7 +391,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.5
+Analyzer: llm-sast-scanner v1.7
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>

@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 35 vulnerability classes.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 37 vulnerability classes.
 
 ---
 
@@ -53,12 +53,14 @@ llm-sast-scanner/              ← repo root
 ├── README.md
 └── llm-sast-scanner/          ← skill directory (copy this)
     ├── SKILL.md               # 6-step workflow + Judge verification
-    └── references/            # 35 vulnerability knowledge bases
+    └── references/            # 37 vulnerability knowledge bases
         ├── xss.md
         ├── sql_injection.md
         ├── path_traversal_lfi_rfi.md
         ├── client_side_path_traversal.md
-        └── ... (35 files total)
+        ├── server_side_prototype_pollution.md
+        ├── client_side_prototype_pollution.md
+        └── ... (37 files total)
 ```
 
 ### SKILL.md
@@ -77,13 +79,14 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 
 ## Vulnerability Coverage
 
-35 reference files covering the following categories:
+37 reference files covering the following categories:
 
 ### Injection
 | File | Vulnerability |
 |------|--------------|
 | `sql_injection.md` | SQL Injection (CWE-89) |
 | `xss.md` | Cross-Site Scripting (CWE-79) |
+| `client_side_prototype_pollution.md` | Client-Side Prototype Pollution (CSPP) — BlackFan PP/gadget catalog, browser-API gadgets, sanitizer bypasses (CWE-1321 / 79 / 94 / 400 / 471) |
 | `ssti.md` | Server-Side Template Injection |
 | `nosql_injection.md` | NoSQL Injection |
 | `graphql_injection.md` | GraphQL Injection / Introspection Abuse |
@@ -118,6 +121,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `ssrf.md` | Server-Side Request Forgery |
 | `path_traversal_lfi_rfi.md` | Path Traversal, LFI, RFI (CWE-22) |
 | `client_side_path_traversal.md` | Client Side Path Traversal (CSPT) across React/Next.js/Vue/Angular/SvelteKit/Nuxt/Ember/SolidStart |
+| `server_side_prototype_pollution.md` | Server-Side Prototype Pollution (SSPP) — sinks + Node.js / Deno / NPM gadget catalog (CWE-1321) |
 | `insecure_deserialization.md` | Insecure Deserialization |
 | `arbitrary_file_upload.md` | Arbitrary File Upload |
 | `jndi_injection.md` | JNDI Injection (Log4Shell class) |
