@@ -334,6 +334,91 @@ const getData = query(async (dataId: string) => {
 
 **SAFE sources**: `useParams()` (single segment) and `useLocation().pathname`. Both preserve percent-encoding.
 
+### Remix
+
+Remix is built on React Router, so the client-side decoding behaviour is **identical to React Router** — `useParams()` returns fully decoded values (`%2F` → `/`, `%2E%2E` → `..`, double-encoding via decode-plus-replace). The interesting wrinkles are server-side: `loader({ params })` and `action({ params })` receive params from the Remix router which also runs them through `decodeURIComponent`, so the same decoded values flow into server `fetch`/database/internal-API calls — a secondary-context PT path identical in shape to SvelteKit's `+page.server.ts`.
+
+```typescript
+// VULN — client-side CSPT
+// app/routes/users.$userId.tsx
+export default function UserPage() {
+  const { userId } = useParams();                 // "../../admin"
+  const { data } = useFetcher();
+  useEffect(() => { fetcher.load(`/api/users/${userId}/profile`); }, [userId]);
+}
+```
+
+```typescript
+// CRITICAL — secondary-context PT in a server loader/action
+// app/routes/users.$userId.tsx
+export const loader = async ({ params }: LoaderFunctionArgs) => {
+  const userId = params.userId;                   // decoded; e.g., "../../admin"
+  const res = await fetch(`http://internal-service.local/users/${userId}`);
+  return json(await res.json());
+};
+
+// app/routes/api.content.$.tsx  — splat route (`$` catch-all)
+export const loader = async ({ params }: LoaderFunctionArgs) => {
+  const path = params["*"];                       // decoded; literal `../` works
+  return fetch(`http://backend/${path}`);          // SSRF / secondary PT
+};
+```
+
+**Resource routes** (`app/routes/api.*.ts` that export `loader`/`action` without a default component) are the highest-risk Remix surface — they often proxy to internal APIs and inherit hooks/auth less consistently than page routes.
+
+**SAFE sources**: like React Router, only `useLocation().pathname` preserves `%2F` encoding; server-side, treat `params.*` as decoded user input.
+
+### Astro
+
+Astro pages use file-based routing with `[param]` and `[...slug]` syntax. `Astro.params` is populated by Astro's router; values are URL-decoded once via `decodeURIComponent`, so behaviour is **similar to SvelteKit's `+page.ts`** — `%2F` decodes to `/` and lands in the param value.
+
+```astro
+---
+// VULN — Astro page or endpoint reading decoded params
+// src/pages/users/[userId].astro  (or src/pages/api/users/[userId].ts)
+const { userId } = Astro.params;                  // decoded
+const res = await fetch(`http://internal/users/${userId}`);
+const data = await res.json();
+---
+```
+
+Astro **API routes** (`src/pages/api/**/*.ts`) run on the server and execute with full network access, so any traversal in `Astro.params` reaching an internal `fetch` is a secondary-context PT, analogous to Next.js route handlers and SvelteKit `+server.ts`.
+
+**SAFE sources**: there is no preserved-encoding alternative in Astro's official API; recommend validating param shape against a regex or matcher before interpolation, equivalent to SvelteKit's param matchers.
+
+### TanStack Router / TanStack Start
+
+TanStack Router supports both decoded params and validated search-params via `parseSearch`/`stringifySearch`. By default `useParams()` and `useSearch()` return decoded values; the safer pattern is to declare a Zod/Valibot schema in `validateSearch` / `parseParams`, which rejects values not matching the schema before the route renders.
+
+```typescript
+// VULN — default useParams without validation
+const { userId } = Route.useParams();             // decoded
+fetch(`/api/users/${userId}`);
+
+// SAFE — typed param validation at route definition
+export const Route = createFileRoute('/users/$userId')({
+  parseParams: ({ userId }) => ({
+    userId: z.string().regex(/^[\w-]+$/).parse(userId),
+  }),
+});
+```
+
+### Qwik City
+
+`useLocation()` and route params expose decoded values; route `loader$()` / `action$()` run on the server. Conceptually identical to SvelteKit's load functions — pair decoded params with `fetch` for client-side CSPT or with server-side internal fetches for secondary PT.
+
+### HTMX / Alpine.js (non-SPA frameworks)
+
+Apps using HTMX (`hx-get="${url}"`) or Alpine.js (`x-data` / `:href="..."`) often interpolate values from the URL or DOM attributes into the request URL. The decoding is whatever the browser does to the attribute value (which mirrors the original URL), so encoded `%2F`/`%2E%2E` in attribute templates can be a CSPT primitive when the attribute interpolation runs on the client.
+
+```html
+<!-- VULN — HTMX hx-get built from a search param read by Alpine -->
+<div x-data="{ id: new URL(location).searchParams.get('id') }">
+  <button :hx-get="`/api/items/${id}`" hx-trigger="click">Load</button>
+</div>
+<!-- ?id=..%2F..%2Fadmin → hx-get hits /api/admin -->
+```
+
 ## Decoding Cheat Sheet — Path Params
 
 | Framework | Source | %2F → /? | %2E%2E → ..? | %252F → /? | Splat/catch-all literal `../`? |
@@ -404,7 +489,109 @@ When a decoded client value is forwarded to a server handler that interpolates i
 | Nuxt | `getRouterParam(event, k, { decode: true })` → `$fetch()` | YES (opt-in) | SSRF to internal services |
 | SvelteKit | `+page.server.ts` / `+server.ts` `params.*` → `fetch()` | YES | SSRF, BYPASSES `hooks.server.ts` (auth middleware ineffective) |
 | SolidStart | `query(... "use server")` args → `fetch()` | passthrough of client string | SSRF if client value already decoded |
+| Remix | `loader({ params })` / `action({ params })` / resource routes → `fetch()` | YES | SSRF / secondary PT; resource routes (`api.*.ts`) most exposed |
+| Astro | `Astro.params` in `src/pages/api/**/*.ts` → `fetch()` | YES | SSRF / secondary PT |
+| Qwik City | `routeLoader$` / `routeAction$` params → `fetch()` | YES | SSRF / secondary PT |
 | Nuxt | `revive-payload.client.js` island key → `$fetch` | stored | Stored CSPT (CVE-2025-59414) |
+
+### Receiver-side decoding in server frameworks
+
+Independent of which SPA framework the client uses, the *receiving* server framework also decodes path params. Treat any `req.params.*` / `request.params.*` / `ctx.params.*` interpolated into an internal `fetch` or filesystem path as a secondary-context PT sink.
+
+| Server framework | Path-param API | Decoded? | Notes |
+|------------------|----------------|:--------:|-------|
+| Express (`/users/:id`) | `req.params.id` | YES — per-segment `decodeURIComponent` | `path-to-regexp` segment match prevents `%2F` from creating sub-segments but the final value is decoded |
+| Fastify (`/users/:id`) | `request.params.id` | YES — `decodeURIComponent` per segment | Same shape as Express |
+| Koa / `@koa/router` | `ctx.params.id` | YES | Same shape |
+| Hapi (`/users/{id}`) | `request.params.id` | YES | `request.params['id*']` (multi-segment) also decoded; literal `../` works |
+| NestJS (`@Param('id')`) | controller-method arg | YES (inherits Express/Fastify under the hood) | `@Param('id', new ParseIntPipe())`-style pipes are an effective allowlist defense |
+| ASP.NET Core (`{id}`) | `[FromRoute] string id` | YES (`UrlDecoder`) | `[Route("api/files/{*path}")]` catch-all keeps literal `/` characters |
+| Spring (`@PathVariable`) | method arg | YES | `@PathVariable("path") String path` decodes `%2F` post-routing |
+| Flask (`<string:id>`) / FastAPI (`{id}`) | view-function arg | YES | Path converters (`<int:id>`, `<uuid:id>`) reject traversal at routing time |
+| Rails (`params[:id]`) | controller method | YES | `constraints: { id: /\d+/ }` rejects traversal at routing time |
+
+The strongest receiver-side defense in every framework is a **route-level constraint** (NestJS pipes, Spring `@PathVariable` + `@Pattern`, Express middleware regex, Rails `constraints`, Flask/FastAPI typed path converters, SvelteKit param matchers): the route fails to match and the handler never runs.
+
+## Additional Client-Side Sinks
+
+`fetch` is the canonical sink, but every HTTP/URL-aware client API resolves `../` the same way once it sees a path. Treat any of the following as a CSPT sink when fed a decoded param interpolated into a URL template:
+
+```javascript
+// All resolve `../` in the path portion before sending
+fetch(`/api/x/${userId}`);
+axios.get(`/api/x/${userId}`);
+new XMLHttpRequest().open('GET', `/api/x/${userId}`);
+new WebSocket(`/ws/${userId}`);                  // ws-relative URLs resolve `../` the same way
+new EventSource(`/sse/${userId}`);
+navigator.sendBeacon(`/beacon/${userId}`, body);
+caches.match(`/api/x/${userId}`);                // service-worker cache key — pollutes the cache lookup
+self.fetch(`/api/x/${userId}`);                  // inside a ServiceWorker
+self.registration.showNotification('', { data: { url: `/api/x/${userId}` }});
+
+// Library wrappers — same underlying primitive
+useSWR(`/api/x/${userId}`, fetcher);
+useQuery({ queryKey: ['x', userId], queryFn: () => fetch(`/api/x/${userId}`) });
+apolloClient.query({ query: GET_X, variables: { id: userId }, uri: `/graphql/${userId}` });
+```
+
+### `new URL(path, base)` — sometimes a defense, sometimes a sink
+
+`new URL` is a context-sensitive construct that often differs from string concatenation:
+
+```javascript
+// Effectively the same as string concat — resolves `../`
+const u = new URL(`/api/x/${userId}`, location.origin);
+fetch(u);
+
+// SAFER — encodes path segment, but ONLY if the segment is used in pathname,
+// not concatenated into the path string template
+const u = new URL(location.origin);
+u.pathname = `/api/x/${encodeURIComponent(userId)}`;
+fetch(u);
+
+// SAFE — URLSearchParams encodes query values
+const u = new URL('/api/x', location.origin);
+u.searchParams.set('id', userId);
+fetch(u);                                        // ?id=..%2F..%2Fadmin (encoded, no traversal)
+```
+
+The pattern to look for: `URLSearchParams.set` / `URL.pathname = encodeURIComponent(...)` is generally safe; raw template-literal interpolation into `new URL(template, base)` is NOT.
+
+### Open-redirect via CSPT (`location.href` / `location.assign` / `location.replace`)
+
+A decoded param interpolated into a navigation sink is an open-redirect primitive:
+
+```javascript
+// VULN — decoded query param drives navigation
+const next = useSearchParams()[0].get('next');   // "//evil.tld/phishing" or "../../auth/logout"
+location.assign(next);
+location.href = next;
+window.open(next);
+```
+
+Combine with CSPT: a redirected fetch returning a URL string that flows into `location.assign` chains CSPT → open redirect → credential theft via spoofed login page on the attacker domain.
+
+## CSPT → CSRF Chain (Doyensec / `cspt2csrf`)
+
+Doyensec published a practical exploitation method that uses a CSPT primitive to *redirect a state-changing API call* to a different endpoint on the same origin. Because the browser still attaches the user's session cookies to the redirected request, CSPT becomes a fully-functional CSRF primitive even when the target API uses `SameSite=Lax`/`Strict` cookies — the request originates from the legitimate first-party page.
+
+Typical chain:
+
+1. Application has a Settings page that issues `fetch('/api/users/me/email', { method: 'POST', body: ... })`.
+2. The endpoint URL is built using a decoded path param: `fetch(\`/api/users/\${userId}/email\`, …)`.
+3. Attacker crafts a link `https://victim/settings/..%2F..%2Fadmin%2Fdelete-all` that, when the victim visits while logged in, causes the POST to land on `/api/admin/delete-all` instead of the user's own email endpoint.
+4. Because the request shares the legitimate session, server-side CSRF tokens (if any) are also sent by the first-party page — bypassing the standard CSRF defenses.
+
+Detection rule: flag any state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) `fetch` whose URL template interpolates a decoded source as a high-priority CSPT-to-CSRF finding, NOT just a CSPT-to-data-disclosure finding.
+
+## Tooling for Triage
+
+These are dynamic-testing tools, useful when the user explicitly asks for runtime verification.
+
+- **Burp Suite DOM Invader** (ships with Burp's built-in browser) — its CSPT panel automatically mutates dynamic path segments with `%2F` / `%5C` / `%252F` / `%255C` / literal `../` and observes whether subsequent `fetch`/XHR/WebSocket URLs traverse to a different endpoint. The fastest way to confirm a real target.
+- **Caido `cspt2csrf` extension** — implements the Doyensec CSPT-to-CSRF chain; given a CSPT source, it enumerates reachable state-changing endpoints and generates a working CSRF PoC link.
+- **Caido** generally is the preferred CSPT triage proxy today; its Match-and-Replace + Response Highlighter make it straightforward to trace decoded-param → fetch flows.
+- Manual confirmation: open DevTools → Network, set a breakpoint on `fetch`/`XMLHttpRequest.open`, navigate to the crafted URL, and check the *resolved* request URL after the browser collapses `../`.
 
 ## Detection Rules
 

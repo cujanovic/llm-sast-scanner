@@ -7,7 +7,7 @@ description: >
   code review of any language or framework. Covers 37 vulnerability classes across web, API, auth, mobile, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.7.0"
+  version: "1.7.1"
   domain: application-security
   references: 37 vulnerability knowledge bases
 ---
@@ -391,7 +391,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.7
+Analyzer: llm-sast-scanner v1.7.1
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>

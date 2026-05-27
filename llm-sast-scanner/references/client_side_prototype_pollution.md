@@ -144,6 +144,42 @@ new URL('#');                                                           // reads
 
 ---
 
+## Realm Isolation — Pollution Does Not Cross Realms
+
+Each JavaScript *realm* has its own `Object.prototype`, `Array.prototype`, etc. Pollution in one realm does NOT reach another. Relevant boundaries when triaging:
+
+| Boundary | Same realm? | Notes |
+|----------|:----------:|-------|
+| Main thread vs `<iframe>` | NO | Cross-origin iframes are clearly isolated; **same-origin iframes are also a separate realm** — pollution must be reproduced on each iframe's `Object.prototype` independently |
+| Main thread vs `Worker` / `SharedWorker` | NO | Pollution in main thread does NOT reach the worker; the worker has its own prototypes |
+| Main thread vs `ServiceWorker` | NO | Separate realm; ServiceWorker controls fetch interception but cannot read main-thread pollution |
+| Main thread vs `vm.runInNewContext` / `ShadowRealm` | NO | Each new realm has fresh prototypes |
+| Document via `document.open()` / nested same-origin frames after `document.write` | depends | Typically a *new* realm, but legacy "wide-open" iframes can share — verify empirically |
+
+**Triage implication**: a CSPP finding that proves pollution in the main thread does NOT automatically extend to gadgets that live in a `Worker`, `<iframe>`, or `ServiceWorker`. To chain into those, the attacker needs a separate pollution source reachable from that realm (e.g., `postMessage` payload merged in the iframe, hash payload parsed in a worker). Conversely, an iframe that hosts a vulnerable URL parser pollutes only its own realm — the parent page is safe unless it merges values back from the iframe via `postMessage` into its own real object.
+
+## Other Pollution-Adjacent Sinks (often missed)
+
+### `Object.defineProperty(target, userKey, descriptor)`
+
+When `userKey` is attacker-controlled and `target` is (or can be tricked into being) `Object.prototype`, this is a pollution write:
+
+```javascript
+// VULN — userKey is attacker-controlled; target reachable as Object.prototype
+Object.defineProperty(target, userKey, { value: userValue });
+// e.g., userKey = "isAdmin", target = ({}).__proto__ → pollutes Object.prototype.isAdmin
+```
+
+Beware: `Object.defineProperty` can set non-enumerable / non-configurable descriptors, which makes the pollution *harder to clean up* than a plain assignment — a frozen-after-pollution prototype is effectively permanent for the realm lifetime.
+
+### `Object.setPrototypeOf(target, attackerObj)`
+
+Not a pollution write per se, but a related primitive: attacker controls what `target`'s prototype becomes. If `target` is a long-lived shared object, this is functionally equivalent to pollution for that object's consumers.
+
+### Proxy traps reading `Object.prototype` defaults
+
+A `Proxy` whose `get` trap falls through to `Reflect.get(target, prop)` will return polluted defaults exactly like a plain object — Proxies do not insulate from prototype pollution unless the trap explicitly returns `undefined` for non-own properties.
+
 ## Vulnerable URL/Hash Parser Catalog (BlackFan PP table)
 
 These libraries parse `location.search` and/or `location.hash` into a nested object that walks `__proto__` or `constructor[prototype]` keys. Inclusion means a bare visit to a crafted URL pollutes `Object.prototype` for the rest of the page session.
@@ -487,6 +523,36 @@ Replaces the unsafe `JSON.parse(JSON.stringify(obj))` and ad-hoc deep-merge snip
 const cache = new Map();
 cache.set(userKey, userValue);                           // Map has no prototype-chain lookups
 ```
+
+### SAFE — `Reflect.set(target, key, value)` and `Object.defineProperty` (with care)
+
+`Reflect.set(target, '__proto__', x)` writes `__proto__` as an *own* data property of `target` — it does NOT walk the prototype chain. The same holds for `Object.defineProperty(target, '__proto__', { value: x, writable: true, enumerable: true, configurable: true })`. Both are safer than bracket assignment when the key is attacker-controlled:
+
+```javascript
+// Bracket assignment — pollutes when key is "__proto__"
+target['__proto__'] = src;                        // VULN
+
+// Reflect.set — assigns as own property, does NOT pollute
+Reflect.set(target, key, value);                  // SAFE for prototype-pollution
+```
+
+However, `Object.defineProperty(target, userKey, { value })` is **still a sink** if the *value* is later read by inherited-property logic — it sets an *own* property of `target`, but if `target` is itself `Object.prototype` (or any shared prototype), that own property propagates to every inheritor. Only the bracket-key vector is mitigated; the prototype-shared-object vector is not.
+
+### SAFE — `Object.assign(target, src)` / spread `{ ...src }` / `Object.fromEntries`
+
+A common false-positive class: these built-ins do **not** behave like `_.merge`. Specifically:
+
+| Operation | Pollutes when `src` is `JSON.parse('{"__proto__":{"x":1}}')`? | Why |
+|-----------|:--:|------|
+| `_.merge(target, src)` / hand-rolled `for…in` recursive copy | **YES** | Walks nested `__proto__` key as a regular property name |
+| `Object.assign(target, src)` | **No** | Copies own enumerable properties; the `__proto__` of `src` becomes a *getter/setter trigger* on `target`'s prototype assignment, not a pollution write |
+| `{ ...src }` (object spread) | **No** | Same semantics as `Object.assign` for own-property copying |
+| `Object.fromEntries(Object.entries(src))` | **No** | Same — only own enumerable string-keyed properties |
+| `structuredClone(src)` | **No** | Does not walk the prototype chain |
+
+The dangerous step is *recursive* copying into a *real* object (`target`'s nested objects also receive merged keys). `Object.assign`, spread, and `Object.fromEntries` are shallow — they never recurse, so even an attacker `__proto__` key cannot reach `Object.prototype` through them. If a finding pivots on one of these built-ins as the only sink, downgrade to FALSE POSITIVE unless the value is subsequently passed to a recursive merge.
+
+**Caveat — `__proto__` setter on a real object**: `Object.assign(target, { __proto__: { x: 1 } })` does NOT pollute `Object.prototype`, but it DOES change `target`'s prototype to `{ x: 1 }`. This breaks `target`'s prototype chain (a different bug class — type confusion / prototype hijack on that specific object) but does NOT affect the global `Object.prototype`. Treat as a separate (usually lower-severity) finding when the target is a shared service object.
 
 ### SAFE — `is-plain-object` / `is-extendable` check before recursing
 

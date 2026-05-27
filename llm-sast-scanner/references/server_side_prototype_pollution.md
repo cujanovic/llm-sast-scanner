@@ -225,6 +225,88 @@ BSON.deserialize(buffer, options);                  // options.evalFunctions pol
 // (see Parse Server CVE-2022-24760 / -39396 / -41878 / -41879 / -36475)
 ```
 
+### Pattern 9b — NestJS / `class-transformer.plainToClass`
+
+NestJS commonly deserializes request bodies into DTO classes via `class-transformer.plainToClass` / `plainToInstance`. With default options, unknown keys on the source object are dropped, but `excludeExtraneousValues: false` (the default) or a custom transform that recursively walks nested objects pairs poorly with `_.merge`-style helpers inside service classes:
+
+```typescript
+// VULN — DTO bypass via __proto__ + downstream deep merge
+@Post('profile')
+update(@Body() body: UpdateProfileDto) {
+  // body is a UpdateProfileDto instance; class-transformer dropped unknown keys
+  // BUT body still has __proto__ as an own property if the request was JSON-parsed
+  // and downstream service uses _.merge(this.userConfig, body)
+  this.users.applyConfig(body);  // service performs recursive merge → pollution
+}
+```
+
+The safe pattern is to combine `class-validator` `@IsString()` / `@IsObject()` decorators with the `whitelist: true` + `forbidNonWhitelisted: true` `ValidationPipe` global config — this rejects any payload containing `__proto__` outright.
+
+```typescript
+// SAFE — NestJS global ValidationPipe with strict whitelist
+app.useGlobalPipes(new ValidationPipe({
+  whitelist: true,
+  forbidNonWhitelisted: true,
+  forbidUnknownValues: true,
+  transform: true,
+  transformOptions: { excludeExtraneousValues: true },
+}));
+```
+
+### Pattern 9c — Fastify schema-based defense (built-in)
+
+Fastify validates `body` / `query` / `params` against a JSON schema via Ajv before the handler runs. When schemas are declared and `additionalProperties: false` (the default for `removeAdditional: 'all'`) is configured, attacker-supplied `__proto__` keys are stripped *before* the request reaches user code:
+
+```typescript
+// SAFE — Fastify route with strict schema (default Ajv config strips unknown keys)
+fastify.post('/users', {
+  schema: {
+    body: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['name'],
+      properties: { name: { type: 'string' } },
+    },
+  },
+}, async (request) => {
+  // request.body is schema-validated and stripped — pollution attempts are gone
+  return userService.create(request.body);
+});
+```
+
+This is the most effective framework-level defense against SSPP available out-of-the-box. Recommend it in remediation guidance for any Fastify app.
+
+### Pattern 10 — GraphQL resolvers passing `args` to a merge
+
+```typescript
+// VULN — GraphQL args spread into a merge without schema-level rejection
+const resolvers = {
+  Mutation: {
+    updateUser: (_, args, ctx) => {
+      _.merge(ctx.user, args.input);     // args.input may contain __proto__
+      return ctx.user;
+    },
+  },
+};
+```
+
+Many GraphQL servers (Apollo, Mercurius, GraphQL Yoga) do NOT strip `__proto__` from input scalar values by default — schema-level `input` types validate the *shape* but allow extra keys to pass through if the input type uses a `JSON` / `JSONObject` custom scalar.
+
+### Pattern 11 — ORM `.update()` / `.upsert()` with attacker body (Sequelize / TypeORM / Mongoose / Prisma)
+
+```javascript
+// VULN — Sequelize
+await User.update(req.body, { where: { id } });
+
+// VULN — TypeORM
+await userRepository.update(id, req.body);
+
+// VULN — Mongoose
+await User.findByIdAndUpdate(id, req.body);
+```
+
+When the ORM internally walks attacker-controlled keys through a recursive merge (Mongoose `$set`/nested-update operators are the most exposed), a `__proto__` payload can reach the prototype. Defense: explicit field allowlist or DTO-validation pipe *before* the ORM call; Prisma's strict-typed model interfaces are immune unless `Prisma.JsonValue` is used for an attacker-controlled column.
+
 ### Pattern 9 — Application-level authorization / feature flags (business-logic gadget)
 
 The "gadget" does not have to live in stdlib or a dependency — application-level boolean/role checks that read an *undefined* property and then trust a fallback are themselves gadgets. This is the canonical PortSwigger "privilege escalation via SSPP" lab and the Kirill89 `prototype-pollution-explained` chat-server demo.
@@ -566,6 +648,61 @@ After sending: re-submit a UTF-7-encoded body and observe whether the server now
 - If reflection (#1) fails, run #2/#3/#4 before concluding SSPP is absent — many apps merge user input into a config object that is never echoed back, so absence of reflection is not absence of pollution.
 
 ---
+
+## Runtime Considerations (Bun / Cloudflare Workers / Deno Deploy / edge)
+
+Not every Node-shaped runtime has the same gadget surface. Knowing the runtime narrows severity:
+
+| Runtime | `child_process.*` available? | `fetch` gadgets reachable? | Typical max-impact |
+|---------|:---------------------------:|:--------------------------:|--------------------|
+| Node.js | YES | YES | ACI / RCE via polluted `shell` / `NODE_OPTIONS` / `execArgv` |
+| Bun | YES (`Bun.spawn`, `child_process` shim) | YES | ACI / RCE — same class as Node |
+| Deno | NO (default) — only with `--allow-run` | YES (with `--allow-net`) | SSRF; ACE only with permission |
+| Cloudflare Workers | NO | YES (subrequest fetch) | SSRF to internal services, info disclosure |
+| Deno Deploy / Vercel Edge | NO | YES | SSRF |
+| AWS Lambda (Node runtime) | YES | YES | ACI / RCE — same as Node, but per-invocation memory means pollution does NOT persist across invocations |
+
+For edge runtimes (Cloudflare Workers, Deno Deploy, Vercel Edge), the RCE-class chain is unreachable; cap severity at the SSRF gadget class. For AWS Lambda the *per-invocation* memory isolation means pollution only affects the current request — re-pollution is required for each cold start.
+
+## `process.env` Pollution — Common False Alarm
+
+Polluting `Object.prototype.NODE_ENV` (or any other env-named property) does NOT change `process.env.NODE_ENV`. Node's `process.env` is a host-backed object whose property access is implemented via a libuv-backed getter, not regular prototype-chain lookup. Reads against keys not present in the OS environment return `undefined` — they do NOT fall through to `Object.prototype`.
+
+```javascript
+Object.prototype.NODE_ENV = 'production';
+process.env.NODE_ENV;                            // still undefined — host-backed access
+```
+
+However, pollution of `Object.prototype.NODE_OPTIONS` DOES land when downstream code does `child_process.spawn(cmd, args, { env: { ...process.env } })` and the spawned process inherits the empty-spread, then reads `env.NODE_OPTIONS` through normal prototype lookup. The danger is in *spreading* env into a plain object before passing it to a gadget, not in `process.env` itself.
+
+Treat findings that pivot on `process.env.X` being polluted directly as FALSE POSITIVE; findings that pivot on `{...process.env}` being passed to `child_process.*` are CONFIRMED.
+
+## Object Copying Built-Ins — Pollution-Safety Cheat Sheet
+
+A common false-positive class. Mirror of the CSPP cheat sheet, restated for server-side triage:
+
+| Operation | Pollutes when `src = JSON.parse('{"__proto__":{"x":1}}')`? |
+|-----------|:---:|
+| `_.merge` / `_.mergeWith` / `_.defaultsDeep` / hand-rolled `for…in` recursive | **YES** |
+| `Object.assign(target, src)` | **No** (shallow, own enumerable) |
+| `{ ...src }` (object spread) | **No** |
+| `Object.fromEntries(Object.entries(src))` | **No** |
+| `structuredClone(src)` | **No** (does not walk prototype chain) |
+| `Reflect.set(target, key, value)` | **No** (writes own property of target) |
+| `target[key] = value` with attacker `key` | **YES** (if `key` is `__proto__` and `target` has a real prototype) |
+
+Recommend `structuredClone` / `Reflect.set` / shallow-spread in remediation when the operation does not need nested copying; recommend `lodash` / `deepmerge` `>= safe-version` *with strict allow-listed keys* when nested merging is required.
+
+## Named Source-Code Tools (research analyzers)
+
+For deeper static analysis beyond CodeQL, these academic / open-source tools target SSPP specifically:
+
+- **Silent Spring** (Shcherbakov et al., USENIX 2023) — `https://github.com/KTH-LangSec/silent-spring` — CodeQL-based pipeline that systematically detects pollution sinks and matches them against the Node.js stdlib gadget set. Produces ranked findings; underpins many of the table entries above.
+- **GHunter** (Cornelissen et al., USENIX 2024) — `https://github.com/KTH-LangSec/ghunter` — universal prototype-pollution gadget detector across Node.js and Deno runtimes. Outputs the gadget catalogs mirrored in this reference.
+- **Dasty** — `https://github.com/KTH-LangSec/Dasty` — automated pipeline for finding SSPP gadgets in NPM packages. The NPM-package table in this reference (better-queue, fluent-ffmpeg, gh-pages, cross-spawn, nodemailer, …) is largely Dasty-discovered.
+- **UoPGadget** — `https://github.com/jackfromeast/UoPGadget` — Undefined-Oriented Programming gadget detector specialised for template-engine ACE chains (ejs, pug, doT, hamlet, mote, jade, ect, ractive.js, saker, dustjs).
+
+When the user asks for "deep" SSPP triage on a real codebase, recommending one of these tools alongside CodeQL is generally higher-value than a hand-rolled grep.
 
 ## CodeQL Queries (cross-reference for triagers)
 
