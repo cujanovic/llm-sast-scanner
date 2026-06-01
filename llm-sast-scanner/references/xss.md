@@ -261,6 +261,14 @@ Context and sink together determine whether execution occurs. Encode precisely f
 - **SAFE**: `element.textContent = userInput`, `element.innerText = userInput`
 - **SAFE**: React JSX `<div>{userInput}</div>` — auto-escaped by React
 
+### URL-Scheme Sinks (`javascript:` / `data:` class)
+Auto-escaping protects HTML *text/attribute* context but NOT a URL that is later navigated or used as a script/iframe source. Treat any user-controlled value flowing into an href/src/action-like sink as a scheme-injection sink unless the scheme is allowlisted to `http(s)`/`mailto`/`tel`.
+- **VULN**: `<a href={userUrl}>` / `window.location = userUrl` / `location.href = userUrl` / `el.src = userUrl` where `userUrl` may be `javascript:...` or `data:text/html,...`
+- **VULN**: `<iframe src={userUrl}>`, `<form action={userUrl}>`, `<object data={userUrl}>`, `el.setAttribute('href', userUrl)`
+- **VULN**: serving/returning fetched or uploaded **SVG** inline (`image/svg+xml` or `text/html`) — SVG executes inline script; see Image-Proxy SSRF in `ssrf.md`
+- **Note**: React blocks `javascript:` in JSX URL props (warns since 16.9), but `data:` URLs, non-React DOM writes, and `setAttribute` still execute; do not assume the framework covers this.
+- **SAFE**: validate scheme against an allowlist before use — `if (!/^https?:/i.test(url)) reject()`; React JSX `<div>{userInput}</div>` for non-URL text
+
 ### PHP
 - **VULN**: `echo $_GET['name']` — no escaping
 - **VULN**: `echo $_POST['msg']` — no escaping

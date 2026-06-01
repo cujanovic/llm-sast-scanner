@@ -172,3 +172,12 @@ Information disclosure is an amplifier. Convert leaks into precise, minimal expl
 - **VULN**: `phpinfo()` endpoint accessible without authentication
 - **VULN**: `die($e->getMessage())`, `echo $e->getTraceAsString()`
 - **SAFE**: `ini_set('display_errors', 0); ini_set('log_errors', 1)`
+
+### Source Maps Shipped to Production (build-config class)
+Production builds that emit and deploy `.map` files (or inline maps) hand attackers the original, un-minified source — comments, internal endpoints, function names, and sometimes secrets. Detect at the **build-config** level, framework-agnostic:
+- **VULN**: `productionBrowserSourceMaps: true` in `next.config.js` — Next.js emits browser source maps in prod
+- **VULN**: webpack `devtool: 'source-map'` (or `eval-source-map`) under a production config
+- **VULN**: Vite `build: { sourcemap: true }`; Rollup `output.sourcemap: true`; esbuild `--sourcemap`
+- **VULN**: `GENERATE_SOURCEMAP=true` (CRA) or any pipeline that copies `*.map` to the public/CDN dir
+- **Note**: this is the static signature of the "reverse the bundle via the `.map`" technique; the `//# sourceMappingURL=` comment in shipped JS is the runtime tell.
+- **SAFE**: source maps disabled for prod, or uploaded to an access-controlled error-tracking service (e.g. Sentry) and **not** served publicly.

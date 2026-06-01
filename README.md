@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 37 vulnerability classes.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 39 vulnerability classes.
 
 ---
 
@@ -53,14 +53,14 @@ llm-sast-scanner/              ← repo root
 ├── README.md
 └── llm-sast-scanner/          ← skill directory (copy this)
     ├── SKILL.md               # 6-step workflow + Judge verification
-    └── references/            # 37 vulnerability knowledge bases
+    └── references/            # 39 vulnerability knowledge bases
         ├── xss.md
         ├── sql_injection.md
         ├── path_traversal_lfi_rfi.md
         ├── client_side_path_traversal.md
         ├── server_side_prototype_pollution.md
         ├── client_side_prototype_pollution.md
-        └── ... (37 files total)
+        └── ... (39 files total)
 ```
 
 ### SKILL.md
@@ -79,7 +79,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 
 ## Vulnerability Coverage
 
-37 reference files covering the following categories:
+39 reference files covering the following categories:
 
 ### Injection
 | File | Vulnerability |
@@ -133,6 +133,12 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `csrf.md` | Cross-Site Request Forgery |
 | `open_redirect.md` | Open Redirect |
 | `smuggling_desync.md` | HTTP Request Smuggling / Desync |
+| `web_cache_deception.md` | Web Cache Deception / Cache Poisoning — cached personalized/authenticated responses, unkeyed-input poisoning, cache-key confusion (CWE-525) |
+
+### Supply Chain
+| File | Vulnerability |
+|------|--------------|
+| `dependency_confusion.md` | Dependency Confusion / substitution — candidate flagging of internal packages a public registry could shadow, across npm, PyPI, RubyGems, Maven/Gradle, NuGet, Go, Composer, Cargo (CWE-1357) |
 | `denial_of_service.md` | Denial of Service / Resource Exhaustion |
 | `cve_patterns.md` | Known CVE Patterns |
 

@@ -68,6 +68,25 @@ session.setAttribute("role", role);  // SAFE: not from request directly
 - Reading `X-Forwarded-For`, `Host`, or similar headers is not `trust_boundary` by itself. Confirm only when that value crosses into session state, auth decisions, backend or proxy selection, or other privileged runtime configuration.
 - When the issue is client-IP spoofing through `X-Forwarded-For`, prefer `xff_spoofing`; do not add a second `trust_boundary` tag unless a separate privileged boundary crossing exists.
 
+## Header-Based Trust / Auth-Context Spoofing (class)
+
+A related class worth detecting independently of session storage: an application treats a **client-controllable request header** as a trust signal for authentication, authorization, or "this request is internal." Because anyone can send the header, the gate is bypassable. Detect by the shape *"an auth / identity / internal-origin decision reads a request header"*, regardless of framework.
+
+**Headers commonly over-trusted:**
+- Identity injected by an edge/gateway but not stripped from external requests: `X-User-Id`, `X-Authenticated-User`, `X-Email`, `X-Roles`, `X-Auth-*`, `Remote-User`
+- "Internal / subrequest" markers: `X-Internal`, generic `X-Forwarded-*`, and framework-specific internal markers such as Next.js `x-middleware-subrequest`
+- Client-IP trust: `X-Forwarded-For`, `True-Client-IP`, `X-Real-IP` (for IP-only cases prefer the `xff_spoofing` tag)
+
+**Concrete instance — middleware-only authorization (Next.js `x-middleware-subrequest`)**: when authn/authz is enforced *only* in edge `middleware.ts`, a request the framework treats as an internal subrequest skips the middleware entirely. Generic lesson: **never enforce authorization solely at a layer that a client-supplied header can cause the request to bypass.** Re-derive identity from a server-trusted source and re-check authorization in the handler/route itself (defense in depth).
+
+```js
+// VULN — trusts a client header as proof of identity / internal origin
+if (req.headers['x-internal'] === '1') return next();   // any client can send this
+const userId = req.headers['x-user-id'];                // spoofable identity used for authz
+// VULN — authz ONLY in middleware; the route handler re-trusts it with no check of its own
+```
+**SAFE**: identity comes from a server-verified session/token re-derived per request; gateway-injected identity headers are explicitly stripped at the trust boundary before the app reads them; authorization is re-checked in the handler, not just in middleware/edge.
+
 ## FALSE POSITIVE Rules
 
 - Do NOT emit `trust_boundary` for session attributes set from validated/sanitized user input. If the value is type-checked, range-validated, or comes from a controlled set (e.g., enum selection), the trust boundary is maintained.

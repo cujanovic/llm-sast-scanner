@@ -174,5 +174,45 @@ When running on cloud/k8s, these internal URLs are high-value SSRF targets:
 - Redis on `redis://localhost:6379` — via gopher:// if supported
 
 Flag any user-controlled URL fetch where these are not explicitly blocked.
+
+## URL-Fetch / Media-Proxy SSRF (`url=` parameter pattern)
+
+A very common SSRF shape is an endpoint that accepts a full URL (or host) in a request parameter and fetches it server-side as a "convenience" feature. This is a **class**, not a single product — detect it by the *fetch-by-user-URL* shape regardless of framework or language.
+
+**Source parameter names to flag** (when the value is, or becomes, an absolute URL/host passed to an outbound client): `url`, `src`, `source`, `image`, `imageUrl`, `img`, `target`, `dest`, `uri`, `link`, `feed`, `callback`, `webhook`, `to`, `proxy`, `fetch`, `load`, `remote`.
+
+**Feature archetypes — all the same class:**
+- Image optimizers / resizers / thumbnailers (`/image?url=`, `/cdn-cgi/image/`, imgproxy, thumbor, Cloudinary `fetch`)
+- Link preview / URL unfurling / oEmbed / favicon fetchers
+- PDF / screenshot / HTML-to-image renderers (a headless browser fetches the URL)
+- "Import from URL" / avatar-from-URL / remote file import
+- Outbound webhooks / health-check pingers where the caller sets the URL
+
+**Concrete instance — Next.js Image Optimization (`/_next/image?url=...`)**: the optimizer fetches `url` server-side; the host allowlist lives in `next.config.js`.
+```js
+// VULN — wildcard host allowlist lets the optimizer fetch ANY host (SSRF)
+images: { remotePatterns: [{ protocol: 'https', hostname: '**' }] }   // or hostname: '*'
+images: { domains: ['*'] }                                            // legacy field, same problem
+// VULN — broad subdomain wildcard: pivot to internal via an open redirect on ANY matching subdomain
+images: { remotePatterns: [{ hostname: '*.example.com' }] }
+// SAFE — explicit, non-wildcard hosts only
+images: { remotePatterns: [{ protocol: 'https', hostname: 'cdn.example.com' }] }
+```
+- **VULN**: `dangerouslyAllowSVG: true` (or any image proxy that serves the fetched SVG inline) — attacker points `url=` at a malicious SVG and gets stored/reflected XSS in the app origin. SVG is active content; see `xss.md`.
+
+**What to flag**: any archetype above where the destination host is user-controlled and there is NO explicit non-wildcard host allowlist, NO scheme restriction to `http(s)`, and NO block of internal ranges / metadata IPs. The "resize / preview / import" feature is not a mitigation — it **is** the sink.
+
+**FALSE POSITIVE**: destination restricted to an explicit non-wildcard host allowlist; user value confined to a path segment under a hardcoded base; `url=` only ever resolves to a fixed first-party asset host with validation.
+
+## SSRF via Host / Forwarded Headers (request-context-derived URLs)
+
+Servers sometimes build an *internal* request URL from request-context headers the client controls — `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Server`, `Referer`, `Origin`. Because these are attacker-controllable, the "internal" fetch (or generated absolute link/callback) can be redirected to an arbitrary host. Framework-agnostic class; also drives password-reset link poisoning and cache poisoning.
+
+**VULN shape**: `fetch(`${req.headers['x-forwarded-host']}/internal/path`)`; `new URL(path, `https://${req.headers.host}`)` then fetched; building absolute callback/reset URLs from `Host`.
+
+**Concrete instance — Next.js Server Actions** (`"use server"` functions dispatched via the `Next-Action` header): older versions built the internal subrequest URL from the request `Host` header, so a spoofed `Host` turned action dispatch into blind→full-read SSRF (the `Next-Action` token selects the function; the request path is ignored). Generic lesson: any server-side request whose **authority** is derived from a request header is SSRF unless the host is validated against an allowlist.
+
+**SAFE**: derive the base URL from server config/environment (e.g. `process.env.PUBLIC_URL`), not from request headers; validate `Host`/`X-Forwarded-Host` against an allowlist before use.
+
 - FALSE POSITIVE guard: in `vulhub`, emit `ssrf` only when a selected representative directory is primarily an SSRF sample; do not infer SSRF from XXE, proxy, inclusion, or secondary fetch capability alone.
 - FALSE POSITIVE guard: do not emit a project-level `ssrf` tag merely because an SSRF helper or vulnerable class exists. Require a mapped vulnerable route plus the same demonstrated path from user-controlled URL input to the outbound fetch.
