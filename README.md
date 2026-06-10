@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 39 vulnerability classes.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 40 vulnerability classes.
 
 ---
 
@@ -53,14 +53,15 @@ llm-sast-scanner/              ← repo root
 ├── README.md
 └── llm-sast-scanner/          ← skill directory (copy this)
     ├── SKILL.md               # 6-step workflow + Judge verification
-    └── references/            # 39 vulnerability knowledge bases
+    └── references/            # 40 vulnerability knowledge bases
         ├── xss.md
         ├── sql_injection.md
         ├── path_traversal_lfi_rfi.md
         ├── client_side_path_traversal.md
         ├── server_side_prototype_pollution.md
         ├── client_side_prototype_pollution.md
-        └── ... (39 files total)
+        ├── shared_client_cache_leak.md
+        └── ... (40 files total)
 ```
 
 ### SKILL.md
@@ -79,7 +80,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 
 ## Vulnerability Coverage
 
-39 reference files covering the following categories:
+40 reference files covering the following categories:
 
 ### Injection
 | File | Vulnerability |
@@ -114,6 +115,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `information_disclosure.md` | Sensitive Information Disclosure |
 | `insecure_cookie.md` | Insecure Cookie Flags (CWE-614, CWE-1004) |
 | `trust_boundary.md` | Trust Boundary Violation (CWE-501) |
+| `shared_client_cache_leak.md` | Shared-Client Cache/Dedup Cross-User Leak — in-process leakage via shared client caches, request dedup/coalescing, mutable-auth singletons, pooled-connection & thread-local reuse, module-global request state (CWE-488 / CWE-524 / CWE-567 / CWE-362) |
 
 ### Server-Side Attacks
 | File | Vulnerability |

@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 39 vulnerability classes across web, API, auth, mobile, and logic layers.
+  code review of any language or framework. Covers 40 vulnerability classes across web, API, auth, mobile, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.9.0"
+  version: "1.10.0"
   domain: application-security
-  references: 39 vulnerability knowledge bases
+  references: 40 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,13 +22,13 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 39 vulnerability classes. Each has a dedicated reference file loaded on demand:
+This skill covers the following 40 vulnerability classes. Each has a dedicated reference file loaded on demand:
 
 | Category | Vulnerabilities |
 |----------|----------------|
 | **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection |
 | **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation |
-| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary |
+| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions |
 | **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, Web Cache Deception/Poisoning, Denial of Service, CVE Patterns |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo) |
@@ -106,6 +106,7 @@ references/business_logic.md             — Business logic flaws
 references/http_method_tamper.md         — HTTP method tampering
 references/smuggling_desync.md           — HTTP request smuggling / desync
 references/web_cache_deception.md        — Web cache deception / cache poisoning (cached personalized data, unkeyed-input poisoning)
+references/shared_client_cache_leak.md   — Cross-user leak via shared client caches / request dedup-coalescing / mutable-auth singletons / pooled-connection & thread-local reuse / module-global request state (in-process, all client libs & languages)
 references/dependency_confusion.md       — Dependency confusion candidate flagging (npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo)
 references/cve_patterns.md               — Known CVE patterns
 references/expression_language_injection.md — Expression language injection (SpEL / OGNL)
@@ -118,7 +119,8 @@ references/session_fixation.md           — Session fixation
 
 **Loading strategy:**
 - For a targeted review (e.g., "check for SQL injection"), load only the relevant reference(s).
-- For a full audit, load all 39 references and scan systematically.
+- For a full audit, load all 40 references and scan systematically.
+- For any code using a **shared/singleton client, cache, request de-duplicator, connection pool, thread-local, or module global** that returns per-user/per-tenant data, load `shared_client_cache_leak.md`.
 - Always load references for the top OWASP risks even if not explicitly requested.
 
 ---
@@ -170,6 +172,7 @@ Beyond taint tracking, check for:
 - JWT algorithm confusion, token fixation, session issues
 - Default/hardcoded credentials
 - Enumeration via timing or response differences
+- **Shared-state identity-key analysis** (`shared_client_cache_leak.md`): for every shared/singleton/memoized client, cache, request de-duplicator/coalescer (urql/Apollo dedup, `DataLoader`, `singleflight`, `LoadingCache`, `@Cacheable`, `lru_cache`/`@cache`, `IMemoryCache`, `p-memoize`, `unstable_cache`/`'use cache'`), connection pool, `ThreadLocal`/`contextvar`/`AsyncLocalStorage`, or module/static global, ask: (a) is it shared across requests/users? (b) does the value depend on identity (auth token, session, `userId`, `tenantId`)? (c) is that identity part of the cache/coalescing **key** (not just headers/options/mutable instance state)? If shared + identity-dependent + identity NOT in the key (or held as shared mutable state), it leaks across users under concurrency.
 
 ---
 
@@ -232,6 +235,7 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - `arbitrary_file_upload`: skip for avatar/profile upload with type restrictions and non-webroot storage.
 - `session_fixation`: skip when Spring Security default session management is active.
 - `information_disclosure`: skip for DB credentials in config files — deployment issue, not app-level.
+- `shared_client_cache_leak`: require a structure that is BOTH shared across requests/users AND keyed/scoped without the identity the value depends on. Safe (drop) when the key provably includes `userId`/`tenantId`/session/auth-token-hash, when the client/cache/loader is created per-request, when the cached data is identity-independent (public/config), or when only a stateless transport is reused with auth passed per-call. Prefer `web_cache_deception` when the cache is an HTTP/CDN/edge/proxy cache; use `shared_client_cache_leak` only for in-process caches/dedup/singletons/pools/thread-locals/globals. Do not flag mutation paths for the dedup sub-class (query dedup does not merge mutations).
 
 **Scope**
 - Demo/example code: skip any finding whose ONLY vulnerable path is in `examples/`, `demo/`, `sample/` (or similar). Report only if the bug is in the library/SDK itself.
@@ -274,6 +278,7 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - [ ] DoS: is the upper bound attacker-controllable and unbounded?
 - [ ] CI/CD mutable tags: same org or third-party?
 - [ ] Admin action within the admin's designed trust boundary?
+- [ ] Shared client/cache/dedup/pool/global: is identity in the key (or is it per-request scoped), and is the data actually identity-dependent?
 
 ---
 
@@ -394,7 +399,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.9.0
+Analyzer: llm-sast-scanner v1.10.0
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>
