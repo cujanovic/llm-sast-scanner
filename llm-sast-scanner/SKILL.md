@@ -119,13 +119,25 @@ references/session_fixation.md           — Session fixation
 
 **Loading strategy:**
 - For a targeted review (e.g., "check for SQL injection"), load only the relevant reference(s).
-- For a full audit, load all 40 references and scan systematically.
+- For a full audit, load the references that match the stack actually present and skip classes that cannot
+  apply (e.g., do not load `php_security.md` or `mobile_security.md` for a pure Go service). Across the
+  detected languages/frameworks this still covers every applicable class — it just avoids spending context
+  on inapplicable ones.
+- Keep the applicable references loaded together so each source file can be scanned against every lens in a
+  single read (see Step 3 "Read-once discipline"). Only if the codebase plus its references exceed the
+  context window, fall back to lens-grouped batches (injection → auth/access → crypto & data-exposure →
+  server-side → protocol/infra → supply-chain), running one batch at a time.
 - For any code using a **shared/singleton client, cache, request de-duplicator, connection pool, thread-local, or module global** that returns per-user/per-tenant data, load `shared_client_cache_leak.md`.
 - Always load references for the top OWASP risks even if not explicitly requested.
 
 ---
 
 ### Step 3: Analyze Code — Source→Sink Taint Tracking
+
+**Read-once discipline:** read each source file's full text ONCE and evaluate ALL loaded vulnerability
+lenses against it in that single read — do not re-open the same file once per vuln class. Re-read a file
+only to follow a cross-file data-flow chain into it. This keeps total read cost ~1x the codebase regardless
+of how many classes are in scope.
 
 For each loaded vulnerability class, perform taint analysis:
 
@@ -425,3 +437,4 @@ Analyzer: llm-sast-scanner v1.10.0
 - **Be precise**: include exact file paths and line numbers — never approximate
 - **Fix > flag**: always provide a concrete remediation, not just a problem statement
 - **Language-aware**: adapt sink/source patterns to the specific language and framework in use
+- **Token discipline**: read each source file once and evaluate all loaded lenses in that pass; load only references that match the stack in use
