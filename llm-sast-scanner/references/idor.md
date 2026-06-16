@@ -7,6 +7,23 @@ description: IDOR/BOLA testing for object-level authorization failures and cross
 
 Object-level authorization failures (BOLA/IDOR) expose data and permit unauthorized modifications across APIs, web, mobile, and microservice architectures. Every object reference arriving from a client must be considered untrusted until the system confirms it belongs to the requesting principal.
 
+IDOR occurs when an authenticated user changes a user-supplied identifier (path param, body field, query param) to access or modify another user's object without an ownership or permission check on that specific resource.
+
+### What it IS
+
+- `GET /api/orders/1002` returns another user's order after swapping the ID
+- `DELETE /api/documents/555` removes a document the caller does not own
+- Request body `{"account_id": 789}` references another user's account for a transfer
+- `?file_id=42` downloads another user's private file
+
+### What it is NOT
+
+- **Missing authentication** — endpoint requires no login → unauthenticated access, not IDOR
+- **Vertical privilege escalation** — regular user hits `/admin/dashboard` → function-level access control, not IDOR
+- **Public-by-design resources** — intentionally public posts or catalog items
+- **Mass assignment / business logic** — tampering `role=admin` or `price=0` on non-object fields
+- **SQL injection** — `?id=1 OR 1=1` → SQLi, not IDOR
+
 ## Where to Look
 
 **Scope**
@@ -58,6 +75,24 @@ Object-level authorization failures (BOLA/IDOR) expose data and permit unauthori
 ### UUID/Opaque ID Sources
 - Logs, exports, JS bundles, analytics endpoints, emails, public activity
 - Time-based IDs (UUIDv1, ULID) may be predictable within a time window
+
+### Static Code Indicators
+
+Grep for resource lookups by user-supplied ID **without** an ownership or tenant scope in the same query or on the reachable path:
+
+- ORM: `.get(id=`, `.find(id)`, `.findById(`, `.findOne({ _id:`, `.findUnique({ where: { id`, `.objects.get(pk=`, `.query.get(`, `findByIdAndDelete(`
+- Raw SQL: `WHERE id = ?` without a matching `user_id`, `owner_id`, or `tenant_id` predicate
+- Body/query IDs: `req.body.userId`, `req.body.account_id`, `request.data['account_id']` passed straight into fetch or mutate calls
+- GraphQL resolvers/mutations accepting `id` arguments with no per-object authorization at the resolver
+
+**Where ownership checks should appear** (absence = candidate):
+
+- Query scoped to caller: `filter(id=..., user=request.user)`, `current_user.orders.find(id)`, `findFirst({ where: { id, userId } })`
+- Post-fetch guard: `if resource.owner_id != current_user.id: raise Forbidden`
+- Policy/middleware: `authorize('view', obj)`, `can?(:read, @obj)`, `@PreAuthorize` with ownership expression
+- Tenant scoping: all queries bound to `get_current_tenant(request)` or org context
+
+**Not a fix**: UUIDs, ULIDs, or other non-guessable IDs — they only obscure identifiers; authorization must still bind the object to the caller. Indirect reference maps (session-stored ID → object) help only when paired with ownership validation on lookup.
 
 ## Vulnerability Patterns
 
@@ -181,12 +216,67 @@ query CrossAccountAccess {
 4. Document tenant boundary violations where applicable
 5. Provide reproducible steps and evidence capturing both the owner and non-owner perspectives
 
+### Dynamic PoC (two-account swap)
+
+1. As **User A**, create or list a resource; record its ID (`<USER_A_RESOURCE_ID>`).
+2. As **User B**, call the same endpoint with User A's ID using User B's token.
+3. **Vulnerable signal**: HTTP 200 with User A's data, or successful delete/update on User A's object.
+4. **Not vulnerable signal**: 403/404, empty body, or generic error — same shape for owned and foreign IDs.
+
+```bash
+# User B attempts to read User A's order
+curl -s -H "Authorization: Bearer <USER_B_TOKEN>" \
+  https://app.example/api/orders/<USER_A_RESOURCE_ID>
+# Expect 403/404 if safe; 200 + foreign order data confirms IDOR
+```
+
 ## Common False Alarms
 
 - Resources that are public or anonymous by design
 - Soft-private data whose content is already publicly accessible
 - Idempotent metadata lookups that expose nothing sensitive
 - Properly implemented row-level checks enforced uniformly across all channels
+- Admin-only endpoints behind explicit role checks (`hasRole('ADMIN')`) — vertical access control, not horizontal IDOR
+
+## Safe Patterns
+
+**Query scoped to current user (preferred)**
+
+```python
+# Django
+order = get_object_or_404(Order, id=order_id, user=request.user)
+```
+
+```javascript
+// Express / Mongoose
+const order = await Order.findOne({ _id: req.params.id, userId: req.user.id });
+```
+
+```ruby
+# Rails
+@order = current_user.orders.find(params[:id])
+```
+
+**Explicit ownership check after fetch**
+
+```java
+Account acct = accountRepo.findById(id).orElseThrow();
+if (!acct.getOwnerId().equals(auth.getName())) throw new AccessDeniedException();
+```
+
+**Policy / authorization middleware**
+
+```php
+$this->authorize('view', $invoice);  // Laravel Policy
+```
+
+**Tenant/org scoping**
+
+```python
+Order.objects.filter(id=order_id, tenant=get_current_tenant(request))
+```
+
+Trace route → middleware → controller → service → data access; `auth` middleware alone does not prove object-level authorization.
 
 ## Business Risk
 
@@ -211,6 +301,64 @@ query CrossAccountAccess {
 ## Core Principle
 
 Authorization must bind the subject, the action, and the specific object on every request, independent of identifier opacity or transport protocol. Any gap in that binding creates a vulnerability.
+
+## Vulnerable vs Secure Examples
+
+### Python — Django
+
+```python
+# VULNERABLE
+def get_order(request, order_id):
+    order = Order.objects.get(id=order_id)
+    return JsonResponse(model_to_dict(order))
+
+# SECURE
+def get_order(request, order_id):
+    order = get_object_or_404(Order, id=order_id, user=request.user)
+    return JsonResponse(model_to_dict(order))
+```
+
+### Python — Flask / SQLAlchemy
+
+```python
+# VULNERABLE
+doc = Document.query.get_or_404(doc_id)
+
+# SECURE
+doc = Document.query.filter_by(id=doc_id, owner_id=current_user.id).first_or_404()
+```
+
+### Node.js — Express / Prisma
+
+```javascript
+// VULNERABLE
+const invoice = await prisma.invoice.findUnique({ where: { id: req.params.id } });
+
+// SECURE
+const invoice = await prisma.invoice.findFirst({
+  where: { id: req.params.id, userId: req.user.id }
+});
+```
+
+### Go
+
+```go
+// VULNERABLE
+order, _ := db.GetOrder(id)
+
+// SECURE
+order, _ := db.GetOrderByUser(id, userID)
+```
+
+### PHP — Laravel
+
+```php
+// VULNERABLE
+return Invoice::findOrFail($id);
+
+// SECURE
+return auth()->user()->invoices()->findOrFail($id);
+```
 
 ## C# ASP.NET Detection Patterns
 

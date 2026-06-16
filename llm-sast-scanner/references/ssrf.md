@@ -7,6 +7,25 @@ description: Server-Side Request Forgery detection (CWE-918)
 
 Identify cases where user-controlled URLs or hostnames are forwarded to server-side HTTP or network clients without adequate restriction.
 
+The core pattern: *unvalidated, user-controlled input reaches the destination argument of an outbound network call.*
+
+## What SSRF Is (and Is Not)
+
+**What it IS**
+- HTTP client calls where URL, host, IP, or port is built from user input: `requests.get(user_url)`, `fetch(req.body.webhook_url)`
+- DNS lookups or raw TCP dials to user-supplied host/port: `dns.lookup(req.query.host)`, `net.Dial("tcp", host+":"+port)`
+- Remote-scheme file fetchers: `file_get_contents($user_url)`, `URI.open(url)` (OpenURI)
+- Webhooks, import-from-URL, image proxies, PDF/screenshot renderers — any feature that fetches a remote resource on behalf of the user
+- Stored destinations: a URL saved from user input at write time and later used for an outbound request without allowlist validation
+
+**What it is NOT**
+- **Open redirect** — HTTP 302 to a user URL redirects the *browser*, not a server-side outbound request (see `open_redirect.md`)
+- **XXE-based SSRF** — outbound requests triggered by XML external entities in a parser (see `xxe.md`)
+- **XSS via URL** — rendering a user-supplied URL in HTML without escaping
+- **IDOR** — changing an object ID to access another user's data
+- **Client-side fetch** — the browser, not the server, performs the request
+- **Hardcoded outbound calls** — fixed URLs with no user influence on the destination
+
 ## Source -> Sink Pattern
 
 **Sources (remote flow sources)**: HTTP request parameters, headers, path segments, cookies, JSON/form body fields — anything modeled as remote user input that can carry a URL, hostname, IP, or URL fragment used to build an outbound request. Java excludes taint from `URLConnection.getInputStream()` responses (following a remote redirect is not worse than the remote server choosing the target).
@@ -36,14 +55,65 @@ Identify cases where user-controlled URLs or hostnames are forwarded to server-s
 - Go: hostname-sanitizing prefix edge; `isLocalUrl`/`isValidRedirect`-style redirect checks; regexp match guards; URL/hostname equality against constant; simple-type sanitizers
 - Ruby: prefixed string interpolation (fixed prefix before user part)
 
+## Recon: Outbound Sink Grep Patterns
+
+Flag any call where a non-hardcoded URL, host, IP, or port is passed as the destination. Trace taint in a later pass; recon is structural only.
+
+| Stack | Grep targets (destination argument may be variable) |
+|-------|-----------------------------------------------------|
+| Python | `requests\.(get\|post\|put\|request)`, `urllib\.request\.urlopen`, `httpx\.`, `aiohttp\.ClientSession`, `socket\.(connect\|create_connection)`, `dns\.resolver\.resolve`, `subprocess\.(run\|Popen).*\b(curl\|wget)\b` |
+| Node.js | `\bfetch\(`, `axios\.(get\|post\|request)`, `http(s)?\.(get\|request)`, `got\(`, `net\.(connect\|createConnection)`, `dns\.(lookup\|resolve)`, `exec.*\b(curl\|wget)\b` |
+| Ruby | `Net::HTTP\.`, `URI\.open`, `\bopen\(`, `RestClient\.`, `HTTParty\.`, `Faraday\.` |
+| PHP | `curl_setopt.*CURLOPT_URL`, `curl_exec`, `file_get_contents\(`, `fopen\(.*http`, `Guzzle.*->(get\|request)`, `HttpClient.*->request` |
+| Java | `\.openConnection\(\)`, `RestTemplate\.`, `WebClient\.`, `OkHttpClient`, `HttpClients\.`, `HttpGet\(`, `Jsoup\.connect` |
+| Go | `http\.(Get\|Post\|NewRequest)`, `net\.Dial`, `net\.LookupHost`, `net\.ResolveTCPAddr` |
+| C# | `HttpClient\.(Get\|Post\|Send)Async`, `WebRequest\.Create`, `WebClient\.Download` |
+
+Skip fully hardcoded literals (`requests.get("https://api.example.com/data")`). Shell-outs to `curl`/`wget`/`nc` with a variable target are SSRF sinks.
+
 ## Vulnerable Conditions
 - User-supplied input reaches any HTTP or network client URL parameter with no prior validation
 - URL is parsed but only the hostname or scheme is checked against a denylist, which is bypassable via DNS rebinding, IPv6, or octal notation
+- Destination was stored from user input earlier (webhook URL, avatar URL) with no allowlist at write or read time
+- Only scheme restriction (`https://` only) or IP blocklist — bypassable to arbitrary HTTPS hosts, alternate IP notations, or redirect chains
 
 ## Safe Patterns
-- URL validated against a strict allowlist of permitted domains or IP addresses
-- User input used exclusively as a query parameter, never as the host or scheme component
-- URL assembled from a hardcoded base with user input confined to a path segment after proper encoding
+
+Effective mitigations (classify as **Not Vulnerable** when all apply):
+
+**Strict host allowlist** — validate/sanitize before building the request URL; resolve hostname, then check against an explicit allowlist (not substring match):
+
+```python
+ALLOWED = {"api.example.com", "cdn.example.com"}
+parsed = urlparse(user_url)
+if parsed.hostname not in ALLOWED:
+    raise ValueError("Destination not allowed")
+requests.get(user_url)
+```
+
+**URL prefix allowlist** — restrict scheme and path prefix; still parse and verify host:
+
+```python
+ALLOWED_PREFIXES = ["https://api.example.com/", "https://cdn.example.com/"]
+if not any(user_url.startswith(p) for p in ALLOWED_PREFIXES):
+    abort(400)
+```
+
+**Resolve then validate IP** — resolve DNS first, reject private/link-local/metadata ranges on the resolved address, and pin that IP for the connection (blocks naive blocklist-only checks; TOCTOU remains if IP is not pinned):
+
+```python
+addrs = socket.getaddrinfo(parsed.hostname, parsed.port)
+if any(ipaddress.ip_address(a[4][0]).is_private for a in addrs):
+    raise ValueError("Internal destination blocked")
+```
+
+**Other safe shapes**
+- User input used exclusively as a query parameter on a hardcoded host, never as authority
+- URL assembled from a hardcoded base with user input confined to an encoded path segment
+- Redirect following disabled on the HTTP client; handle redirects manually with re-validation
+- Do not forward cookies, `Authorization`, or other auth headers to user-chosen destinations
+
+> IP blocklists alone (`169.254.0.0/16`, `10.0.0.0/8`, …) are **not** sufficient — bypass via DNS rebinding, URL encoding, IPv6/decimal notation, or redirect chains. Treat blocklist-only code as Likely Vulnerable.
 
 ## Evasion Patterns
 - `http://127.0.0.1` vs `http://0x7f000001` vs `http://[::1]` vs `http://localhost`
@@ -91,6 +161,72 @@ Identify cases where user-controlled URLs or hostnames are forwarded to server-s
 - **VULN**: `curl_setopt($ch, CURLOPT_URL, $_POST['url'])`
 - **VULN**: `$data = file_get_contents("http://" . $_GET['host'] . "/api")`
 - **PARTIAL HARDENING (not a complete SSRF fix)**: `curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS)` — restricts scheme only; does not block SSRF to attacker-chosen HTTPS hosts (external targets, internal HTTPS services, some metadata endpoints). Host/IP allowlisting (and blocking link-local/private ranges after DNS resolution) is still required.
+
+## Vulnerable vs Secure Examples (Ruby, Go, C#)
+
+### Ruby — Net::HTTP / OpenURI
+
+```ruby
+# VULNERABLE: open() fetches arbitrary URL
+def import
+  url = params[:url]
+  content = URI.open(url).read
+end
+
+# SECURE: restrict scheme and host before open
+def import
+  url = params[:url]
+  uri = URI.parse(url)
+  raise "Forbidden" unless uri.is_a?(URI::HTTPS) && uri.host == "data.example.com"
+  content = uri.open.read
+end
+```
+
+### Go — net/http
+
+```go
+// VULNERABLE: user-supplied URL passed to http.Get
+func proxyHandler(w http.ResponseWriter, r *http.Request) {
+    target := r.URL.Query().Get("url")
+    resp, _ := http.Get(target)
+    io.Copy(w, resp.Body)
+}
+
+// SECURE: allowlist host after parse
+func proxyHandler(w http.ResponseWriter, r *http.Request) {
+    target := r.URL.Query().Get("url")
+    u, err := url.Parse(target)
+    if err != nil || u.Hostname() != "api.example.com" {
+        http.Error(w, "Forbidden", 403)
+        return
+    }
+    resp, _ := http.Get(target)
+    io.Copy(w, resp.Body)
+}
+```
+
+### C# — HttpClient
+
+```csharp
+// VULNERABLE: user-supplied URL passed to HttpClient
+[HttpGet("proxy")]
+public async Task<IActionResult> Proxy([FromQuery] string url)
+{
+    var response = await _httpClient.GetAsync(url);
+    return Content(await response.Content.ReadAsStringAsync());
+}
+
+// SECURE: allowlist host before request
+[HttpGet("proxy")]
+public async Task<IActionResult> Proxy([FromQuery] string url)
+{
+    if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
+        uri.Host != "api.example.com")
+        return Forbid();
+    var response = await _httpClient.GetAsync(url);
+    return Content(await response.Content.ReadAsStringAsync());
+}
+```
 
 ## Cloud Metadata Endpoint Exposure
 
@@ -229,6 +365,30 @@ Servers sometimes build an *internal* request URL from request-context headers t
 **SAFE**: derive the base URL from server config/environment (e.g. `process.env.PUBLIC_URL`), not from request headers; validate `Host`/`X-Forwarded-Host` against an allowlist before use.
 
 **Recognized sanitizers summary**: hostname-sanitizing prefixes, allowlist/`contains` guards, host equality checks, regexp barriers, fixed-prefix string construction (Python partial), `encodeURIComponent` (JS), redirect-check helpers (Go), `AntiSSRF` validators (Python), models-as-data `request-forgery` barriers.
+
+## Dynamic Test / PoC
+
+Confirm suspected SSRF at runtime when the endpoint is reachable:
+
+**Cloud metadata (full-read signal)**
+```bash
+curl "https://app.example.com/fetch?url=http://169.254.169.254/latest/meta-data/"
+# Expect: IAM role name or instance metadata in response body
+```
+
+**Internal pivot / port probe**
+```bash
+curl "https://app.example.com/proxy?url=http://127.0.0.1:6379/"
+# Expect: Redis banner, connection error with service fingerprint, or timing difference
+```
+
+**Blind SSRF (OAST)**
+```bash
+curl "https://app.example.com/webhook?url=http://YOUR-COLLABORATOR.oast.fun/ssrf-test"
+# Expect: DNS/HTTP callback at collaborator; no response body needed
+```
+
+Use the parameter name observed in code (`url`, `target`, `webhook`, etc.). Restrict protocols/ports in remediation — PoC confirms reachability, not safe design.
 
 ## Common False Alarms
 

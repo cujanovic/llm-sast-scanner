@@ -7,6 +7,26 @@ description: SQL injection testing covering union, blind, error-based, and ORM b
 
 SQLi remains among the most durable and damaging vulnerability classes. Contemporary exploitation targets parser differentials, ORM and query-builder edge cases, JSON/XML/CTE/JSONB surfaces, out-of-band exfiltration channels, and subtle blind oracles. Every string concatenation into SQL warrants scrutiny.
 
+The core pattern: *unvalidated, unparameterized user input reaches a SQL query execution call.*
+
+## What SQLi Is and Is Not
+
+### What it IS
+
+- String concatenation or interpolation into SQL: `"WHERE name = '" + username + "'"`, `` `WHERE id = ${id}` ``, f-strings
+- `%` formatting or `.format()`/`String.format()`/`sprintf()` used to embed variables — not the same as driver placeholder binding
+- Dynamic `ORDER BY` / `GROUP BY` / table or column names from input with no allowlist
+- ORM raw/unsafe methods with unsanitized input: `Model.objects.raw(f"...")`, `$queryRawUnsafe(...)`, `FromSqlRaw("..." + var)`
+- Second-order injection: value stored in the DB from user input, later concatenated into a raw query elsewhere
+
+### What it is NOT (commonly confused with)
+
+- **IDOR** — changing `?id=1` to `?id=2` to access another user's row; no SQL syntax manipulation
+- **Mass assignment** — setting extra ORM model fields from user input
+- **XSS via database** — stored HTML rendered unescaped in a template; the sink is output encoding, not SQL parsing
+- **NoSQL injection** — MongoDB operator injection; distinct class (see sanitizer notes for Mongo `$eq` wrappers)
+- **Safe ORM lookups** — `User.objects.filter(id=user_id)`, `User.find(params[:id])`, `User.findOne({ where: { id } })`
+
 ## Where to Look
 
 **Databases**
@@ -24,6 +44,24 @@ SQLi remains among the most durable and damaging vulnerability classes. Contempo
 - Query builder raw APIs: `whereRaw`/`orderByRaw`, string templates embedded in ORM calls
 - JSON coercion or array containment operators passed through without sanitization
 - Bulk and batch endpoints, report generators that embed filter criteria directly into query text
+
+## Recon Indicators
+
+Grep for query execution calls where the SQL string argument is built dynamically — trace variable origin separately.
+
+**Vulnerable construction (flag the site)**
+
+1. **Concatenation into execution**: `cursor.execute("... WHERE id = " + var)`, `$pdo->query("... id = " . $var)`, `jdbcTemplate.query("... '" + var + "'")`
+2. **Interpolation literals**: `cursor.execute(f"... '{var}'")`, `` db.query(`... ${var}`) ``, `db.QueryRow(fmt.Sprintf("... '%s'", var))`
+3. **Format functions (not binding)**: `cursor.execute("... %s" % var)`, `"... {}".format(var)`, `String.format("... '%s'", var)`, `sprintf("... %s", $var)`
+4. **ORM raw/unsafe with dynamic strings**: Django `objects.raw(f"...")` / `RawSQL(f"...")` / `extra(where=[f"..."])`, ActiveRecord `where("col = '#{var}'")`, Sequelize `` sequelize.query(`...${var}`) ``, TypeORM `` .where(`col = '${var}'`) ``, Prisma `$queryRawUnsafe`/`$executeRawUnsafe`, EF `FromSqlRaw("..." + var)`
+5. **Dynamic identifiers** (parameterization cannot protect these): `f"SELECT * FROM {table}"`, `f"ORDER BY {sort_col}"`
+
+**Safe construction (skip)**
+
+- Static query string + separate bind args: `execute("... WHERE id = %s", (val,))`, `query("... id = ?", [val])`
+- ORM builders: `.filter()`, `.where(col: val)`, `.findOne()`, `.findUnique()`
+- Prisma tagged template: `` prisma.$queryRaw`SELECT * WHERE id = ${userId}` `` (values bound, not interpolated into text)
 
 ## How to Detect
 
@@ -158,6 +196,90 @@ SQLi remains among the most durable and damaging vulnerability classes. Contempo
 4. Furnish reproducible requests that differ only in the injected fragment
 5. Where applicable, show that the vulnerability survives WAF bypass via a known variant
 
+### Dynamic Test / PoC
+
+Confirm taint with a minimal runtime probe; pair with code review.
+
+**Error/boolean (manual curl)**
+
+```bash
+# Single-quote probe — expect SQL error text or different body vs baseline
+curl -s "https://app.example.com/search?q=test'" | diff - <(curl -s "https://app.example.com/search?q=test")
+
+# Auth bypass tautology on login field
+curl -s -X POST "https://app.example.com/login" \
+  -d "username=admin' OR '1'='1'--&password=x"
+# Signal: 200/redirect vs 401, or session cookie set
+```
+
+**Automated enumeration (sqlmap)**
+
+```bash
+sqlmap -u "https://app.example.com/search?q=test" -p q --batch --dbs
+# Signal: reported injectable parameter, database names listed
+```
+
+**Time-based blind**
+
+```bash
+curl -o /dev/null -s -w "%{time_total}\n" \
+  "https://app.example.com/item?id=1' AND SLEEP(5)--"
+# Signal: response time ~5s above baseline (DB-specific sleep function)
+```
+
+**Dynamic ORDER BY**
+
+```bash
+curl -s "https://app.example.com/products?sort=name;SELECT+pg_sleep(5)--"
+# Signal: delay or 500 if sort column is interpolated without allowlist
+```
+
+## Safe Construction Patterns
+
+When these patterns appear and cover the full query (including operators and IN-list members), classify as not vulnerable:
+
+**Parameterized binding**
+
+```python
+cursor.execute("SELECT * FROM users WHERE id = %s", (user_id,))
+```
+
+```javascript
+db.query("SELECT * FROM users WHERE id = ?", [userId]);
+pool.query("SELECT * FROM users WHERE id = $1", [userId]);
+```
+
+```java
+PreparedStatement ps = conn.prepareStatement("SELECT * FROM users WHERE id = ?");
+ps.setInt(1, userId);
+```
+
+**ORM safe defaults**
+
+```python
+User.objects.filter(id=user_id)
+```
+
+```ruby
+User.where(name: params[:name])
+User.where("name = ?", params[:name])
+```
+
+```javascript
+await prisma.$queryRaw`SELECT * FROM users WHERE id = ${userId}`;
+```
+
+**Allowlist for dynamic identifiers** (only safe fix when column/table names must vary)
+
+```python
+ALLOWED_COLUMNS = {"name", "created_at", "price"}
+if sort_col not in ALLOWED_COLUMNS:
+    raise ValueError("Invalid column")
+query = f"SELECT * FROM products ORDER BY {sort_col}"
+```
+
+Custom escaping (`mysql_real_escape_string`, `addslashes`, homegrown sanitizers) is not equivalent to parameterization — still treat as likely vulnerable when taint is present.
+
 ## Common False Alarms
 
 - Generic application errors unrelated to SQL parsing or constraint violations
@@ -266,6 +388,52 @@ Login/authentication endpoints with raw SQL concatenation are almost always blin
 - **VULN**: `mysqli_query($conn, "SELECT * FROM users WHERE id = " . $_GET['id'])`
 - **VULN**: `$pdo->query("SELECT * FROM users WHERE id = '$_POST[id]'")`
 - **SAFE**: `$stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?"); $stmt->execute([$_GET['id']])`
+
+### Ruby on Rails
+
+```ruby
+# VULN
+User.where("name = '#{params[:name]}'")
+User.find_by_sql("SELECT * FROM users WHERE email = '#{params[:email]}'")
+
+# SAFE
+User.where("name = ?", params[:name])
+User.where(name: params[:name])
+```
+
+### Go
+
+```go
+// VULN
+query := fmt.Sprintf("SELECT * FROM users WHERE name = '%s'", name)
+db.QueryRow(query)
+
+// SAFE
+db.QueryRow("SELECT * FROM users WHERE name = $1", name)
+```
+
+### C#
+
+```csharp
+// VULN
+new SqlCommand("SELECT * FROM Users WHERE Username = '" + username + "'", conn);
+
+// SAFE
+var cmd = new SqlCommand("SELECT * FROM Users WHERE Username = @username", conn);
+cmd.Parameters.AddWithValue("@username", username);
+```
+
+### Django / Flask (raw SQL)
+
+```python
+# VULN
+User.objects.raw(f"SELECT * FROM auth_user WHERE username = '{username}'")
+db.session.execute(text(f"SELECT * FROM products WHERE name = '{name}'"))
+
+# SAFE
+User.objects.raw("SELECT * FROM auth_user WHERE username = %s", [username])
+db.session.execute(text("SELECT * FROM products WHERE name = :name"), {"name": name})
+```
 
 ## Java Servlet Patterns
 

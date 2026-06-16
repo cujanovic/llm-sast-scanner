@@ -7,6 +7,25 @@ description: JWT and OIDC security testing covering token forgery, algorithm con
 
 Weaknesses in JWT and OIDC implementations frequently allow token forgery, cross-context token acceptance, service confusion, and durable account takeover. Headers, claims, and token opacity must never be trusted without strict validation that binds the token to the correct issuer, audience, key, and client context.
 
+**Core pattern**: the server does not fully verify the JWT's authenticity and integrity before trusting its claims.
+
+## Scope
+
+### What It Is
+
+- Algorithm confusion (`alg: none`, RS256→HS256) when verification does not pin allowed algorithms
+- Missing or disabled signature verification (`verify_signature: False`, decode-only calls)
+- Weak or hardcoded HMAC secrets brute-forceable offline
+- Header-driven key selection under attacker control (`jwk`, `jku`, `x5u`, `kid` injection)
+- Missing claim validation (`exp`, `iss`, `aud`, `nbf`) enabling replay or cross-service acceptance
+
+### What It Is Not
+
+- **IDOR via claim edit**: changing `user_id` to access another user's data — authorization flaw; flag only if the token itself can be forged
+- **XSS in JWT payload**: unescaped claim rendered in HTML — XSS, not JWT integrity
+- **CSRF**: JWT in cookies without `SameSite` — CSRF, not signature bypass
+- **Correctly restricted verification**: `jwt.verify(token, secret, { algorithms: ['HS256'] })` with strong secret and full claim checks
+
 ## Where to Look
 
 - Web, mobile, and API authentication built on JWT (JWS/JWE) and OIDC/OAuth2
@@ -27,6 +46,32 @@ Weaknesses in JWT and OIDC implementations frequently allow token forgery, cross
 - Headers: `{"alg":"RS256","kid":"...","typ":"JWT","jku":"...","x5u":"...","jwk":{...}}`
 - Claims: `{"iss":"...","aud":"...","azp":"...","sub":"user","scope":"...","exp":...,"nbf":...,"iat":...}`
 - Formats: JWS (signed), JWE (encrypted). Note the unencoded payload option (`"b64":false`) and critical headers (`"crit"`)
+
+### Code Indicators
+
+Grep verification and issuance sites before assessing endpoints:
+
+```bash
+# Libraries
+rg -n "import jwt|from jose|jsonwebtoken|io\.jsonwebtoken|golang-jwt|dgrijalva/jwt-go|firebase/php-jwt" .
+
+# Signature bypass
+rg -n "verify_signature.*False|verify_signature:\s*false|jwt\.decode\(|options=\{.*verify" .
+
+# Algorithm confusion / none acceptance
+rg -n "algorithms.*none|get_unverified_header" .
+
+# Missing claim validation
+rg -n "verify_exp.*False|verify_iss.*False|verify_aud.*False|require.*exp" .
+
+# Weak or hardcoded secrets (<32 chars or dictionary words)
+rg -n "SECRET.*=.*[\"'](secret|password|changeme|jwt)" .
+
+# Key lookup from attacker-controlled header fields
+rg -n '"kid"|"jku"|"x5u"|"jwk"' .
+```
+
+Red flags at verification sites: no `algorithms` allowlist on asymmetric endpoints (RS256→HS256), `jwt.decode()` (Node.js) used for auth decisions, manual base64 payload decode without signature check, `kid` interpolated into SQL or file paths.
 
 ## Vulnerability Patterns
 
@@ -76,6 +121,24 @@ Weaknesses in JWT and OIDC implementations frequently allow token forgery, cross
 - Insecure CORS: wildcard origins combined with credentialed requests expose tokens and protected responses
 - TLS and cookie flags: missing Secure/HttpOnly; absence of mTLS or DPoP/"cnf" binding allows token replay from a different device
 
+### Mitigation Patterns
+
+- **Algorithm allowlist**: pass explicit `algorithms=["HS256"]` or `['RS256']` — never trust the token header's `alg`
+- **Strong secret**: ≥256 bits entropy from env/secrets manager; not `"secret"` or `"password123"`
+- **Full claim validation**: require and verify `exp`, `iss`, `aud` (and `nbf` when used)
+- **Asymmetric isolation**: RS256 verify endpoints must reject HS256 on the same key material
+- **JWKS/JKU allowlist**: fetch keys only from pinned URLs; never trust inline `jwk` from the token header
+
+```python
+# Secure verification — pinned alg, required claims, issuer/audience binding
+payload = jwt.decode(
+    token, os.environ["JWT_SECRET"], algorithms=["HS256"],
+    options={"require": ["exp", "iss", "aud"]},
+    issuer="https://myapp.example.com",
+    audience="myapp-api",
+)
+```
+
 ## Advanced Techniques
 
 - **Microservice audience mismatch**: internal services verify signature but ignore aud, accepting tokens destined for other services
@@ -106,6 +169,29 @@ Weaknesses in JWT and OIDC implementations frequently allow token forgery, cross
 3. Prove refresh token reuse succeeds without rotation detection or revocation
 4. Confirm header abuse (kid/jku/x5u/jwk) that places key selection under attacker control
 5. Provide evidence from both owner and non-owner contexts using requests that differ only in token content
+
+### Dynamic Verification
+
+Short runtime checks to confirm static findings (capture a valid token first):
+
+| Test | Action | Expected signal if vulnerable |
+|------|--------|-------------------------------|
+| `alg: none` | Set header `"alg":"none"`, strip signature third segment, send to protected endpoint | `200`/authorized with forged claims |
+| RS256→HS256 | On RS256 endpoints without alg pinning: re-sign with HS256 using the server's RSA public key as HMAC secret | Forged token accepted |
+| Signature strip | Remove signature segment; send payload with elevated `role`/`sub` | Auth succeeds without valid signature |
+| Weak secret | Offline brute-force captured token HMAC (wordlist against HS256) | Secret recovered → arbitrary forgery |
+
+```bash
+# alg:none probe (jwt_tool)
+jwt_tool <TOKEN> -X a
+curl -H "Authorization: Bearer <FORGED_TOKEN>" https://target/api/me
+
+# RS256→HS256 confusion (requires public key + no alg pinning)
+jwt_tool <TOKEN> -X s -pk public.pem
+curl -H "Authorization: Bearer <CONFUSED_TOKEN>" https://target/api/me
+```
+
+Success = protected resource returns data for attacker-controlled claims. Rejection with `401`/`403` and no claim trust indicates effective mitigation.
 
 ## Common False Alarms
 
@@ -154,6 +240,49 @@ Verification must bind the token to the correct issuer, audience, key, and clien
 - **VULN**: `JWT::decode($token, null, ['none'])` — Firebase JWT with null key and none algorithm
 - **VULN**: Base64-decoding claims and using them without signature verification
 - **Pattern**: Any `alg: none` acceptance = CRITICAL
+
+### Java (jjwt)
+- **VULN**: deprecated `Jwts.parser().setSigningKey(key).parseClaimsJws(token)` — trusts header `alg`
+- **VULN**: parse succeeds but `exp`/`iss`/`aud` never enforced via `require*` builders
+- **SAFE**: `Jwts.parserBuilder().requireIssuer("myapp").requireAudience("myapp-api").setSigningKey(key).build().parseClaimsJws(token)`
+
+### Go (golang-jwt / dgrijalva/jwt-go)
+- **VULN**: key func returns secret without checking `token.Method` — accepts `alg: none` and unexpected algs
+- **VULN**: `var jwtKey = []byte("secret")` — weak hardcoded secret
+- **SAFE**: reject non-HMAC before returning key:
+
+```go
+token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+    if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+        return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+    }
+    return []byte(os.Getenv("JWT_SECRET")), nil
+})
+```
+
+### kid / JWK Header Injection
+
+```python
+# VULN: kid in SQL without parameterization
+def get_signing_key(kid):
+    return db.execute(f"SELECT key FROM jwt_keys WHERE id = '{kid}'").fetchone()[0]
+
+# SECURE: parameterized lookup + unknown kid rejection
+def get_signing_key(kid):
+    row = db.execute("SELECT key FROM jwt_keys WHERE id = %s", (kid,)).fetchone()
+    if not row:
+        raise ValueError("Unknown key id")
+    return row[0]
+```
+
+```javascript
+// VULN: inline jwk from token header used as verify key
+const { publicKey } = getPublicKeyFromHeader(decoded.header);
+jwt.verify(token, publicKey);
+
+// SECURE: only pre-configured trusted key
+jwt.verify(token, loadKeyFromConfig(), { algorithms: ['RS256'] });
+```
 
 ## FALSE POSITIVE Rules
 

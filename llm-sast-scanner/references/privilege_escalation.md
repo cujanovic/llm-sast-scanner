@@ -23,6 +23,172 @@ Broken access control arises when an application fails to enforce that users may
 
 ---
 
+## Missing Authentication & Broken Function-Level Authorization (BFLA)
+
+Function-level access control failures at the **endpoint** layer — distinct from object-level IDOR (see `idor.md`).
+
+### Class Boundaries
+
+| Class | Condition | Example |
+|-------|-----------|---------|
+| **Missing authentication** | Sensitive action with no login/session/token required | `DELETE /api/admin/users/5` succeeds with no `Authorization` header |
+| **Broken function-level authorization (BFLA)** | User is authenticated but endpoint lacks role/permission check | Regular user token deletes admin user |
+| **IDOR (object-level)** | Authenticated user accesses another user's resource by changing an ID | `GET /api/orders/1002` returns another user's order → see `idor.md` |
+| **JWT weaknesses** | Flawed token signing, verification, or algorithm handling | Forged `role=admin` claim → see `authentication_jwt.md` |
+| **Business logic flaws** | Workflow or state manipulation (price, quantity, step skip) | Not BFLA — separate class |
+
+**Vertical escalation** (user → admin function) and **missing authentication** are covered here. **Horizontal escalation** (user A → user B's object) is IDOR unless combined with a privileged operation.
+
+### BFLA Vulnerability Classes
+
+1. **Unauthenticated sensitive endpoint** — modifies data, returns private info, or performs admin actions with no auth gate.
+2. **Authenticated, missing role check** — `@login_required` / `[Authorize]` present but no admin/permission verification on a privileged route.
+3. **Incomplete or bypassable authorization** — role check on GET but not DELETE; check conditional on attacker-controlled header/param; route mounted before auth middleware applies; `except:` list excludes a sensitive action.
+
+### Recon Indicators
+
+Grep for route/handler definitions, then verify each sensitive endpoint has **both** authentication and authorization:
+
+**Route registration patterns**
+- Express/Koa: `router.get|post|put|delete|patch|use`
+- Django: `urlpatterns`, `path(`, `re_path(`
+- Flask/FastAPI: `@app.route`, `@router.get|post|delete`
+- Rails: `routes.rb` — `resources`, `namespace :admin`
+- Spring: `@GetMapping`, `@PostMapping`, `@DeleteMapping`, `@RequestMapping`
+- Go/Chi: `r.Get`, `r.Post`, `r.Delete`, `r.Group`
+- Laravel: `Route::get|post|delete`
+- ASP.NET: `[HttpGet]`, `[HttpPost]`, `[HttpDelete]`
+
+**Missing or inconsistent guards**
+- Handler under `/admin`, `/management`, `/internal`, `/api/admin`, `/system` with no auth decorator or middleware
+- `authenticate_user!` / `@login_required` / `[Authorize]` without accompanying role check (`@admin_required`, `@PreAuthorize`, `requireRole`, `role:admin`)
+- Same resource: GET protected, POST/DELETE/PUT unguarded
+- Route registered **before** auth middleware in the stack, or mounted outside a protected route group
+- Client-side-only gating: UI hides admin nav but server handler has no role check
+
+**Role/permission system signals**
+- Decorators: `@admin_required`, `@roles_required`, `@PreAuthorize`, `requireRole(`, `middleware('role:admin')`
+- In-handler: `is_staff`, `is_superuser`, `user.role == 'admin'`, `Gate::authorize`, `User.IsInRole`
+- Explicit exclusions: `except: [:index, :show]`, `skip_before_action :authenticate`
+
+**Sensitive endpoints to prioritize**
+- User management (create/delete users, change roles, reset others' passwords)
+- Config/secrets (SMTP, feature flags, env vars)
+- Aggregate reads (all users, all orders, audit logs)
+- System actions (broadcast email, run jobs, clear cache)
+
+### Preventing Patterns
+
+- **Default-deny middleware** on route groups — auth + role check applied to entire prefix before any handler:
+  ```javascript
+  router.use('/admin', auth, requireRole('admin'));
+  router.delete('/admin/users/:id', deleteUser);   // inherited protection
+  ```
+- **Declarative annotations** at method level — `@PreAuthorize("hasRole('ADMIN')")`, `[Authorize(Roles = "Admin")]`
+- **In-handler check** before sensitive action when middleware is impractical:
+  ```python
+  if not request.user.is_staff:
+      return HttpResponseForbidden()
+  ```
+- **Centralized authorization** — Policy/Gate/Ability objects (`Gate::define`, Pundit, CanCanCan) invoked from every privileged controller action
+- **Server-side role lookup** — never trust client-supplied role/admin flags; derive permissions from DB record tied to authenticated session
+
+Trace middleware order: middleware registered **after** the route does not protect it. Check **every HTTP method** on the same path.
+
+### Vulnerable vs. Secure — Additional Frameworks
+
+Frameworks with dedicated detection rules below (Python, JavaScript, PHP, Java) are omitted here.
+
+#### Ruby on Rails
+
+```ruby
+# VULNERABLE: No before_action
+def destroy
+  User.find(params[:id]).destroy
+  head :no_content
+end
+
+# VULNERABLE: Authenticated but no admin check
+before_action :authenticate_user!
+def destroy
+  User.find(params[:id]).destroy
+  head :no_content
+end
+
+# SECURE
+before_action :authenticate_user!, :require_admin
+def destroy
+  User.find(params[:id]).destroy
+  head :no_content
+end
+
+private
+def require_admin
+  head :forbidden unless current_user.admin?
+end
+```
+
+#### Go (Chi)
+
+```go
+// VULNERABLE: No auth middleware
+r.Delete("/admin/users/{id}", deleteUser)
+
+// VULNERABLE: Auth middleware but no role check
+r.With(AuthMiddleware).Delete("/admin/users/{id}", deleteUser)
+
+// SECURE: Group-level gates
+r.Group(func(r chi.Router) {
+    r.Use(AuthMiddleware)
+    r.Use(AdminOnlyMiddleware)
+    r.Delete("/admin/users/{id}", deleteUser)
+})
+```
+
+#### C# — ASP.NET Core
+
+```csharp
+// VULNERABLE: No authorization attribute
+[HttpDelete("api/admin/users/{id}")]
+public async Task<IActionResult> DeleteUser(int id) {
+    await _userService.DeleteAsync(id);
+    return NoContent();
+}
+
+// VULNERABLE: [Authorize] but no role restriction
+[Authorize]
+[HttpDelete("api/admin/users/{id}")]
+public async Task<IActionResult> DeleteUser(int id) { ... }
+
+// SECURE
+[Authorize(Roles = "Admin")]
+[HttpDelete("api/admin/users/{id}")]
+public async Task<IActionResult> DeleteUser(int id) { ... }
+```
+
+### Dynamic Test / PoC
+
+Confirm BFLA findings at runtime — static analysis alone cannot prove middleware ordering in all deployments.
+
+**Missing authentication** — call sensitive endpoint with no credentials; success (200/204 + data/action) confirms:
+```bash
+curl -X DELETE https://<HOST>/api/admin/users/5
+# Expected if vulnerable: 204 No Content (user deleted)
+# Expected if secure: 401 Unauthorized
+```
+
+**Missing role check** — call admin endpoint with a regular (non-admin) user token; success confirms BFLA:
+```bash
+curl -X DELETE https://<HOST>/api/admin/users/5 \
+  -H "Authorization: Bearer <REGULAR_USER_TOKEN>"
+# Expected if vulnerable: 204 No Content
+# Expected if secure: 403 Forbidden
+```
+
+Compare HTTP methods on the same path — a protected GET with unprotected DELETE is a common partial-fix signal.
+
+---
+
 ## Python Source Detection Rules
 
 ### Flask missing decorators

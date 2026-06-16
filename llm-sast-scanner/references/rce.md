@@ -211,6 +211,75 @@ pop graphic-context
 4. **Map boundaries** — Readable/writable file paths, outbound egress routes
 5. **Progress to control** — File write, scheduled execution, service restart hooks
 
+## Recon Indicators (Dangerous Sinks)
+
+Flag sinks where a non-constant variable appears in a dangerous position. Phase-2 taint analysis determines exploitability.
+
+**OS command execution**
+
+| Language | Grep targets |
+|----------|--------------|
+| Python | `os.system(`, `os.popen(`, `subprocess.*shell=True`, string-form `subprocess.run(` / `Popen(` with variables |
+| Node.js | `child_process.exec(`, `execSync(`, `spawn(.*shell:\s*true`, `shelljs.exec(` |
+| PHP | `exec(`, `system(`, `passthru(`, `shell_exec(`, `` ` `` backticks with `{$` or concatenation |
+| Ruby | `system("` with `#{}`, backticks, `%x{`, `IO.popen(`, `Open3.popen3(` |
+| Java | `Runtime.getRuntime().exec(`, `ProcessBuilder(` with variable args or `"sh", "-c"` |
+| Go | `exec.Command(` where command name or args are built from external input |
+| C# | `Process.Start(`, `ProcessStartInfo` with variable `FileName`/`Arguments` |
+
+**Code evaluation**
+
+| Language | Grep targets |
+|----------|--------------|
+| Python | `eval(`, `exec(`, `compile(` + exec, `importlib.import_module(`, `__import__(` |
+| JavaScript | `eval(`, `new Function(`, `setTimeout(.*\+`, `vm.runInNewContext(`, dynamic `require(` |
+| PHP | `eval(`, `preg_replace.*/e`, `assert(`, `create_function(`, `call_user_func(` |
+| Ruby | `eval(`, `instance_eval(`, `class_eval(`, `binding.eval(` |
+
+**Unsafe deserialization** — flag all usages; confirm external data flow separately. See [insecure_deserialization.md](insecure_deserialization.md).
+
+**Skip (safe)** — list-form subprocess/spawn without shell; `json.loads`/`JSON.parse`; `yaml.safe_load`; `ast.literal_eval`.
+
+## Safe Patterns
+
+When these patterns are present and complete, command-injection risk is typically eliminated:
+
+**Argument-vector exec (no shell)**
+
+```python
+subprocess.run(["convert", "-resize", size, infile, outfile])  # no shell=True
+```
+
+```javascript
+child_process.spawn("ffmpeg", ["-i", inputFile, outputFile]);
+```
+
+```java
+new ProcessBuilder("ls", "-la", dir).start();
+```
+
+```ruby
+system("ffmpeg", "-i", "input.mp4", "-f", format, "output")  # separate args, not interpolated string
+```
+
+**Strict allowlist before use**
+
+```python
+ALLOWED_FORMATS = {"png", "jpg", "webp"}
+if fmt not in ALLOWED_FORMATS:
+    return abort(400)
+subprocess.run(["convert", infile, f"output.{fmt}"])
+```
+
+**Safe expression parsing (Python)**
+
+```python
+from ast import literal_eval
+result = literal_eval(user_data)  # literals only — not eval()
+```
+
+**Safe deserialization** — prefer JSON or safe loaders; see [insecure_deserialization.md](insecure_deserialization.md).
+
 ## Confirming a Finding
 
 1. Deliver a minimal, reproducible oracle (DNS/HTTP/timing) demonstrating controlled code execution
@@ -218,6 +287,21 @@ pop graphic-context
 3. Demonstrate persistence or file write within application constraints
 4. If containerized, document boundary crossing attempts (host files, Kubernetes APIs) and whether they succeed
 5. Keep PoCs minimal and reproducible across multiple runs and transport variants
+
+**Dynamic test (from static sink)**
+
+For command injection sinks, confirm with a delimiter payload and look for command output or timing:
+
+```bash
+# Direct output oracle
+curl "https://app.example.com/ping?host=127.0.0.1;id"
+curl "https://app.example.com/ping?host=127.0.0.1%3Bid"   # URL-encoded ;
+
+# Timing oracle (when output is suppressed)
+curl "https://app.example.com/ping?host=127.0.0.1;sleep+3"
+```
+
+For `eval`/expression sinks, inject a side-effect oracle (`process.exit()`, `__import__('os').system('id')`) and observe response change or OAST callback. For deserialization findings, craft format-specific payloads per [insecure_deserialization.md](insecure_deserialization.md).
 
 ## Common False Alarms
 
@@ -250,6 +334,27 @@ RCE is a property of the execution boundary. Locate the sink, establish a quiet 
 
 Command injection and RCE are related but distinct vulnerability classes. Using the precise label improves triage accuracy and remediation guidance.
 
+### What RCE Is
+
+- User input reaching OS command execution with shell interpretation enabled (`shell=True`, string-form `system`/`exec`, `sh -c` wrappers)
+- `eval()`, `exec()`, `Function()`, or equivalent interpreting user-controlled strings as code
+- Dynamic `require()`/`import()` or `importlib.import_module()` with user-controlled module paths
+- PHP file inclusion (`include`/`require`) with user-controlled paths
+- `yaml.load()` without a safe loader on user-supplied content
+- Unsafe deserialization of attacker-controlled bytes — see [insecure_deserialization.md](insecure_deserialization.md) (pickle, PHP `unserialize`, Java native serialization, Ruby Marshal, etc.)
+
+### What RCE Is Not
+
+Do not flag these as RCE:
+
+- **SSRF** — HTTP requests to attacker URLs; no direct code execution
+- **Path traversal** — arbitrary file read/write unless the file is then executed or deserialized
+- **SSTI** — template engine injection; classify as SSTI, not RCE (even when it leads to code execution)
+- **XSS** — client-side JavaScript in a victim browser
+- **SQL injection** — database query injection (even when `xp_cmdshell` chains to OS commands)
+- **Safe subprocess list-form** — `subprocess.run(["ls", user_arg])` with no `shell=True`; args pass to the OS without shell expansion
+- **Safe deserialization formats** — `json.loads()`, `yaml.safe_load()`, `JSON.parse()`; no code execution semantics
+
 ### Command Injection (OS Command Injection)
 The attacker's input reaches an **OS shell or process execution sink** and is interpreted as part of a shell command:
 
@@ -259,6 +364,8 @@ The attacker's input reaches an **OS shell or process execution sink** and is in
 - Node.js: `child_process.exec()`, `child_process.execSync()`
 - Java: `Runtime.getRuntime().exec()`, `ProcessBuilder` with user args
 - Ruby: `system()`, backticks, `%x{}`, `IO.popen()`, `Open3.capture3()`
+- Go: `exec.Command()` with user-built command or `sh -c` wrapper
+- C#: `Process.Start()`, `ProcessStartInfo` with variable `FileName`/`Arguments`
 
 **Key characteristic**: the user input is concatenated into a **shell command string** or passed as **arguments to an OS process**. The exploit uses shell metacharacters (`;`, `|`, `&&`, `$()`, backticks) to inject additional commands.
 
@@ -308,6 +415,15 @@ Use RCE only when the execution primitive is **NOT an OS command shell** but rat
 - **SAFE**: `subprocess.run(["ls", user_input], shell=False)` — list form, no shell injection
 - **KEY**: `shell=True` + any user input = HIGH RISK
 
+```python
+# VULN: eval with user input
+result = eval(request.args.get('expr'))  # __import__('os').system('id')
+
+# SECURE: ast.literal_eval for literals only
+from ast import literal_eval
+result = literal_eval(request.args.get('data'))
+```
+
 ### JavaScript (Node.js)
 - **VULN**: `child_process.exec(userInput, callback)` — shell interprets the string
 - **VULN**: `child_process.execSync(userInput)`
@@ -320,6 +436,77 @@ Use RCE only when the execution primitive is **NOT an OS command shell** but rat
 - **VULN**: `` `$userInput` `` — backtick operator executes shell command
 - **VULN**: `shell_exec($userInput)`, `proc_open($userInput, ...)`
 - **PARTIAL** (not a complete fix): `escapeshellarg()` + `escapeshellcmd()` wrapping reduces risk but is unreliable (the two interact badly and still allow argument/option injection); prefer avoiding the shell entirely (`proc_open` with an arg array)
+
+### PHP — Command Injection Examples
+
+```php
+// VULNERABLE: shell_exec with interpolated user input
+function generateThumbnail($file) {
+    $size = $_GET['size'];
+    shell_exec("convert {$file} -resize {$size} thumb.jpg");
+}
+
+// VULNERABLE: backtick operator
+$result = `ping -c 1 $host`;
+
+// PARTIAL: escapeshellarg reduces but does not eliminate risk — prefer no shell
+$size = escapeshellarg($_GET['size']);
+shell_exec("convert $file -resize $size thumb.jpg");
+```
+
+### Ruby — Command Injection Examples
+
+```ruby
+# VULNERABLE: string interpolation in system()
+get '/convert' do
+  format = params[:format]
+  system("ffmpeg -i input.mp4 -f #{format} output")
+end
+
+# VULNERABLE: backtick with user input
+def check_dns
+  `nslookup #{params[:host]}`
+end
+
+# SECURE: separate args + allowlist
+get '/convert' do
+  format = params[:format]
+  ALLOWED = %w[mp4 avi mkv]
+  return 400 unless ALLOWED.include?(format)
+  system("ffmpeg", "-i", "input.mp4", "-f", format, "output")
+end
+```
+
+### Go — Command Injection Examples
+
+```go
+// VULNERABLE: user input in command string passed to sh -c
+cmd := exec.Command("sh", "-c", "ping -c 1 "+host)
+
+// VULNERABLE: user controls binary name or args from unsplit external input
+cmd := exec.Command(userCmd, userArgs...)
+
+// SECURE: fixed binary, user value as discrete arg (verify no flag injection)
+cmd := exec.Command("ping", "-c", "1", host)
+```
+
+### C# — Command Injection Examples
+
+```csharp
+// VULNERABLE: user input in Arguments string (shell interpretation)
+var psi = new ProcessStartInfo {
+    FileName = "cmd.exe",
+    Arguments = "/c ping " + userHost
+};
+Process.Start(psi);
+
+// SECURE: fixed FileName, user value as separate argument (no shell)
+var psi = new ProcessStartInfo {
+    FileName = "ping",
+    ArgumentList = { "-c", "1", userHost }
+};
+Process.Start(psi);
+```
 
 ## Java Servlet Patterns — Command Injection (CWE-78)
 

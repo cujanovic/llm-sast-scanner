@@ -7,6 +7,28 @@ description: Detect hardcoded or default credentials used for authentication, da
 
 Hardcoded credentials are secrets — passwords, API keys, signing keys — embedded directly in source code, configuration files, or connection strings. They represent a critical risk: they are committed to version control, visible to every person with repository access, and cannot be rotated without a code change and a new deployment.
 
+Secrets leaked at runtime via logs, error messages, HTTP responses, or debug endpoints belong to **information_disclosure** — see `information_disclosure.md`. This class covers credentials embedded in source, config, or build artifacts at rest.
+
+## What It Is and Is Not
+
+### What it IS
+
+- Passwords, API keys, access tokens, private keys, JWT/signing secrets, or connection strings assigned as string literals
+- Default or factory credentials (`admin`/`password`, `root`/`root`) used on reachable auth or DB paths
+- Fallback literals when env vars are unset: `process.env.ADMIN_PASSWORD || 'default_password'`
+- Secrets in client-shipped code (frontend bundles, mobile binaries, `public/`/`static/` assets) — extractable without server access
+- High-entropy literals assigned to `*password*`, `*secret*`, `*token*`, `*api_key*`, `*private_key*` variables
+
+### What it is NOT
+
+- **Placeholders**: `"your-api-key-here"`, `"changeme"`, `"REPLACE_ME"`, `"<api_key>"`, `"dummy"`, `"TODO"`, empty strings
+- **Env-var reads**: `process.env.API_KEY`, `os.environ["SECRET"]`, `System.getenv("KEY")` — runtime lookup, not hardcoded
+- **Public keys**: RSA/EC public keys, SSH `authorized_keys` entries — designed to be shared
+- **Publishable-by-design keys**: Stripe `pk_test_*`/`pk_live_*`, Firebase client `apiKey`, Google Maps browser keys (restrict by referrer)
+- **Test fixtures**: keys in `tests/`, `__mocks__/`, `*_test.go` — lower risk unless shipped to clients
+- **Type definitions / docs**: `interface Config { apiKey: string }`, comments describing key format
+- **Runtime disclosure**: credentials in stack traces, API error bodies, or log output — tag `information_disclosure`
+
 ## Vulnerable Conditions
 
 A true positive requires **both** of the following:
@@ -15,14 +37,55 @@ A true positive requires **both** of the following:
 
 ## Safe Patterns
 
-- Placeholder strings: `<YOUR_PASSWORD_HERE>`, `${DB_PASSWORD}`, `%(password)s`, `{password}` — these are template slots awaiting substitution, not real secrets.
+- Placeholder strings: `<YOUR_PASSWORD_HERE>`, `${DB_PASSWORD}`, `%(password)s`, `{password}` — template slots awaiting substitution, not real secrets.
 - Empty strings: `password = ""` — no credential is present.
 - Test/mock files: code inside `tests/`, `test_*.py`, `*_test.go`, `__mocks__/` — carries lower risk but should still be noted.
 - Code comments that describe what a credential should look like without supplying one.
+- Environment variables: `os.environ.get('SECRET_KEY')`, `process.env.API_KEY`, `ENV["DB_PASSWORD"]`.
+- Secrets managers / key vaults: AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault — fetched at runtime, not stored as literals.
+- Distinguishing real vs placeholder: real credentials have high entropy (20+ random chars) and match provider formats; placeholders use dictionary words, repeated chars, or explicit marker strings.
 
 ## Common Vulnerable Values
 
 `admin`, `password`, `123456`, `root`, `changeme`, `secret`, `test`, `demo`, `letmein`, `qwerty`
+
+## Where to Look
+
+- Application source: config modules, init/seed scripts, shared `utils/`/`lib/` imported by client entry points
+- Config files: `.env`, `config.ini`, `application.yml`, `appsettings.json`, `wp-config.php`
+- Infrastructure: `docker-compose.yml`, Kubernetes manifests, Dockerfiles, Makefiles
+- CI/CD: `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile`
+- Client-shipped paths: `public/`, `static/`, `assets/`, frontend bundles, mobile app source (APK/IPA decompilation)
+- Version history: `git log -p`, deleted commits — secrets persist after removal
+
+## Recon Indicators
+
+Grep for distinctive formats and secret-named assignments; trace whether the file reaches a client bundle or auth path.
+
+**High-confidence regex patterns**
+
+| Secret Type | Pattern |
+|---|---|
+| AWS Access Key ID | `AKIA[0-9A-Z]{16}` |
+| Google API Key | `AIza[0-9A-Za-z\-_]{35}` |
+| GitHub PAT | `ghp_[0-9A-Za-z]{36}`, `github_pat_[0-9A-Za-z_]{82}` |
+| Slack Token | `xoxb-`, `xoxp-` |
+| Stripe Secret Key | `sk_live_`, `sk_test_` |
+| SendGrid API Key | `SG\.` |
+| OpenAI API Key | `sk-[A-Za-z0-9]{20,}` |
+| Private Key | `-----BEGIN (RSA \|EC \|OPENSSH )?PRIVATE KEY-----` |
+| DB Connection String | `postgresql://[^:]+:[^@]+@`, `mysql://[^:]+:[^@]+@`, `mongodb://[^:]+:[^@]+@` |
+
+**Variable assignment patterns**
+
+- `api_key = "..."`, `apiKey: "..."`, `SECRET_KEY = '...'`, `password = "..."`, `client_secret = "..."`
+- Long alphanumeric strings (32+ chars) or base64 blobs assigned to auth-related variable names
+- `*api_key*`, `*secret*`, `*token*`, `*password*`, `*private_key*`, `*connection_string*`, `DATABASE_URL`
+
+**Skip during recon**
+
+- `process.env.*`, `os.environ[*]`, `System.getenv(*)`, `ENV[*]`
+- Obvious placeholders, public keys, type-only definitions, hash checksums, build IDs
 
 ---
 
@@ -150,5 +213,49 @@ These patterns detect hardcoded secrets generally, but the `default_credentials`
 
 **VULN (Java)**: `new URL("http://api.example.com").openConnection()` with Basic auth header.
 **SAFE (Java)**: Same pattern over `https://`.
+
+## Examples
+
+**VULN (Python)** — hardcoded API key and DB password:
+
+```python
+API_KEY = "sk-EXAMPLEFAKEKEY1234567890ABCDEF"
+db_url = "postgresql://admin:SuperSecret123@db.internal/app"
+```
+
+**SAFE (Python)** — env lookup and secrets manager:
+
+```python
+API_KEY = os.environ["API_KEY"]
+db_url = os.environ["DATABASE_URL"]
+# or: client.get_secret_value(SecretId="prod/db")
+```
+
+**VULN (JavaScript)** — secret embedded in client bundle:
+
+```javascript
+const stripeKey = "sk_live_EXAMPLEFAKEKEY1234567890";
+fetch("https://api.stripe.com/v1/charges", {
+  headers: { Authorization: `Bearer ${stripeKey}` }
+});
+```
+
+**SAFE (JavaScript)** — server-side env read; client calls backend proxy:
+
+```javascript
+const stripeKey = process.env.STRIPE_SECRET_KEY; // server-only route
+// client: fetch("/api/charge", { method: "POST", body })
+```
+
+## Dynamic Test / Validation
+
+Confirm a candidate is a live credential (conceptually — never paste real values):
+
+1. **Real vs placeholder**: check entropy and provider format; reject dictionary words and marker strings (`changeme`, `your-key-here`).
+2. **Reachability**: trace import chain — does the file ship in a client bundle, mobile binary, or public static asset?
+3. **Client exposure (web)**: search bundled JS in browser DevTools Sources for the key prefix (e.g., `AKIA`, `sk_live_`).
+4. **Mobile**: decompile APK/IPA and grep for the pattern; React Native JS bundles are plaintext.
+5. **API validity (controlled)**: if authorized, send a minimal read-only request to the provider's identity/account endpoint using the extracted key; a `401`/`403` suggests invalid/revoked; a `200` with account metadata confirms live exposure.
+6. **Rotation check**: compare against the secrets manager or env var the deployment actually uses — a literal in source that matches production confirms the finding.
 
 Commonly affected languages: Python, JavaScript, Go, Ruby, C#, Java, Swift.

