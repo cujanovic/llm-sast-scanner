@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 40 vulnerability classes.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 59 vulnerability classes.
 
 ---
 
@@ -53,7 +53,7 @@ llm-sast-scanner/              ← repo root
 ├── README.md
 └── llm-sast-scanner/          ← skill directory (copy this)
     ├── SKILL.md               # 6-step workflow + Judge verification
-    └── references/            # 40 vulnerability knowledge bases
+    └── references/            # 59 vulnerability knowledge bases
         ├── xss.md
         ├── sql_injection.md
         ├── path_traversal_lfi_rfi.md
@@ -61,7 +61,7 @@ llm-sast-scanner/              ← repo root
         ├── server_side_prototype_pollution.md
         ├── client_side_prototype_pollution.md
         ├── shared_client_cache_leak.md
-        └── ... (40 files total)
+        └── ... (59 files total)
 ```
 
 ### SKILL.md
@@ -80,7 +80,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 
 ## Vulnerability Coverage
 
-40 reference files covering the following categories:
+59 reference files covering the following categories:
 
 ### Injection
 | File | Vulnerability |
@@ -94,19 +94,25 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `xxe.md` | XML External Entity (CWE-611) |
 | `rce.md` | Remote Code Execution / Command Injection |
 | `expression_language_injection.md` | Expression Language Injection (SpEL, OGNL) |
+| `ldap_injection.md` | LDAP Injection (CWE-90) |
+| `xpath_injection.md` | XPath / XQuery / XML Injection (CWE-643 / 652 / 91) |
+| `csv_injection.md` | CSV / Formula Injection (CWE-1236) |
+| `log_injection.md` | Log Injection / Log Forging (CWE-117) |
+| `prompt_injection.md` | LLM Prompt Injection (CWE-1427) |
 
 ### Access Control & Auth
 | File | Vulnerability |
 |------|--------------|
 | `idor.md` | Insecure Direct Object Reference |
-| `privilege_escalation.md` | Privilege Escalation |
-| `authentication_jwt.md` | JWT Vulnerabilities (alg:none, weak secret) |
+| `privilege_escalation.md` | Privilege Escalation + Missing Auth / Broken Function-Level Authorization (BFLA) |
+| `authentication_jwt.md` | Authentication / JWT Vulnerabilities (alg:none, weak secret) |
 | `default_credentials.md` | Hardcoded / Default Credentials |
 | `brute_force.md` | Brute Force / Missing Rate Limiting |
 | `business_logic.md` | Business Logic Flaws |
 | `http_method_tamper.md` | HTTP Method Tampering |
 | `verification_code_abuse.md` | Verification Code Abuse |
 | `session_fixation.md` | Session Fixation (CWE-384) |
+| `mass_assignment.md` | Mass Assignment / Autobinding of Privileged Fields (CWE-915) |
 
 ### Data Exposure & Crypto
 | File | Vulnerability |
@@ -116,6 +122,8 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `insecure_cookie.md` | Insecure Cookie Flags (CWE-614, CWE-1004) |
 | `trust_boundary.md` | Trust Boundary Violation (CWE-501) |
 | `shared_client_cache_leak.md` | Shared-Client Cache/Dedup Cross-User Leak — in-process leakage via shared client caches, request dedup/coalescing, mutable-auth singletons, pooled-connection & thread-local reuse, module-global request state (CWE-488 / CWE-524 / CWE-567 / CWE-362) |
+| `cleartext_transmission.md` | Cleartext Transmission / Missing TLS (CWE-319 / 311) |
+| `certificate_validation.md` | TLS Certificate / Hostname / Pinning / Revocation Failures (CWE-295 / 297 / 299 / 322) |
 
 ### Server-Side Attacks
 | File | Vulnerability |
@@ -128,6 +136,8 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `arbitrary_file_upload.md` | Arbitrary File Upload |
 | `jndi_injection.md` | JNDI Injection (Log4Shell class) |
 | `race_conditions.md` | Race Conditions / TOCTOU |
+| `insecure_temp_file.md` | Insecure Temporary File Creation / Predictable Names (CWE-377) |
+| `file_permissions.md` | Incorrect Permission Assignment / World-Writable Files / Weak DACLs (CWE-732) |
 
 ### Protocol & Infrastructure
 | File | Vulnerability |
@@ -135,14 +145,27 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `csrf.md` | Cross-Site Request Forgery |
 | `open_redirect.md` | Open Redirect |
 | `smuggling_desync.md` | HTTP Request Smuggling / Desync |
+| `http_response_splitting.md` | HTTP Response Splitting / Header Injection (CWE-113) |
+| `host_header_poisoning.md` | Host Header Poisoning / Email-Link Injection (CWE-640) |
+| `cors_misconfiguration.md` | CORS Misconfiguration / Permissive Origin Reflection (CWE-346 / 942) |
+| `clickjacking.md` | Clickjacking / Missing X-Frame-Options / CSP frame-ancestors (CWE-451) |
 | `web_cache_deception.md` | Web Cache Deception / Cache Poisoning — cached personalized/authenticated responses, unkeyed-input poisoning, cache-key confusion (CWE-525) |
+| `denial_of_service.md` | Denial of Service / Resource Exhaustion |
+| `regex_injection_redos.md` | Regex Injection / ReDoS / Incomplete Regex Validation (CWE-730 / 1333 / 20 / 625 / 116) |
+| `cve_patterns.md` | Known CVE Patterns |
+
+### Output & Hardening
+| File | Vulnerability |
+|------|--------------|
+| `output_encoding.md` | Inappropriate Encoding for Output Context / Encoder-Context Mismatch (CWE-838) |
+| `format_string_injection.md` | Externally-Controlled Format String (CWE-134) |
+| `aspnet_security_misconfig.md` | ASP.NET Security Misconfiguration — debug binary, disabled request validation (CWE-11 / 16) |
+| `hardcoded_code_backdoor.md` | Embedded Malicious Code / Supply-Chain Backdoor Patterns (CWE-506) |
 
 ### Supply Chain
 | File | Vulnerability |
 |------|--------------|
 | `dependency_confusion.md` | Dependency Confusion / substitution — candidate flagging of internal packages a public registry could shadow, across npm, PyPI, RubyGems, Maven/Gradle, NuGet, Go, Composer, Cargo (CWE-1357) |
-| `denial_of_service.md` | Denial of Service / Resource Exhaustion |
-| `cve_patterns.md` | Known CVE Patterns |
 
 ### Language / Platform
 | File | Vulnerability |
