@@ -9,7 +9,7 @@ description: >
   over the consolidated findings and writes a timestamped consolidated report.
 disable-model-invocation: true
 metadata:
-  version: "1.0.0"
+  version: "1.1.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -37,8 +37,10 @@ Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-sca
 reference files from its `references/` directory ON DEMAND, per pass — only the subset relevant to the
 current pass's analysis lens (see LOOP CONTROL), rather than all 59 at once. As the lens rotates across
 passes, every vulnerability class gets covered, without holding all references in context simultaneously.
-All step numbers (Step 1-6), the Judge protocol, the false-positive guardrails, the severity model, and the
-report structure are defined there and MUST be used.
+Following the base skill's read-once discipline, keep the current pass's lens references loaded while you read
+each file so all of that pass's classes are evaluated in a single read. All step numbers (Step 1-6), the Judge
+protocol, the false-positive guardrails, the severity model, and the report structure are defined there and
+MUST be used.
 
 ## Procedure
 
@@ -60,6 +62,19 @@ GROUND RULES
   *.min.js, *.bundle.js, source maps); and lock files (package-lock.json, yarn.lock, pnpm-lock.yaml,
   poetry.lock, Gemfile.lock, etc.). If a specific dependency must be reviewed, do it deliberately — not as
   part of the line-by-line repo sweep.
+- SCOPE MANIFEST (build ONCE, before pass 1): enumerate the in-scope files + line counts deterministically with
+  the shell, so coverage has an objective denominator and you never re-discover files on later passes:
+  ```bash
+  cd "dir as argument"
+  { git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f; } \
+    | grep -ivE '(^|/)(node_modules|vendor|third_party|dist|build|out|\.git|coverage)/' \
+    | grep -ivE '\.(min\.js|bundle\.js|map|png|jpe?g|gif|webp|ico|pdf|zip|gz|jar|woff2?|ttf|mp4|so|dylib|dll|exe|wasm)$' \
+    | grep -ivE '(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Gemfile\.lock|go\.sum|Cargo\.lock)$' \
+    | tr '\n' '\0' | xargs -0 grep -Il '' 2>/dev/null \
+    | tr '\n' '\0' | xargs -0 wc -l 2>/dev/null | sort -n
+  ```
+  This file list is the coverage denominator; seed the LOOP CONTROL coverage map from it and tick each file off
+  as its lines are read. (Enumerating once also avoids re-listing the tree on every pass.)
 - During the loop, run Steps 1–5 ONLY: Source→Sink taint tracking (Step 3), business-logic/auth analysis
   (Step 4), and Judge re-verification (Step 5). DO NOT run Adversarial Impact Validation (Step 6) inside the
   loop — no adv during passes.
@@ -73,7 +88,9 @@ cap of 10; NO adv inside the loop)
   first pass that reaches it — and keep notes sufficient to reason about it later. A subsequent "pass" is a
   re-ANALYSIS of already-read code under a different lens, NOT a fresh full re-read. Re-read a file's bytes
   only when (a) it still has unread lines, or (b) you are tracing a cross-file data-flow chain into it. This
-  keeps total read cost ~1x the repo while still getting multi-lens depth.
+  keeps total read cost ~1x the repo while still getting multi-lens depth. (Optional accelerator: `rg` for
+  high-risk sink keywords to decide where to look first — but you MUST still read every in-scope line for
+  coverage, not just `rg` hits.)
 - Iteration = one analysis pass that covers the entire in-scope repo under the current lens (reading any
   not-yet-read files in full as it goes).
 - After each pass, compare against the ledger:
@@ -94,9 +111,10 @@ cap of 10; NO adv inside the loop)
 supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
 pass's lens (not all 59 at once) to keep context cost bounded.
 COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-5 ceiling, or the pass-10 cap)
-- Before finalizing, confirm via the coverage map that EVERY line of EVERY in-scope file (per the GROUND
-  RULES scope + exclusions) was actually read (not sampled). Produce a coverage checklist: each file with
-  its total line count and the line ranges read. List excluded paths (vendored deps, build output, lock
+- Before finalizing, reconcile the coverage map against the SCOPE MANIFEST built before pass 1 and confirm
+  that EVERY line of EVERY in-scope file (per the GROUND RULES scope + exclusions) was actually read (not
+  sampled) — every manifest file marked fully read `1..total_lines`. Produce a coverage checklist: each file
+  with its total line count and the line ranges read. List excluded paths (vendored deps, build output, lock
   files, binaries) separately as "excluded" — they are not coverage gaps.
 - If any in-scope file or line range was NOT fully read, run one more targeted pass over only the
   unread lines until coverage is 100%. (This coverage-completion pass does not count toward the
