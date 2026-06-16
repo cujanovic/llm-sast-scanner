@@ -133,6 +133,35 @@ setProp(target, '__proto__.shell', '/bin/sh -c "id"')                // VULN
 
 ---
 
+## Pollution → RCE / Auth Bypass / DoS Escalation Chain
+
+SAST triage requires source → sink → gadget read in the **same process**. Pair downstream CWE to the gadget reached.
+
+| Stage | What to find | Server indicator |
+|-------|--------------|------------------|
+| Source | Attacker JSON/config in request | `req.body`, `req.query` (extended qs), upload field names, WS/GraphQL variables |
+| Sink | Recursive merge or path setter into real object | `_.merge`, `_.set`, `defaultsDeep`, hand-rolled `for…in`, nested-bracket qs parse |
+| Gadget read | Undefined option/flag resolved via prototype | `options.shell`, `user.isAdmin`, `canDelete`, template `sourceURL`, `evalFunctions` |
+| Impact class | Stdlib/NPM/app logic uses polluted default | RCE (`child_process`, `execArgv`), auth bypass (`isAdmin`), DoS (`backlog`, `indent`) |
+
+```javascript
+// JSON body → config merge → auth bypass (business-logic gadget)
+app.post('/api/prefs', (req, res) => {
+  _.merge(sharedConfig, req.body);                    // VULN — {"__proto__":{"isAdmin":true}}
+});
+function authorize(user) { return user.isAdmin === true; }  // gadget → privesc
+```
+
+```javascript
+// JSON body → merge → RCE (stdlib gadget)
+_.merge({}, JSON.parse(req.body));                    // VULN
+child_process.execSync('ls', {});                     // reads polluted options.shell / env.NODE_OPTIONS
+```
+
+Config-object pollution (`_.merge(appConfig, req.body)`, env-loader merges, session-store hydration) is the dominant server pattern — trace any HTTP-bound object into shared/long-lived config before handler return.
+
+---
+
 ## Vulnerable Pollution Patterns
 
 ### Pattern 1 — Recursive merge with attacker-controlled JSON
@@ -561,6 +590,47 @@ function merge(dst, src) {
 }
 ```
 
+**SAFE — `Map` / `Set` for dynamic key stores**
+
+```javascript
+const opts = new Map();                               // no prototype-chain lookup on keys
+opts.set(userKey, userValue);
+```
+
+Use instead of plain objects when indexing by attacker-controlled strings (feature flags, plugin registry, rate-limit buckets).
+
+**SAFE — JSON Schema validation at request boundary (generic)**
+
+Any framework validator (Ajv, `express-validator`, NestJS `ValidationPipe`, Fastify schema) with strict `additionalProperties: false` / whitelist strips `__proto__` before handler code runs. Pair with `forbidNonWhitelisted: true` where available.
+
+```javascript
+// Ajv — strip unknown keys including __proto__
+const validate = ajv.compile({ type: 'object', additionalProperties: false, properties: { name: { type: 'string' } } });
+if (validate(req.body)) applyUpdate(validate.errors ? null : req.body);
+```
+
+Schema validation does not protect downstream `_.merge(validatedBody, unvalidatedSibling)` — validate the object actually merged.
+
+**SAFE — `structuredClone` instead of recursive merge for copy**
+
+```javascript
+const copy = structuredClone(safeSubset);             // no prototype-chain walk; not a merge
+```
+
+**Runtime hardening — `--disable-proto=delete` (Node.js)**
+
+Launch flag removes `__proto__` accessor — defense-in-depth only; `constructor.prototype` pollution remains possible. Do not treat as sole mitigation.
+
+### VULN — lodash merge/set on raw request JSON or config
+
+```javascript
+_.merge(appConfig, req.body);                         // VULN — primary SSPP anti-pattern
+_.set(settings, req.body.path, req.body.value);       // VULN — path may be "__proto__.shell"
+_.defaultsDeep(sessionStore, JSON.parse(rawCookie));  // VULN — cookie JSON → shared store
+```
+
+Never deep-merge attacker JSON into process-wide config, session objects, or ORM update docs without key allowlist or prototype-less target.
+
 ### Express / Koa / Fastify entry-point heuristics
 
 A finding is much more confident when ALL three are present in the same code path:
@@ -712,6 +782,32 @@ Three complementary detection patterns cover SSPP — running all three together
 1. **Direct polluting assignment** — `obj[userKey] = …` where key may be `__proto__`/`constructor`; dynamic property write on object with real prototype.
 2. **Known polluting library calls** — calls to `_.merge`, `_.defaultsDeep`, `_.set`, `deepmerge`, `Hoek.merge`, `jQuery.extend(true,…)`, `just-extend`, etc. with tainted object argument.
 3. **Custom recursive merge/set helpers** — hand-rolled `for…in` copy matching polluting shape; most useful in practice because it finds hand-rolled merges not on the well-known library list.
+
+### SAST grep indicators (server / Node)
+
+Token-aware ripgrep starting points — confirm tainted argument (`req.body`, `req.query`, `ctx.request.body`) and no sanitizer on path:
+
+```bash
+# Lodash merge/set/deep-assign on request-bound input
+rg -n '\.(merge|mergeWith|defaultsDeep|set|setWith|zipObjectDeep|update)\s*\([^)]*(req\.|body|query|ctx\.|payload|input)' --glob '*.{js,ts}'
+
+# Hand-rolled recursive merge / deep-assign
+rg -n 'for\s*\(\s*(const|let|var)\s+\w+\s+in\s+\w+' --glob '*.{js,ts}'
+
+# Bracket assignment from dynamic/user key
+rg -n '\w+\[\s*\w+\s*\]\s*=' --glob '*.{js,ts}'
+
+# Path reducer / dotted-key setter (user-controlled path)
+rg -n '\.split\s*\(\s*[\'"]\.[\'"]\s*\)\.(reduce|forEach)' --glob '*.{js,ts}'
+
+# Nested-bracket query / config parsers
+rg -n 'express\.urlencoded\s*\(\s*\{[^}]*extended:\s*true|parseNested:\s*true|allowPrototypes:\s*true' --glob '*.{js,ts}'
+
+# JSON body merged into shared config
+rg -n '(merge|assign|defaults|extend)\s*\([^)]*(config|settings|options|prefs)' --glob '*.{js,ts}'
+```
+
+High-confidence triad: HTTP source grep + merge/set grep in same handler/module + reachable gadget (`child_process`, `isAdmin`/`canDelete` check, template renderer, `fetch` with partial options).
 
 Classify findings under CWE-78 / 79 / 94 / 400 / 471 / 915 — match your finding's downstream CWE to the gadget reached.
 

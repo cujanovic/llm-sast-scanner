@@ -192,6 +192,20 @@ CWE-326 (insufficient key size), CWE-780 (RSA without OAEP), CWE-1204 (static IV
 
 **HashWithoutSalt** — password hashing without salt mixed in.
 
+**WeakPasswordKDFParams** — modern KDF name but unsafe work factor:
+- bcrypt PHC cost digit `< 10` (e.g. `$2a$08$`); `gensalt(rounds=4)` / `cost=4`
+- `PBEKeySpec(..., iterations)` with PBKDF2-HMAC-SHA256 iterations `< 600000`
+- Argon2 `memory_cost` `< 19456` or `time_cost` `< 2`; scrypt `N` `< 131072`
+
+**StaticIVOrNonce** — AEAD/cipher with fixed initialization vector:
+- `IvParameterSpec(new byte[16])`, `GCMParameterSpec(128, new byte[12])`, `Buffer.alloc(n, 0)` passed to `createCipheriv`
+- Class-level `static final byte[] IV` reused across encrypt calls
+
+**HardcodedOrMisplacedKey** — key material in code or co-located with ciphertext:
+- Literal `byte[] key = {...}`, `SecretKeySpec(...getBytes())`, Base64 key strings in source/config
+- Same env var or file holds DEK and encrypted payload without KEK wrap
+- Password/passphrase bytes used directly as symmetric key
+
 ### Timing Attacks (CWE-208)
 
 **UnsafeHmacComparison (Ruby)**
@@ -207,3 +221,193 @@ CWE-326 (insufficient key size), CWE-780 (RSA without OAEP), CWE-1204 (static IV
 
 **VULN (Java)**: `signature.equals(expectedSig)` on HMAC/signature bytes.
 **SAFE (Java)**: `MessageDigest.isEqual` or `Arrays.compareUnsigned` on fixed-length MAC bytes.
+
+---
+
+## Password Storage (Slow Hashing)
+
+Presence/config check — flag weak or misconfigured password hashing; no Source→Sink taint required when algorithm or parameters are evident.
+
+### Safe Parameter Reference
+
+| Algorithm | Minimum safe config | SAST triage cue |
+|-----------|---------------------|-----------------|
+| Argon2id | m≥19456 (19 MiB), t≥2, p=1 | `$argon2id$` PHC string; explicit `memory_cost`/`time_cost` |
+| scrypt | N≥2^17 (131072), r=8, p=1 | `$scrypt$` or `scrypt(N=131072,...)` |
+| bcrypt | cost≥10; input≤72 bytes | `$2[aby]$10$`+ or `gensalt(rounds=10+)` |
+| PBKDF2-HMAC-SHA256 | iterations≥600,000 | `PBKDF2WithHmacSHA256` + iteration literal |
+| PBKDF2-HMAC-SHA512 | iterations≥210,000 | inner SHA-512 |
+| PBKDF2-HMAC-SHA1 | iterations≥1,300,000 | legacy/FIPS only; prefer SHA-256 inner hash |
+
+Target hash time `< 1s` on production hardware; increase work factors over time.
+
+### VULN (any match)
+
+- Fast digest on passwords: `hashlib.sha256(password)`, `createHash('sha256').update(password)`, any `MessageDigest` on raw password bytes
+- `Cipher.encrypt(password)` or reversible encryption of credentials — passwords must be hashed, not encrypted
+- bcrypt / `PASSWORD_BCRYPT` with cost `< 10`
+- PBKDF2 / `PBEKeySpec` below minimum iterations in table above
+- Argon2/scrypt parameters below table minimums
+- Fixed/global salt: string literal salt, `getBytes("staticSalt")`, salt derived from username/email only
+- Pepper hardcoded in source or stored in same DB row/table as hash
+- Terminal layered legacy hash without upgrade path: `bcrypt(md5($password))` with no re-hash-on-login
+
+### SAFE (any match)
+
+- Argon2id, scrypt, bcrypt, or PBKDF2 at/above parameter minimums
+- Per-user random salt embedded in PHC output (`$argon2id$…`, `$2b$12$…`) via library `gensalt()`
+- Pepper loaded from vault/HSM/secrets store segregated from DB (static analysis may only note presence)
+- Re-hash on successful login when stored parameters are upgraded
+
+```python
+# VULN — fast hash on password
+hashlib.sha256(password.encode()).hexdigest()
+
+# SAFE — Argon2id with approved parameters
+PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1).hash(password)
+```
+
+```java
+// VULN
+MessageDigest.getInstance("SHA-256").digest(password.getBytes());
+
+// SAFE
+new PBEKeySpec(password, salt, 600_000, 256);  // PBKDF2WithHmacSHA256
+```
+
+### Salting & Peppering
+
+| Control | Requirement | VULN indicator | SAFE indicator |
+|---------|-------------|----------------|----------------|
+| Salt | Unique per password; CSPRNG-generated | Shared constant salt; manual prepend without KDF | Salt inside PHC/`gensalt()` output |
+| Pepper | Optional; stored outside password DB | Pepper string in source/config next to hash | Vault/HSM/env segregated from DB |
+
+Do not hand-roll salting when using Argon2/bcrypt/scrypt/PBKDF2 — libraries handle salt generation.
+
+### Detection Patterns (grep / config)
+
+```
+argon2|scrypt|bcrypt|pbkdf2|PASSWORD_BCRYPT|password_hash|hashpw|Argon2
+PBKDF2WithHmac|PBEKeySpec|SecretKeyFactory|time_cost|memory_cost|rounds|iterations
+(md5|sha1|sha256).*password|password.*(md5|sha1|sha256)
+\$2[aby]\$0[0-9]\$|\$2[aby]\$08\$
+```
+
+Parse numeric literals for cost/iterations/memory; flag when below minimums. Flag fast-hash APIs within 3 lines of `password|passwd|credential`.
+
+---
+
+## Cryptographic Storage — IV, Nonce & Key Size
+
+Extends CWE-327 beyond weak algorithm strings.
+
+### Approved Algorithms & Modes
+
+| Use | Approved | Prohibited |
+|-----|----------|------------|
+| Symmetric at rest | AES-GCM, ChaCha20-Poly1305 (AEAD) | ECB; CBC/CTR without separate MAC |
+| Symmetric key size | AES ≥128-bit (256 preferred) | DES, 3DES, RC4, Blowfish |
+| Asymmetric | RSA ≥2048 with OAEP; Curve25519/Ed25519 | RSA `<2048`; RSA PKCS#1 v1.5 for encryption |
+| Integrity | AEAD tag or encrypt-then-MAC | AES-CBC + PKCS padding only |
+
+### VULN (any match)
+
+- Static/reused IV or nonce: zero-filled arrays, string-literal IV, field never reassigned per encrypt
+- GCM nonce reuse under same key (singleton cipher, counter not incremented)
+- `Cipher.getInstance("RSA/ECB/PKCS1Padding")` or equivalent PKCS#1 v1.5 encryption padding
+- `KeyGenerator.init(64)` or AES key `<128` bits; RSA `<2048` bits
+- `SecretKeySpec` / key derived from password passphrase via `getBytes()` only
+
+### SAFE (any match)
+
+- Fresh random IV/nonce per operation: `SecureRandom` + `GCMParameterSpec`; Node `crypto.randomBytes(12)` for GCM
+- `RSA/ECB/OAEPWithSHA-256AndMGF1Padding` (or platform OAEP default)
+- AEAD auth tag verified on decrypt
+
+```javascript
+// VULN — static IV
+const iv = Buffer.alloc(16, 0);
+crypto.createCipheriv('aes-256-gcm', key, iv);
+
+// SAFE
+const iv = crypto.randomBytes(12);
+crypto.createCipheriv('aes-256-gcm', key, iv);
+```
+
+### Detection Patterns
+
+```
+IvParameterSpec\s*\(\s*new byte|GCMParameterSpec\s*\([^)]*new byte\[
+Buffer\.alloc\([^,]+,\s*0\)|static final byte\[\].*IV
+RSA/ECB/PKCS1Padding|PKCS1Padding
+KeyGenerator.*\.init\s*\(\s*(56|64|128)\s*\)
+SecretKeySpec\s*\([^)]*\.getBytes\(\)
+```
+
+---
+
+## Key Management (CWE-321 / CWE-326)
+
+**VULN** (any match):
+
+- Hardcoded key material: `byte[] key = {0x…}`, `SECRET_KEY = "…"`, Base64 key literals in source or committed config
+- Same key object used for encryption and signing/MAC
+- DEK stored with ciphertext without KEK wrap (JSON `{key, data}`, key file beside `.enc`)
+- Password/phrase as raw symmetric key
+- Long-lived key with no version/alias/rotation metadata when KMS is absent
+
+**SAFE** (any match):
+
+- Runtime fetch from KMS/HSM/vault: `KMSClient`, `KeyVaultClient`, `generateDataKey`, envelope encryption
+- DEK per item/session; KEK in separate vault/HSM; purpose-separated keys (encrypt vs sign vs wrap)
+- Key version or rotation alias in config (`key-version`, `kms:Alias/app-v2`)
+
+```java
+// VULN
+private static final byte[] AES_KEY = "hardcoded16bytes".getBytes();
+
+// SAFE
+GenerateDataKeyResult r = kmsClient.generateDataKey(request);
+```
+
+| Key type | Minimum size |
+|----------|--------------|
+| AES DEK | 128-bit (256 preferred) |
+| RSA | 2048-bit |
+| KEK | ≥ strength of wrapped DEK |
+
+Rotate on compromise, cryptoperiod expiry, or algorithm deprecation; document rotation before compromise occurs.
+
+### Detection Patterns
+
+```
+(hardcoded|secret[_-]?key|encryption[_-]?key)\s*=\s*["'{]
+SecretKeySpec\s*\(|BEGIN (RSA |EC )?PRIVATE KEY
+KMS|KeyVault|CloudKMS|generateDataKey|Envelope|wrapKey|vault\.read
+process\.env\.(SECRET|KEY).*createCipher
+```
+
+Cross-ref: hardcoded key literals also match hardcoded-credential/backdoor detection when that lens is in scope.
+
+---
+
+## Triage Cues — What Is NOT Vulnerable
+
+Use after presence match to avoid false positives:
+
+| Signal | Likely SAFE | Still VULN |
+|--------|-------------|------------|
+| Password hash | Argon2id/scrypt/bcrypt/PBKDF2 params ≥ minimums | MD5/SHA-1/SHA-256 on password; `Cipher` on password |
+| Salt | Random per-user via KDF library output | Fixed/global salt string |
+| Symmetric mode | AES-GCM / ChaCha20-Poly1305 + random nonce | AES/ECB; CBC without MAC |
+| IV/nonce | New CSPRNG bytes each encrypt | Zero/constant IV reused |
+| RNG | `SecureRandom`, `crypto.randomBytes`, `secrets.*` | `Random`, `Math.random`, `rand()` for tokens |
+| Keys | KMS/HSM/vault reference; versioned alias | Literal key in repo; env-only DEK without wrap |
+| Storage | One-way slow hash | Reversible password encryption |
+
+**Mandatory disambiguation:**
+
+- `MessageDigest` + password variable → **VULN** even if SHA-256
+- `Cipher` + password plaintext → **VULN** (reversible storage)
+- bcrypt PHC: `$2b$12$…` → SAFE; `$2a$08$…` → VULN (cost 8)
+- SHA-256/512 for file integrity, cache keys, non-credential checksums → context-dependent; note non-password use

@@ -43,6 +43,26 @@ Commonly affected languages: Java, JavaScript, Python, Go, Ruby, C#.
 - Java: validate against known fixed string before redirect
 - Java: parse URL and verify host is same as current page or on allowlist
 - Go: extend prefix check to reject second character `/` or `\` after leading slash
+- **Indirection mapping**: user supplies opaque id/token/name; server resolves to a fixed URL from a static map — raw URL strings never accepted
+
+```java
+String dest = ALLOWED_REDIRECTS.get(request.getParameter("pageId"));
+if (dest != null) response.sendRedirect(dest);
+```
+
+- **Reject absolute/external targets**: after parse, reject any value with scheme, authority/host, or protocol-relative prefix before issuing redirect
+
+```python
+parsed = urlparse(url)
+if parsed.scheme or parsed.netloc or url.startswith("//"):
+    abort(400)
+return redirect(url)
+```
+
+- **Exact host match**: allowlist compares parsed host to full hostname — never suffix/substring/`endsWith`/`contains` on the raw string
+- **Authorization gate**: verify the authenticated subject may reach the mapped or allowlisted destination (forward/redirect)
+- **External interstitial**: off-domain targets pass through a confirmation page; `Location` only set after explicit user consent
+- **PHP**: always `exit`/`die` immediately after `header("Location: ...")` to prevent post-redirect logic execution
 
 ## Evasion Patterns
 - `//evil.com` — protocol-relative URL that satisfies a `startsWith("/")` check
@@ -51,6 +71,64 @@ Commonly affected languages: Java, JavaScript, Python, Go, Ruby, C#.
 - `https://trusted.com@evil.com` — attacker host hidden in the authority/userinfo section
 - URL encoding: `%2F%2Fevil.com`
 - Go partial check bypass: `strings.HasPrefix(redir, "/")` passes for `//evil.com` and `/\evil.com` — weak prefix-only validation
+- **Scheme-relative variants**: `//evil.com/path`, `/%2f%2fevil.com`, `\evil.com` (leading backslash)
+- **Allowlist substring tricks**: `contains("trusted.com")` passes `https://evil.com/?x=trusted.com`; `endsWith(".trusted.com")` passes `evil-trusted.com`; `startsWith("https://trusted.com")` passes `https://trusted.com.evil.com`
+- **Userinfo @ variants**: `https://trusted.com@evil.com`, `//trusted.com@evil.com`, `/trusted.com@evil.com`
+- **CRLF in redirect value**: `%0d%0a` or literal `\r\n` embedded in param — flag taint reaching `Location`; classify as `http_response_splitting` only when CR/LF breaks header structure
+- **Multi-layer encoding**: `%252f%252fevil.com` (double-encoded `//`), `\u002f\u002fevil.com`, `%5c%65vil.com` (encoded `\e`)
+- **Mixed separators**: `/\/evil.com`, `//evil.com%2f@trusted.com` — parser/normalizer divergence vs naive prefix checks
+
+## Detection Indicators (grep)
+
+Token-aware sink hunts — trace matched identifiers back to request/query/body/header sources.
+
+### Redirect sinks
+```text
+sendRedirect\s*\(
+\.redirect\s*\(
+redirect:\s*["']?\s*\+
+ModelAndView\s*\(\s*["']redirect:
+setHeader\s*\(\s*["']Location["']
+headers\.setLocation\s*\(
+HttpResponseRedirect\s*\(
+redirect\s*\(
+http\.Redirect\s*\(
+header\s*\(\s*["']Location:
+Response\.Redirect\s*\(
+RedirectToAction\s*\(
+redirect_to\s
+location\.(href|assign|replace)\s*=
+window\.location\s*=
+res\.writeHead\s*\([^)]*Location
+```
+
+### Forward sinks (CWE-552)
+```text
+getRequestDispatcher\s*\(
+RequestDispatcher\.forward\s*\(
+\.forward\s*\(
+dispatch\s*\(
+include\s*\(
+```
+
+### Common source parameter names
+```text
+(url|redirect|next|return|returnTo|returnUrl|goto|destination|target|continue|redir|forward|fwd|callback|RelayState)
+```
+
+### Weak-validation signals (pair with sinks)
+```text
+startsWith\s*\(\s*["']/["']
+HasPrefix\s*\([^,]+,\s*["']/["']
+indexOf\s*\(\s*["']trusted
+endsWith\s*\(\s*["']\.trusted
+\.contains\s*\(\s*["']trusted
+match\s*\(\s*["']\^/
+```
+
+### High-confidence taint chains
+- Sink argument is `request.getParameter`, `req.query`, `req.body`, `request.GET`, `$_GET`, `params[`, `QueryString[`, `c.Query(`, `Referer` header — no parse/allowlist between source and sink
+- `redirect:` / `Location` value built via string concat (`+`, `fmt.Sprintf`, template literal) with user-controlled fragment
 
 ## Java / Spring Detection Rules
 

@@ -117,6 +117,25 @@ Insecure deserialization happens when an application reconstructs objects from u
    Object obj = xstream.fromXML(userInput);
    ```
 
+7. **Python pickle/YAML on untrusted input**:
+   ```python
+   # VULNERABLE: arbitrary code execution via __reduce__
+   obj = pickle.loads(request.body)
+   data = yaml.load(user_input)  # or yaml.unsafe_load / full_load without SafeLoader
+   ```
+
+8. **PHP unserialize on external input**:
+   ```php
+   // VULNERABLE: gadget chains via magic methods
+   $obj = unserialize($_POST['data']);
+   ```
+
+9. **Node.js node-serialize / eval deserialization**:
+   ```javascript
+   // VULNERABLE: IIFE payloads in serialized strings
+   const obj = require('node-serialize').unserialize(req.cookies.session);
+   ```
+
 ### Trace Requirements
 
 For each finding, trace the complete data flow:
@@ -137,6 +156,9 @@ For each finding, trace the complete data flow:
 | XMLDecoder / XStream on user input | Critical | 9.0-9.8 |
 | Fastjson `parseObject` on internal/trusted input only | Medium | 4.0-6.0 |
 | Jackson with explicit `@JsonTypeInfo(Id.NAME)` + whitelist | Low/Info | 0.0-3.0 |
+| Python `pickle.loads` / PHP `unserialize` on user input | Critical | 9.0-10.0 |
+| Node `node-serialize.unserialize` on cookie/body | Critical | 9.0-9.8 |
+| Native deserialize with HMAC verify on same flow (strong secret) | Medium | 4.0-6.0 |
 
 ## Remediation
 
@@ -158,11 +180,58 @@ For each finding, trace the complete data flow:
 - Use serialization filters (`ObjectInputFilter`, JEP 290)
 - Replace with JSON/Protobuf where possible
 - Remove unnecessary gadget libraries from classpath
+- Avoid `readObject()` / `readUnshared()` on any stream crossing a trust boundary; prefer DTO mapping from JSON/protobuf
+- Configure filter before read:
+  ```java
+  ObjectInputFilter filter = ObjectInputFilter.Config.createFilter(
+      "com.example.dto.*;!*");
+  ois.setObjectInputFilter(filter);
+  Object dto = ois.readObject();
+  ```
+
+### Python
+- Never `pickle.load(s)` / `pickle.loads()` / `cPickle` on untrusted bytes
+- Use `yaml.safe_load()` or `yaml.load(..., Loader=yaml.SafeLoader)` — never bare `yaml.load()` / `unsafe_load` / `full_load` on external input
+- Prefer `json.loads()` bound to dict/DTO; avoid `jsonpickle`, `dill`, `marshal.loads`, `torch.load(..., weights_only=False)` on hostile input
+- SAST downgrade: `SafeLoader` / `safe_load` / const-compare guard on same flow → suspicious or FP
+
+### PHP
+- Avoid `unserialize()` on request/cookie/session/file input; prefer `json_decode()` with schema validation
+- If unavoidable: `unserialize($data, ['allowed_classes' => false])` for scalar/array-only payloads
+- Look-ahead deserialization (PHP 7+): reject unexpected types before full object graph materializes
+- SAST downgrade: `allowed_classes => false` on same call AND no object property access after → lower severity
+
+### Node.js
+- Avoid `node-serialize` / `serialize-javascript` `unserialize` on cookies, query params, or request bodies
+- Never `eval` / `Function` / `vm.runIn*` to parse serialized or JSON-like user strings
+- Prefer `JSON.parse()` into plain objects with explicit field mapping; use `js-yaml` `load` with `schema: yaml.DEFAULT_SAFE_SCHEMA` (v3) or default safe schema (v4+)
+
+### .NET (supplement)
+- Set `TypeNameHandling = None` (default); bind to explicit DTO types only
+- Avoid `BinaryFormatter`, `LosFormatter`, `NetDataContractSerializer`, `SoapFormatter` on any external stream
+
+### Data-Only Formats and DTO Binding
+- Prefer schema-bound, non-polymorphic formats over native object graphs:
+  ```java
+  MyDto dto = mapper.readValue(input, MyDto.class);  // not Object.class / HashMap with default typing
+  ```
+  ```python
+  dto = MyModel.model_validate(json.loads(input))  # pydantic/dataclass, not pickle
+  ```
+  ```protobuf
+  message User { string id = 1; string name = 2; }  // protobuf/gRPC — no arbitrary type tags
+  ```
+
+### Integrity Protection (When Serialization Is Unavoidable)
+- Sign serialized blobs (HMAC-SHA256 or asymmetric) before storage/transit; verify before any `readObject` / `unserialize` / `pickle.loads`
+- SAST FP signal: verify-then-deserialize on same flow (HMAC/compare before sink) with server-side secret
+- Reject on signature mismatch; do not fall back to deserialize-then-validate
 
 ### General
 - Never deserialize untrusted data without strict type validation
 - Use allowlists (not blocklists) for permitted classes
 - Prefer data-only formats (JSON with simple binding, Protocol Buffers) over object serialization
+- Cap input size before decode; log type/class failures at deserialization boundaries
 
 ## Java Source Detection Rules
 
@@ -193,6 +262,10 @@ For each finding, trace the complete data flow:
 - SnakeYAML 2.x default constructors or explicit `SafeConstructor`
 - `ObjectInputStream` subclassed by `ValidatingObjectInputStream` on same flow
 - Ruby/Python const-compare guards before decode
+- HMAC/signature verified on same flow immediately before deserialize (secret not client-controlled)
+- PHP `unserialize($data, ['allowed_classes' => false])` producing scalars/arrays only
+- Python `yaml.safe_load` / `SafeLoader`; Node `JSON.parse` without `node-serialize`
+- Protobuf/Avro/gRPC with fixed `.proto`/schema and no embedded type-name fields
 
 ## .NET Deserialization Vulnerable Patterns
 
@@ -248,6 +321,92 @@ var obj = JsonConvert.DeserializeObject<MyDto>(userInput);
 - `DataContractSerializer` with explicit `[KnownType]` list and no dynamic type resolution
 - `JsonConvert.DeserializeObject<ExplicitType>(input)` with no `TypeNameHandling` setting (default = None) — safe for simple DTOs
 
+## Python Deserialization Vulnerable Patterns
+
+```python
+# VULNERABLE: RCE via pickle gadgets
+obj = pickle.loads(base64.b64decode(request.args['data']))
+
+# VULNERABLE: YAML !!python/object tags
+config = yaml.load(uploaded_yaml)
+
+# SAFE: data-only binding
+data = yaml.safe_load(uploaded_yaml)
+dto = json.loads(body, object_hook=lambda d: UserDto(**d))
+```
+
+**Python unsafe deserializers** (user/network/file input → CONFIRM):
+- `pickle.load` / `pickle.loads` / `cPickle`, `dill.load`, `marshal.loads`
+- `yaml.load` / `yaml.unsafe_load` / `yaml.full_load` without `Loader=SafeLoader`
+- `jsonpickle.decode`, `torch.load` without `weights_only=True` (PyTorch ≥2.0)
+
+**Python secure-config indicators** (downgrade or FP):
+- `yaml.safe_load` or `yaml.load(..., Loader=yaml.SafeLoader|BaseLoader)`
+- `json.loads` / `orjson.loads` into dict or typed model only — no pickle/jsonpickle on path
+- Explicit const/string guard before decode on same branch
+
+## PHP Deserialization Vulnerable Patterns
+
+```php
+// VULNERABLE: full object graph with arbitrary classes
+$obj = unserialize($request->getContent());
+
+// VULNERABLE: cookie/session blob without integrity check
+$user = unserialize($_COOKIE['profile']);
+
+// SAFE: JSON + validation
+$dto = json_decode($input, true, 512, JSON_THROW_ON_ERROR);
+validate_user_schema($dto);
+```
+
+**PHP unsafe sinks** (external input → CONFIRM):
+- `unserialize()` on `$_POST`, `$_GET`, `$_COOKIE`, `$_SESSION`, file upload, or network body without `allowed_classes => false`
+- `phar://` wrappers feeding `file_exists` / `include` that trigger Phar deserialization (related sink — trace to `unserialize` metadata)
+
+**PHP secure-config indicators** (downgrade):
+- `unserialize($data, ['allowed_classes' => false])` for scalar/array-only use
+- `json_decode` with depth limit and schema validation; no `unserialize` on untrusted path
+
+## Node.js Deserialization Vulnerable Patterns
+
+```javascript
+// VULNERABLE: node-serialize executes IIFE payloads
+const cookie = require('cookie-parser');
+const obj = require('node-serialize').unserialize(req.signedCookies.sess);
+
+// VULNERABLE: js-yaml unsafe schema
+const yaml = require('js-yaml');
+const doc = yaml.load(userYaml, { schema: yaml.DEFAULT_FULL_SCHEMA });
+
+// SAFE
+const dto = JSON.parse(body);
+const safe = yaml.load(userYaml);  // js-yaml v4+ safe by default
+```
+
+**Node.js unsafe sinks** (remote input → CONFIRM):
+- `node-serialize` / `serialize-javascript` `.unserialize()` on cookies, headers, body
+- `eval` / `new Function` / `vm.runInNewContext` parsing serialized strings
+- `js-yaml` `load`/`loadAll` with `DEFAULT_FULL_SCHEMA` or custom types executing code
+
+**Node.js secure-config indicators** (downgrade or FP):
+- `JSON.parse` into plain object with manual field extraction
+- `js-yaml` v4+ default `load` without unsafe schema override
+- Signed/encrypted cookie (`cookie-parser` secret) verified before parse — still CONFIRM if `node-serialize` follows verify
+
+## Secure Configuration Detection (SAST Triage)
+
+Use to downgrade severity or suppress FP when config is co-located with sink (same function/file or injected bean):
+
+| Language | Safe config tokens | Downgrade when |
+|----------|-------------------|----------------|
+| Java | `setObjectInputFilter`, `ObjectInputFilter.Config.createFilter`, `ValidatingObjectInputStream`, `SafeConstructor`, `ParserConfig.setSafeMode(true)`, `PolymorphicTypeValidator`, `readValue(..., ConcreteDto.class)` | Filter/validator/DTO type visible on path to sink |
+| Python | `safe_load`, `Loader=SafeLoader`, `json.loads`, `model_validate` | No pickle/yaml.load on untrusted branch |
+| PHP | `allowed_classes => false`, `json_decode` + validator | No bare `unserialize` on request data |
+| .NET | `TypeNameHandling.None`, `DeserializeObject<T>`, `DataContractSerializer(typeof(T))` | No BinaryFormatter/Auto/All on user stream |
+| Node | `JSON.parse`, js-yaml default schema | No `node-serialize` / eval on request path |
+
+**Missing safe config on untrusted path → maintain CONFIRM/LIKELY.**
+
 ## Analyst Notes
 
 1. Check `pom.xml` / `build.gradle` for Fastjson version — any version < 2.0 with user input parsing is likely vulnerable
@@ -263,9 +422,11 @@ Commonly affected languages: Java, Python, JavaScript, Ruby, C#. Go lacks dedica
 
 **Java sinks modeled**: `ObjectInputStream.readObject`/`readUnshared`; Kryo, XStream, SnakeYAML, JYaml, JsonIO, YAMLBeans, Hessian/Burlap, Castor, Jackson (`enableDefaultTyping`), Fastjson, Gson gadgets, JMS `ObjectMessage`, `XMLDecoder.readObject`, `SerializationUtils.deserialize`, Jabsorb, Jodd, Flexjson; RMI deserialization; Spring HTTP invoker exporter in XML/configuration.
 
-**Python sinks**: `pickle.load(s)`, `yaml.load`/`unsafe_load`/`full_load` without `SafeLoader`; `torch.load`; decoders where input may execute code.
+**Python sinks**: `pickle.load(s)`/`pickle.loads`, `cPickle`, `dill`, `marshal.loads`, `jsonpickle.decode`; `yaml.load`/`unsafe_load`/`full_load` without `SafeLoader`; `torch.load` (without `weights_only=True`); decoders where input may execute code.
 
-**JavaScript sinks**: `js-yaml` `load`/`loadAll` with unsafe schema (`DEFAULT_FULL_SCHEMA`, js-yaml-js-types).
+**PHP sinks**: `unserialize()` on superglobals, cookies, sessions, uploads, network bodies; Phar metadata deserialization via `phar://` stream wrappers.
+
+**JavaScript sinks**: `node-serialize`/`serialize-javascript` `.unserialize()`; `js-yaml` `load`/`loadAll` with unsafe schema (`DEFAULT_FULL_SCHEMA`, js-yaml-js-types); `eval`/`Function`/`vm.*` on serialized user strings.
 
 **Ruby sinks**: `Marshal.load`, `YAML.load` (Psych), Oj global options; YAML unsafe tags.
 
@@ -274,10 +435,11 @@ Commonly affected languages: Java, Python, JavaScript, Ruby, C#. Go lacks dedica
 **Sources**: remote/network input on all platforms.
 
 **Sanitizers / barriers**:
-- Java: `ValidatingObjectInputStream`, `SerialKiller`; XStream/Kryo whitelist configuration flows to read call; Jackson `PolymorphicTypeValidator` / `activateDefaultTyping` with validator; SnakeYAML `SafeConstructor`; Fastjson `ParserConfig.setSafeMode(true)`.
-- Python: const-compare barriers; `yaml.load(..., Loader=SafeLoader|BaseLoader)`; model barriers on unsafe-deserialization paths.
-- JS: default `js-yaml` v4+ without unsafe schema; model barriers.
-- C#: no `TypeNameHandling` / no type resolver on `JavaScriptSerializer`.
+- Java: `ObjectInputFilter` / `setObjectInputFilter`; `ValidatingObjectInputStream`, `SerialKiller`; XStream/Kryo whitelist configuration flows to read call; Jackson `PolymorphicTypeValidator` / `activateDefaultTyping` with validator; SnakeYAML `SafeConstructor`; Fastjson `ParserConfig.setSafeMode(true)`; HMAC/signature verify before `readObject`.
+- Python: const-compare barriers; `yaml.safe_load` / `yaml.load(..., Loader=SafeLoader|BaseLoader)`; typed `json.loads` / pydantic `model_validate`; no pickle on untrusted path.
+- PHP: `unserialize(..., ['allowed_classes' => false])`; `json_decode` with schema validation; HMAC on blob before decode.
+- JS: `JSON.parse` only; default `js-yaml` v4+ without unsafe schema; no `node-serialize` on cookies/body.
+- C#: no `TypeNameHandling` / no type resolver on `JavaScriptSerializer`; HMAC verify before `BinaryFormatter` (still prefer removal).
 
 Remote input → deserialization API argument (unsafe-deserialization sink or decoder input where execution is possible).
 

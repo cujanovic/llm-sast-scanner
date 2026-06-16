@@ -96,6 +96,11 @@ Log.d(TAG, "Login attempt for user: " + userId);  // no credential value
 
 **FALSE POSITIVE**: `Log.d(TAG, "Request URL: " + url)` where `url` is a non-sensitive endpoint. Evaluate the variable name and assignment chain, not the presence of `Log` alone.
 
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'Log\.[divwe]\s*\(.*(password|token|secret|pin|ssn|cvv|email|phone|dob|iban)' --glob '*.{java,kt}'
+```
+
 ---
 
 #### External Storage Writes with Sensitive Data
@@ -119,6 +124,73 @@ fos.write(encryptedData);
 
 ---
 
+#### SQLite Cleartext Sensitive Data
+
+**VULN** — token/password inserted without encryption or parameterization:
+```java
+ContentValues cv = new ContentValues();
+cv.put("auth_token", token);
+db.insert("sessions", null, cv);
+db.execSQL("UPDATE users SET password='" + password + "' WHERE id=" + userId);
+```
+
+**VULN (Kotlin)**:
+```kotlin
+database.execSQL("INSERT INTO creds (pin) VALUES ('$pin')")
+```
+
+**SAFE** — store only opaque references; encrypt value column with Keystore-wrapped key:
+```java
+SecretKey key = (SecretKey) keyStore.getKey("db_key", null);
+Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+// encrypt token bytes before cv.put("auth_token", encryptedBlob)
+```
+
+**TRUE POSITIVE**: `insert` / `execSQL` / `rawQuery` writing or updating columns whose names or bound values trace to `token`, `password`, `secret`, `pin`, `ssn`, `credential`, or PII variables without an intervening encrypt call or Keystore key use.
+
+**FALSE POSITIVE**: SQLite storing non-sensitive app state (UI prefs, cache keys, analytics event IDs).
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'execSQL\s*\(|\.insert\s*\(|ContentValues\(\)|rawQuery\s*\(' --glob '*.{java,kt}'
+rg -n 'put\s*\(\s*"(auth_token|password|secret|pin|token|credential|ssn)"' --glob '*.{java,kt}'
+```
+
+---
+
+#### Android Keystore for Key Material
+
+**VULN** — symmetric key generated/stored outside hardware-backed Keystore:
+```java
+byte[] keyBytes = "static_aes_key_16b".getBytes(StandardCharsets.UTF_8);
+SecretKeySpec key = new SecretKeySpec(keyBytes, "AES");
+```
+
+**SAFE** — hardware-backed key, non-exportable:
+```java
+KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
+    "auth_key", KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+    .setUserAuthenticationRequired(true)
+    .build();
+KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+kg.init(spec);
+SecretKey key = kg.generateKey();
+```
+
+**TRUE POSITIVE**: `SecretKeySpec` / `KeySpec` constructed from a hardcoded byte array or `SharedPreferences` string when protecting credentials or tokens; absence of `"AndroidKeyStore"` in the key-generation path for sensitive crypto.
+
+**FALSE POSITIVE**: Keystore keys used only for TLS client auth or signing where the private key never encrypts local PII.
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'SecretKeySpec|KeyStore\.getInstance\s*\(\s*"AndroidKeyStore"' --glob '*.{java,kt}'
+rg -n 'KeyGenParameterSpec|EncryptedSharedPreferences\.create' --glob '*.{java,kt}'
+```
+
+---
+
 #### Hardcoded Credentials / Keys
 
 **VULN**:
@@ -131,6 +203,8 @@ String jwt = signJWT(payload, "hardcoded_secret_key");
 **TRUE POSITIVE**: String literal assigned to a variable named `key`, `secret`, `password`, `token`, `apiKey`, `privateKey`, or `credential` — particularly when the literal length and entropy are consistent with a real credential (e.g., > 16 characters with mixed case and digits).
 
 **FALSE POSITIVE**: Placeholder strings such as `"YOUR_KEY_HERE"`, `"TODO"`, or `"REPLACE_ME"` in configuration templates. Also do not flag localization strings, error message literals, or display labels even when they appear in a field named `key`.
+
+**Cross-ref:** Full hardcoded-secret taint rules and entropy heuristics live in the `hardcoded_code_backdoor` reference (hardening-platform lens, CWE-798).
 
 ---
 
@@ -187,6 +261,43 @@ Cursor c = db.rawQuery("SELECT * FROM users WHERE id=?", new String[]{id});
 **TRUE POSITIVE**: `getIntent().getStringExtra(...)` / `getIntent().getData()` value flows without sanitization into `rawQuery`, `execSQL`, `new File(base, userValue)`, `loadUrl`, or `Runtime.exec`.
 
 **FALSE POSITIVE**: Intent extra used only as a display label rendered in a `TextView` with no HTML rendering enabled.
+
+---
+
+#### Deep Link / Intent-Filter Exposure
+
+**VULN** — exported handler accepts arbitrary scheme/host without validation:
+```xml
+<activity android:name=".DeepLinkActivity" android:exported="true">
+    <intent-filter android:autoVerify="true">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="myapp" android:host="*"/>
+    </intent-filter>
+</activity>
+```
+
+```kotlin
+val redirect = intent.data?.getQueryParameter("url")
+startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(redirect)))
+```
+
+**SAFE** — path-prefix allowlist before navigation:
+```kotlin
+val path = intent.data?.path ?: return
+if (!path.startsWith("/safe/")) return
+```
+
+**TRUE POSITIVE**: `<intent-filter>` with `VIEW`/`BROWSABLE` on an exported component where `intent.data`, `getQueryParameter`, or `getStringExtra` flows to `startActivity`, `loadUrl`, or file I/O without host/path/scheme validation.
+
+**FALSE POSITIVE**: App Links with `autoVerify="true"` where handler only maps known path segments to internal routes with hardcoded targets.
+
+**Grep (Android Java/Kotlin/XML):**
+```bash
+rg -n 'android:scheme|android:host|intent-filter|ACTION_VIEW|getQueryParameter|intent\.data' --glob '*.{java,kt,xml}'
+rg -n 'android:exported\s*=\s*"true"' --glob 'AndroidManifest.xml'
+```
 
 ---
 
@@ -253,6 +364,36 @@ webView.loadUrl(urlFromIntent);
 **TRUE POSITIVE**: `setJavaScriptEnabled(true)` combined with `loadUrl` / `loadDataWithBaseURL` where the URL argument traces to external input (intent extra, deep link, push notification payload).
 
 **FALSE POSITIVE**: `setJavaScriptEnabled(true)` with a hardcoded `loadUrl("https://app.example.com/home")` — no user control over the loaded origin.
+
+---
+
+#### WebView File-Access Misconfiguration
+
+**VULN** — JS + cross-origin file access with untrusted content:
+```java
+WebSettings s = webView.getSettings();
+s.setJavaScriptEnabled(true);
+s.setAllowFileAccess(true);
+s.setAllowFileAccessFromFileURLs(true);
+s.setAllowUniversalAccessFromFileURLs(true);
+webView.loadUrl(userSuppliedUrl);
+```
+
+**SAFE** — disable file URL access when loading remote or user-controlled pages:
+```java
+s.setAllowFileAccess(false);
+s.setAllowFileAccessFromFileURLs(false);
+s.setAllowUniversalAccessFromFileURLs(false);
+```
+
+**TRUE POSITIVE**: Any of `setAllowFileAccess(true)`, `setAllowFileAccessFromFileURLs(true)`, `setAllowUniversalAccessFromFileURLs(true)`, or `setAllowContentAccess(true)` on a WebView that also has `setJavaScriptEnabled(true)` and loads non-bundled URLs.
+
+**FALSE POSITIVE**: WebView loading only `file:///android_asset/` with file access enabled and JavaScript disabled.
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'setAllowFileAccess|setAllowUniversalAccessFromFileURLs|setAllowFileAccessFromFileURLs|setAllowContentAccess|addJavascriptInterface|setJavaScriptEnabled' --glob '*.{java,kt}'
+```
 
 ---
 
@@ -444,6 +585,38 @@ String token = Base64.encodeToString(tokenBytes, Base64.URL_SAFE | Base64.NO_WRA
 
 ---
 
+### Backup Exposure (allowBackup)
+
+**VULN** — full backup enabled; SharedPreferences/SQLite included in backup blob:
+```xml
+<application
+    android:allowBackup="true"
+    android:fullBackupContent="@xml/backup_rules"
+    ...>
+```
+
+**VULN** — `allowBackup` omitted on API < 31 (defaults to `true`):
+```xml
+<application android:label="@string/app_name" ...>
+```
+
+**SAFE**:
+```xml
+<application android:allowBackup="false" android:fullBackupContent="false" ...>
+```
+
+**TRUE POSITIVE**: `android:allowBackup="true"` or attribute absent on `<application>` when the app stores credentials in SharedPreferences, SQLite, or internal files without `EncryptedSharedPreferences` / Keystore protection.
+
+**FALSE POSITIVE**: `allowBackup="false"` explicitly set; or backup rules XML excludes all sensitive domains via `tools:node="remove"`.
+
+**Grep (Android XML):**
+```bash
+rg -n 'allowBackup|fullBackupContent|data-extraction-rules' --glob '**/AndroidManifest.xml'
+rg -n 'domain path=' --glob '**/backup_rules.xml'
+```
+
+---
+
 ## iOS Vulnerable Patterns (Swift / Objective-C)
 
 ### Insecure Keychain / Storage
@@ -498,6 +671,42 @@ try sensitiveData.write(to: path, options: .completeFileProtection)
 
 ---
 
+#### Plist / Core Data Cleartext Storage
+
+**VULN** — secrets written to plist on disk:
+```swift
+let creds = ["authToken": token, "refreshToken": refresh]
+(creds as NSDictionary).write(toFile: plistPath, atomically: true)
+```
+
+**VULN (Objective-C)**:
+```objc
+[@{@"password": password} writeToFile:path atomically:YES];
+```
+
+**VULN** — sensitive fields in Core Data without encryption transform:
+```swift
+entity.setValue(ssn, forKey: "socialSecurityNumber")
+try context.save()
+```
+
+**SAFE** — Keychain for secrets; Core Data with `NSPersistentStoreFileProtectionKey`:
+```swift
+let options = [NSPersistentStoreFileProtectionKey: FileProtectionType.complete]
+```
+
+**TRUE POSITIVE**: `write(toFile:atomically:)` / `write(to:atomically:)` / Core Data `setValue` where the value traces to `token`, `password`, `secret`, `pin`, `ssn`, or `credential` without Keychain or file-protection attributes.
+
+**FALSE POSITIVE**: Plist storing non-sensitive feature flags or cached public configuration.
+
+**Grep (Swift/Objective-C):**
+```bash
+rg -n 'writeToFile:|write\(toFile:|NSUserDefaults|UserDefaults\.standard\.set|setValue\(.*forKey:' --glob '*.{swift,m,mm}'
+rg -n 'kSecClass|SecItemAdd|SecItemCopyMatching' --glob '*.{swift,m,mm}'
+```
+
+---
+
 #### Logging Sensitive Data
 
 **VULN**:
@@ -515,6 +724,72 @@ print("Login attempt for user ID: \(userId)")  // no credential value emitted
 **TRUE POSITIVE**: `print(...)` or `NSLog(...)` interpolating or formatting a variable whose name contains `password`, `token`, `secret`, `key`, `credential`, `pin`, or `ssn`.
 
 **FALSE POSITIVE**: `print("Response status: \(statusCode)")` — no sensitive value present.
+
+**PII log indicators — extend variable-name heuristics with:**
+```bash
+# Android
+rg -n 'Log\.[divwe]\s*\(.*(email|phone|ssn|dob|address|iban|pan|cvv|accountNumber)' --glob '*.{java,kt}'
+# iOS
+rg -n 'print\s*\(|NSLog\s*\(.*(email|phone|ssn|dob|address|iban|pan|cvv|accountNumber)' --glob '*.{swift,m,mm}'
+```
+
+---
+
+### Clipboard and Screenshot Leakage
+
+#### Sensitive Data on Clipboard
+
+**VULN (Android)**:
+```java
+ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+cm.setPrimaryClip(ClipData.newPlainText("token", authToken));
+```
+
+**VULN (iOS)**:
+```swift
+UIPasteboard.general.string = password
+UIPasteboard.general.setValue(token, forPasteboardType: "token")
+```
+
+**SAFE** — avoid copying secrets; clear after one-time use:
+```swift
+UIPasteboard.general.items = []
+```
+
+**TRUE POSITIVE**: Clipboard write where the payload variable matches sensitive heuristics (`password`, `token`, `pin`, `ssn`, `otp`, `secret`).
+
+**FALSE POSITIVE**: Copying non-sensitive user-selected text (e.g., shareable promo code) to clipboard.
+
+**Grep:**
+```bash
+rg -n 'ClipData\.newPlainText|setPrimaryClip|UIPasteboard\.general' --glob '*.{java,kt,swift,m,mm}'
+```
+
+---
+
+#### Screenshot / Screen-Capture Exposure
+
+**VULN** — sensitive screen without capture protection:
+```swift
+// No UIApplication.shared.isProtectedDataAvailable check
+// Missing: window.makeSecure() / UITextField.isSecureTextEntry for PIN entry
+```
+
+**VULN (Android)** — `FLAG_SECURE` not set on credential Activity:
+```java
+// onCreate missing:
+getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
+                     WindowManager.LayoutParams.FLAG_SECURE);
+```
+
+**TRUE POSITIVE**: Activity/ViewController presenting `password`, `pin`, `cvv`, or `ssn` input without `FLAG_SECURE` (Android) or without `isSecureTextEntry` / secure-field equivalent (iOS).
+
+**FALSE POSITIVE**: Public marketing screens with no sensitive data.
+
+**Grep:**
+```bash
+rg -n 'FLAG_SECURE|isSecureTextEntry|secureTextEntry' --glob '*.{java,kt,swift,m,mm,xml}'
+```
 
 ---
 
@@ -749,6 +1024,45 @@ func urlSession(_ session: URLSession,
 
 **FALSE POSITIVE**: Implementation that calls `SecTrustEvaluate` (or `SecTrustEvaluateWithError`) and only proceeds with `useCredential` when the return value indicates success.
 
+**Cross-ref:** Certificate pinning absence, custom trust managers, and TLS protocol downgrade patterns are covered in `certificate_validation.md` and `cleartext_transmission.md`. Flag missing pins as MEDIUM (absence-based); flag trust bypass as CRITICAL.
+
+---
+
+### Root / Jailbreak / Tamper Detection Weaknesses
+
+#### Client-Only Integrity Gate
+
+**VULN** — sensitive operation gated solely by bypassable client check:
+```java
+if (RootBeer.with(context).isRooted()) {
+    showError(); return;
+}
+processPayment(cardData);  // no server-side device-trust signal
+```
+
+**VULN (iOS)**:
+```swift
+if FileManager.default.fileExists(atPath: "/Applications/Cydia.app") {
+    exit(0)
+}
+unlockPremiumFeatures()  // local-only enforcement
+```
+
+**SAFE** — combine local signal with server attestation; fail closed on high-risk ops:
+```kotlin
+val verdict = integrityManager.requestIntegrityToken(request).await()
+if (!server.verifyIntegrityToken(verdict.token)) abortSensitiveFlow()
+```
+
+**TRUE POSITIVE**: `isRooted`, `isJailbroken`, `su`, `/system/xbin/su`, `frida`, `substrate`, or Play Integrity / App Attest result used as the **only** guard before accessing Keystore secrets, decrypting local data, or enabling premium/sensitive features — especially when the check is a single `if` with no server validation.
+
+**FALSE POSITIVE**: Root/jailbreak detection used for analytics or warning banners only, with no security decision tied to the result.
+
+**Grep:**
+```bash
+rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrity|AppAttest|DeviceCheck' --glob '*.{java,kt,swift,m,mm}'
+```
+
 ---
 
 ## Severity Reference
@@ -782,6 +1096,15 @@ func urlSession(_ session: URLSession,
 | Hardcoded encryption key literal | iOS | CWE-798 | HIGH |
 | arc4random for security token generation | iOS | CWE-338 | HIGH |
 | TLS certificate accepted without SecTrustEvaluateWithError | iOS | CWE-295 | CRITICAL |
+| SQLite storing credentials/tokens in cleartext | Android | CWE-312 | HIGH |
+| Secrets in plist / unprotected Core Data | iOS | CWE-312 | HIGH |
+| Symmetric key outside Android Keystore | Android | CWE-522 | HIGH |
+| allowBackup enabled with local secrets | Android | CWE-530 | MEDIUM |
+| Deep link parameter to navigation sink | Android / iOS | CWE-939 | HIGH |
+| WebView file-URL access + JavaScript enabled | Android | CWE-749 | HIGH |
+| Sensitive data copied to clipboard | Android / iOS | CWE-200 | MEDIUM |
+| Credential screen without FLAG_SECURE / secure field | Android / iOS | CWE-200 | MEDIUM |
+| Client-only root/jailbreak gate for sensitive ops | Android / iOS | CWE-693 | LOW |
 
 ---
 
@@ -919,3 +1242,43 @@ iOS cookie storage and ATS plist keys (`NSAllowsArbitraryLoads`) remain heuristi
 - **Implicit PendingIntents** sanitizes explicit Intents — `FLAG_IMMUTABLE` alone is insufficient if the base Intent is implicit.
 - **Fragment injection in PreferenceActivity** only covers exported activities whose `isValidFragment` unconditionally returns `true`.
 - **Swift unsafe WebView fetch** requires taint flow — hardcoded safe `baseURL` with static HTML is not flagged.
+
+---
+
+## Platform Detection Indicators (grep)
+
+Consolidated SAST grep anchors — pair with taint heuristics above; hits alone are not findings.
+
+**Android (Java/Kotlin/XML):**
+```bash
+# Storage
+rg -n 'SharedPreferences|EncryptedSharedPreferences|MODE_WORLD_READABLE|openFileOutput|getExternalStorage' --glob '*.{java,kt}'
+rg -n 'ContentValues|execSQL|rawQuery|\.insert\s*\(' --glob '*.{java,kt}'
+rg -n 'AndroidKeyStore|KeyGenParameterSpec|SecretKeySpec' --glob '*.{java,kt}'
+# IPC / components
+rg -n 'android:exported|getIntent\(\)|getStringExtra|sendBroadcast|startActivity|startService' --glob '*.{java,kt,xml}'
+# WebView
+rg -n 'WebView|loadUrl|addJavascriptInterface|setJavaScriptEnabled|setAllowFileAccess' --glob '*.{java,kt}'
+# Logging / clipboard / backup
+rg -n 'Log\.[divwe]\s*\(|ClipData|setPrimaryClip|allowBackup' --glob '*.{java,kt,xml}'
+# Integrity
+rg -n 'RootBeer|isRooted|PlayIntegrity|FLAG_SECURE' --glob '*.{java,kt}'
+```
+
+**iOS (Swift/Objective-C/plist):**
+```bash
+# Storage
+rg -n 'UserDefaults|NSUserDefaults|writeToFile|SecItemAdd|kSecClass|NSPersistentStore' --glob '*.{swift,m,mm}'
+# Deep links / WebView
+rg -n 'open url:|openURLContexts|WKWebView|loadHTMLString|load\s*\(\s*URLRequest' --glob '*.{swift,m,mm}'
+# Transport / ATS
+rg -n 'NSAllowsArbitraryLoads|NSExceptionDomains|didReceive.*challenge|SecTrustEvaluate' --glob '*.{swift,m,mm,plist}'
+# Logging / clipboard / capture
+rg -n 'print\s*\(|NSLog\s*\(|UIPasteboard|isSecureTextEntry|secureTextEntry' --glob '*.{swift,m,mm}'
+# Integrity
+rg -n 'jailbreak|Cydia|frida|AppAttest|DeviceCheck|fileExists.*MobileSubstrate' --glob '*.{swift,m,mm}'
+```
+
+**Cross-lens refs:**
+- Hardcoded secrets → `hardcoded_code_backdoor` (CWE-798)
+- TLS trust bypass / missing pinning → `certificate_validation`, `cleartext_transmission` (CWE-295, CWE-319)

@@ -69,6 +69,22 @@ rg -n "SECRET.*=.*[\"'](secret|password|changeme|jwt)" .
 
 # Key lookup from attacker-controlled header fields
 rg -n '"kid"|"jku"|"x5u"|"jwk"' .
+
+# OAuth2 misconfiguration
+rg -n "response_type.*token|implicit|password.*grant|grant_type.*password" .
+rg -n "redirect_uri|startsWith|includes\(|indexOf|match\(" .
+rg -n "code_challenge_method.*plain|code_verifier" .
+
+# SAML processing gaps
+rg -n "getElementsByTagName|InResponseTo|NotOnOrAfter|Recipient|OneTimeUse" .
+rg -n "SAMLResponse|Assertion|XMLSignature|KeyInfo" .
+
+# MFA bypass / weak OTP handling
+rg -n "skipMfa|bypass.*mfa|mfa.*optional|verifyTotp|recovery.*code" .
+rg -n "totp.*secret|TOTP_SECRET|otp.*window|rateLimit.*otp" .
+
+# Auth hardening gaps
+rg -n "user not found|invalid password|account.*lock|password.*reset" .
 ```
 
 Red flags at verification sites: no `algorithms` allowlist on asymmetric endpoints (RS256→HS256), `jwt.decode()` (Node.js) used for auth decisions, manual base64 payload decode without signature check, `kid` interpolated into SQL or file paths.
@@ -138,6 +154,140 @@ payload = jwt.decode(
     audience="myapp-api",
 )
 ```
+
+## Federation & Protocol Secure Configuration
+
+Detection targets missing enforcement at authorization servers, SAML consumers, and MFA gates — not JWT signature logic (covered above).
+
+### OAuth 2.0 / OIDC Hardening
+
+- **PKCE for public clients**: require `code_challenge` + S256 at `/authorize`; reject token exchange when `code_verifier` missing or when challenge used `plain`
+- **State (CSRF)**: bind one-time, server-stored `state` to the user session; reject callback when absent, reused, or mismatched (OIDC: also validate `nonce` in ID token)
+- **Redirect URI exact match**: compare full registered URI strings — no prefix, wildcard, or `startsWith` matching
+- **No implicit flow**: reject `response_type=token` / `id_token token`; use authorization code (+ PKCE for public/native clients)
+- **Short-lived access tokens**: cap access token TTL (minutes); rotate refresh tokens; detect reuse
+- **Scope minimization**: issue and enforce least-privilege `scope`; resource servers re-check scope per endpoint — do not trust broad default scopes
+
+```javascript
+// VULN: prefix/wildcard redirect URI acceptance
+if (requestedUri.startsWith(registeredBase)) { /* allow */ }
+
+// SECURE: exact string equality against registered list
+if (!client.redirectUris.includes(requestedUri)) throw new InvalidRedirectError();
+```
+
+```yaml
+# VULN: implicit or ROPC enabled
+response_types_supported: [token, id_token token]
+grant_types_supported: [password, implicit]
+
+# SECURE: code flow only for public clients
+response_types_supported: [code]
+grant_types_supported: [authorization_code, refresh_token]
+code_challenge_methods_supported: [S256]
+```
+
+```python
+# VULN: PKCE optional for public client
+if client.is_public and not code_verifier:
+    pass  # still issue tokens
+
+# SECURE: require verifier when challenge was sent; reject plain
+if auth_request.code_challenge and not verify_pkce(code_verifier, auth_request):
+    raise OAuthError("invalid_grant")
+```
+
+**Detection indicators**: `response_type.*token`, `grant_type=password`, redirect validation via `startsWith`/`includes`/regex without exact set membership, `code_challenge_method: plain`, token endpoint accepting requests without prior `code_challenge`, scopes copied from client request without server-side filtering.
+
+### SAML Consumer Hardening
+
+- **Signature validation**: verify XML signature on the assertion, the outer response, or both per profile — signature must cover the element actually trusted; reject unsigned assertions when signing is required
+- **XML signature wrapping**: do not select security nodes via `getElementsByTagName`; use absolute XPath to the signed element; validate against hardened local schema before trust decisions; ignore attacker-supplied `KeyInfo` — pin IdP keys from config/JKS
+- **Protocol binding checks**: validate `InResponseTo` against stored AuthnRequest ID; `Audience`/`Recipient` against SP entity ID and ACS URL; `NotBefore`/`NotOnOrAfter` with minimal clock skew; reject expired or not-yet-valid assertions
+- **Canonicalization**: use library-default exclusive C14N for digest verification; do not re-serialize DOM before verify; disable external entity resolution in XML parsers
+
+```java
+// VULN: first Assertion element trusted without signature scope check
+Element assertion = doc.getElementsByTagName("Assertion").item(0);
+
+// SECURE: verify signature covers intended element; validate InResponseTo + conditions
+SAMLObject signed = responseValidator.validate(response, pinnedIdpCredential);
+assertConditions(signed, expectedAudience, storedRequestId, clockSkewSeconds);
+```
+
+```python
+# VULN: timestamp check omitted
+user = parse_saml_response(xml_body)
+
+# SECURE: full condition validation
+assert response.in_response_to == pending_request.id
+assert sp_entity_id in assertion.audiences
+assert assertion.not_on_or_after > now and assertion.not_before <= now
+```
+
+**Detection indicators**: DOM tag-name lookup for `Assertion`/`Signature`, missing `InResponseTo`/`NotOnOrAfter`/`Recipient` validation, `KeyInfo` from document used as trust anchor, no replay/OneTimeUse store, IdP-initiated SSO without RelayState allowlist.
+
+### Multi-Factor Authentication (MFA)
+
+- **TOTP secret handling**: generate ≥160-bit secrets with CSPRNG; store encrypted or hashed at rest; never log or return secrets after enrollment; transmit setup QR/links only over TLS with step-up auth
+- **OTP rate-limiting / replay**: cap verify attempts per user/IP; reject reused OTP within time step window; use standard TOTP window (±1 step max); invalidate code after successful use when using out-of-band codes
+- **Recovery codes**: single-use, high-entropy, stored hashed; invalidate all recovery codes on MFA reset; require step-up auth before displaying or regenerating
+- **No MFA bypass on alternate flows**: every authenticated path (API, mobile, password reset completion, OAuth callback, magic link) must re-check MFA state — flag `skipMfa`, alternate routes that mint sessions without MFA gate, or "remember device" on sensitive apps
+
+```python
+# VULN: MFA checked only on web login route
+@app.post("/api/mobile/login")
+def mobile_login(credentials):
+    return issue_jwt(user)  # no mfa check
+
+# SECURE: centralized MFA gate before session/token issuance
+user = authenticate(credentials)
+require_mfa_satisfied(user, context=request)
+return issue_jwt(user)
+```
+
+```javascript
+// VULN: TOTP secret in logs or API response
+logger.info("Enrolled TOTP", { secret: totpSecret });
+res.json({ secret: totpSecret });
+
+// SECURE: hash recovery codes; constant-time OTP compare
+const ok = crypto.timingSafeEqual(hash(input), storedHash);
+await rateLimiter.consume(`otp:${userId}`);
+```
+
+**Detection indicators**: `skipMfa`/`bypassMfa` flags, OTP verify endpoints without rate limits, TOTP secrets in config/logs, recovery codes stored plaintext, session issued in `/callback` or `/reset-password/confirm` without MFA state check.
+
+### Authentication Flow Hardening
+
+- **Generic error messages**: same response for unknown user and bad password; normalize timing — flag distinct strings like "user not found" vs "wrong password"
+- **Account lockout / backoff**: progressive throttling after failed attempts — see `references/brute_force.md` for lockout/rate-limit detection; avoid permanent lockout without admin recovery
+- **Credential rotation**: force password change after breach indicator, admin reset, or privilege elevation; rotate refresh tokens and server sessions on password/MFA change
+- **Secure password reset**: uniform response whether account exists; reset tokens ≥32-byte CSPRNG, single-use, stored hashed, short TTL; HTTPS link to pinned domain; require re-auth after reset — do not auto-login; rate-limit reset requests (see `references/brute_force.md`)
+
+```python
+# VULN: account enumeration via error text
+if not user:
+    return "User not found", 404
+if not verify_password(user, password):
+    return "Invalid password", 401
+
+# SECURE: uniform failure
+if not user or not verify_password(user, password):
+    record_failed_attempt(identifier)
+    return "Invalid username or password", 401
+```
+
+```java
+// VULN: reset token stored plaintext; reusable
+resetTokens.put(token, userId);
+
+// SECURE: hashed, single-use, expiring
+store.save(hash(token), userId, expiresAt);
+// on use: delete row; rotate sessions; require login
+```
+
+**Detection indicators**: distinct login/reset error strings, missing `recordFailedAttempt`/`rateLimit` on auth routes, plaintext reset tokens, auto-login after reset without re-auth, no session/token revocation on password change.
 
 ## Advanced Techniques
 

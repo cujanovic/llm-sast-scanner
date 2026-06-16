@@ -189,6 +189,159 @@ Compare HTTP methods on the same path — a protected GET with unprotected DELET
 
 ---
 
+## Secure Authorization Design
+
+Architectural controls that reduce BFLA and escalation risk. Distinct from endpoint-level missing checks above — focus on policy shape and enforcement topology.
+
+### Deny-by-Default & Single Enforcement Point
+
+- Default posture: no allow rule matched → `403` (or generic `404` for existence hiding). Explicit allow only.
+- **Single choke point**: every privileged action invokes one shared module (Policy engine, `Authorizer`, OPA/Cedar evaluator, Casbin enforcer) — not ad-hoc `if (user.isAdmin)` scattered per handler.
+- **SAST signal**: same sensitive action guarded by copy-pasted role checks in multiple files instead of one imported policy call.
+- **SAST signal**: handler performs sensitive work before any authorization call (check-after-use).
+
+```python
+# SECURE: explicit allows, deny fallback, centralized policy
+def can_delete_user(actor, target_id):
+    if policy.evaluate(actor, "user:delete", resource_id=target_id):
+        return True
+    raise PermissionDenied()  # no implicit allow
+```
+
+### ABAC / RBAC / ReBAC
+
+| Model | Decision basis | Prefer when |
+|-------|----------------|-------------|
+| **RBAC** | Role membership (`hasRole('ADMIN')`) | Coarse, stable role sets |
+| **ABAC** | Attributes (owner, tenant, clearance, resource tags) | Multi-tenant, context-dependent access |
+| **ReBAC** | Relationships (owner-of, member-of, delegated-to) | Social/graph permissions (teams, sharing) |
+
+- **Weak signal**: RBAC-only (`role == 'admin'`) on resources that need ownership/tenant scoping → horizontal + vertical escalation when roles are broad.
+- **Strong signal**: policy predicate binds **actor + action + resource instance** (not action alone).
+- **ReBAC signal**: access derived from `user.id == resource.owner_id` or graph lookup — not from client-supplied relationship flags.
+
+```java
+// SECURE (ABAC): attributes evaluated server-side
+@PreAuthorize("@authz.can(actor, 'invoice:read', #invoiceId)")
+public Invoice get(@PathVariable UUID invoiceId) { ... }
+```
+
+### Least Privilege & Separation of Duties
+
+- Grant minimum scopes per role; flag default roles with write/admin permissions (`DEFAULT_ROLE = 'admin'`, seed data assigning `is_superuser=True`).
+- **SoD signal**: one endpoint or user session can both **initiate** and **approve** the same sensitive workflow (wire transfer, role elevation, bulk export) with no second principal.
+- **SAST signal**: permission constants like `'*'`, `'ALL'`, or overly broad resource wildcards in role definitions.
+
+### Per-Request Re-Verification
+
+- Authorization must run on **every** request (HTML, AJAX, API, WebSocket, background job triggered by user) — not once at login.
+- **VULN**: session/cookie flag set at login (`session['authorized']=true`) skips subsequent checks.
+- **VULN**: role cached in request context from stale token without DB/session revalidation after admin demotes user.
+- **SAFE**: on role/permission change, invalidate sessions/tokens; middleware re-evaluates policy each call.
+
+```javascript
+// VULN: one-time gate — subsequent admin routes trust session bit
+if (req.session.adminVerified) return next();
+// SAFE: requireRole('admin') runs on every privileged route
+```
+
+### Client-Side Enforcement (UX Only)
+
+- UI hiding admin nav/buttons is not authorization. **SAST signal**: frontend `if (user.role === 'admin')` with no corresponding server guard on the API the UI calls.
+- **VULN**: API trusts client header mirroring UI state (`X-Admin-Mode: true`, `X-Requested-With` as auth substitute).
+
+---
+
+## Transaction Authorization (Step-Up)
+
+Sensitive operations require **separate** user confirmation beyond session login — privilege changes, large transfers, account recovery, bulk delete/export.
+
+### When Required
+
+Flag endpoints that mutate high-impact state without step-up: role/permission changes, password reset for others, financial transfers, API key creation, tenant-wide config.
+
+### Design Requirements
+
+- **WYSIWYS**: user confirms server-rendered canonical fields (amount, target account, action type) — not attacker-controlled display strings.
+- **AuthN ≠ txn auth**: login password/SSO must not double as step-up credential; use distinct OTP, push approval, or hardware signature.
+- **Unique per operation**: one-time challenge/nonce per transaction — replay of prior OTP rejected.
+- **Time-limited**: challenge expires; delayed submission invalidates authorization.
+- **Server-side canonical payload**: sign/hash transaction blob on server; client submits `confirmation_token` bound to that blob — not raw tamperable params.
+
+```python
+# VULN: sensitive action completes on session alone
+def elevate_role(user_id, new_role):
+    User.query.get(user_id).role = new_role
+
+# SECURE: step-up + signed server payload
+def elevate_role(user_id, new_role, confirmation_token):
+    payload = step_up.verify(confirmation_token, expected_action="role:elevate", target=user_id)
+    if payload["new_role"] != new_role:
+        abort(400)  # tamper detected
+    User.query.get(user_id).role = new_role
+```
+
+### State Machine & Anti-Tamper
+
+- Enforce ordered steps: draft → review → confirm → execute. **VULN**: execute endpoint reachable without prior confirm step (direct POST to `/transfer/execute`).
+- **VULN**: client can add/remove params (`skip_verification=true`, `auth_method=none`) that disable checks.
+- **VULN**: transaction fields editable after challenge issued without invalidating authorization (TOCTOU).
+- **SAFE**: modifying any signed field invalidates pending authorization and forces restart.
+- **Method downgrade**: **VULN**: `auth_method` from client selects weakest verifier; **SAFE**: server policy fixes method by risk tier.
+
+### Brute-Force & Execution Gate
+
+- Failed step-up attempts throttle and reset entire flow (not just increment counter on same token).
+- Final execute handler re-validates authorization record immediately before side effect — not only at flow start.
+
+```java
+// VULN: check once at start, execute later without re-verify
+void executeTransfer(String txId) {
+    transferRepo.execute(txId);  // no stepUpValid(txId) here
+}
+```
+
+---
+
+## Authorization Testing Signals
+
+Static/recon indicators that authorization enforcement is untested or regressions will ship unnoticed.
+
+### Matrix & Coverage Gaps
+
+- **Signal**: no machine-readable authorization matrix (YAML/JSON/XML) mapping `{endpoint, role/attribute, allow|deny, expected_status}` alongside route definitions.
+- **Signal**: integration tests exist for happy-path admin (`200`) but no paired negative case (regular user → `403`) for same route.
+- **Signal**: test suite mints only admin tokens — no per-role token factory exercising deny paths.
+- **Signal**: role-change or revocation scenarios untested (demoted user token still succeeds).
+
+### Automated Test Patterns to Grep
+
+```yaml
+# SECURE: declarative matrix entry (fixture or test data)
+- endpoint: DELETE /api/admin/users/{id}
+  actor: user
+  expect: 403
+- endpoint: DELETE /api/admin/users/{id}
+  actor: admin
+  expect: 204
+```
+
+```python
+# VULN (test gap): admin-only route tested only as admin
+def test_delete_user():
+    resp = client.delete("/admin/users/1", headers=admin_headers)
+    assert resp.status_code == 204
+# Missing: same call with user_headers → assert 403
+```
+
+### CI / Regression Indicators
+
+- **Signal**: new privileged route merged without corresponding matrix row or negative test.
+- **Signal**: authorization middleware excluded from test app bootstrap (tests hit handlers directly, bypassing production guard stack).
+- **Signal**: `skip_before_action :verify_authorized`, `@Disabled` on security tests, or mock always returning `true` for policy checks.
+
+---
+
 ## Python Source Detection Rules
 
 ### Flask missing decorators
@@ -390,6 +543,15 @@ if ($_POST['is_admin'] == '1') {
 - Admin endpoint reachable by any authenticated user (missing `@PreAuthorize`, `@Secured`, role decorator) → **CONFIRM**
 - JWT with role claim where the role is trusted from the token payload without server-side cross-check → **CONFIRM** (especially if JWT secret is weak/default)
 - Mass assignment (`req.body` or `request.json` passed directly to ORM update) where `role`/`admin` fields are not excluded → **CONFIRM**
+- Sensitive mutation endpoint (role change, bulk delete, transfer) with no step-up/confirmation gate or server-bound authorization token → **CONFIRM**
+- Client-supplied `skip_verification`, `auth_method`, or `confirmed` flag accepted to bypass step-up → **CONFIRM**
+- Transaction execute handler with no re-validation of pending authorization at execution time (TOCTOU) → **CONFIRM**
+- Authorization decision uses one-time session flag instead of per-request policy evaluation → **CONFIRM**
+- Scattered inline role checks with no shared policy module for same resource type → **LIKELY** (maintainability/regression risk)
+- RBAC-only guard on multi-tenant/owned resource with no owner/tenant attribute in predicate → **LIKELY** (pair with `idor`)
+- Same principal can initiate and approve sensitive workflow with no SoD split → **CONFIRM**
+- Integration tests cover privileged route success but omit deny case for lower-privilege actor → **LIKELY** (test gap — pair with BFLA finding on same route)
+- Frontend role gate present; backing API handler lacks matching server authorization → **CONFIRM**
 
 ### FALSE POSITIVE: Not Privilege Escalation
 

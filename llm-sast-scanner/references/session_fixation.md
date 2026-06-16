@@ -137,6 +137,163 @@ req.session.regenerate(function(err) {
 
 Every authentication state change — login, privilege elevation, identity switch — must issue a fresh session identifier. The pre-authentication session ID must never survive into the authenticated context.
 
+## Session ID Generation and Entropy
+
+Session IDs must be opaque, server-issued, and unpredictable. Weak generation enables guessing and fixation follow-on attacks.
+
+**Requirements:**
+- CSPRNG source (`SecureRandom`, `crypto.randomBytes`, `secrets.token_hex`, `random_bytes`)
+- Minimum 64 bits entropy (128+ preferred); no sequential, timestamp, or user-derived components
+- Generic cookie names instead of framework defaults (`JSESSIONID`, `PHPSESSID`) where configurable
+- Reject client-supplied IDs not previously issued by the server
+
+**Detection indicators:**
+- Custom ID built from `Math.random()`, `rand()`, `time()`, user ID, or counter
+- Session ID length below 16 hex chars (64 bits)
+- `session.use_only_cookies = 0` (PHP) or URL rewriting enabled without compensating rotation
+- No validation that incoming session ID exists in server store before binding identity
+
+```javascript
+// VULN: predictable session ID
+const sessionId = Date.now().toString(36) + Math.random().toString(36);
+req.sessionID = sessionId;
+```
+
+```java
+// SAFE: framework default or explicit CSPRNG
+String id = new BigInteger(130, new SecureRandom()).toString(32);
+```
+
+## Session IDs in URLs
+
+Passing session IDs in query strings or path segments enables fixation via link sharing, Referer leakage, and log exposure.
+
+**Detection indicators:**
+- `response.encodeURL(...)` / `response.encodeRedirectURL(...)` (Servlet URL rewriting)
+- `;jsessionid=` in generated links, redirects, or form actions
+- PHP `session.use_trans_sid = 1` or `session.use_only_cookies = 0`
+- Express/connect session with `cookie: { secure: false }` combined with `req.query.sessionId` binding
+- Accepting `sessionid`, `sid`, or `JSESSIONID` from `request.getParameter(...)` / `req.query`
+
+```java
+// VULN: session ID appended to outbound URL
+String url = response.encodeRedirectURL("/dashboard");
+```
+
+```php
+// VULN: trans_sid embeds ID in links
+ini_set('session.use_trans_sid', '1');
+```
+
+## Session Lifecycle: Idle and Absolute Timeouts
+
+Timeouts must be enforced server-side. Client-side timers alone do not invalidate server sessions.
+
+**Idle timeout** — expire after inactivity (typical: 2–5 min high-value, 15–30 min low-risk).
+**Absolute timeout** — expire regardless of activity (typical: 4–8 hours).
+**Renewal** — optionally rotate session ID on periodic renewal to limit fixation/hijack window.
+
+**Detection indicators:**
+- No `session.setMaxInactiveInterval(...)`, `SESSION_COOKIE_AGE`, or framework timeout config
+- Only client-side `setTimeout` logout without server invalidation
+- `maxInactiveInterval` set to `-1` (never expire) or unreasonably large with no absolute cap
+- Missing server-side `createdAt` / `lastAccessedAt` tracking for absolute expiry
+- Session store entries never purged (no TTL on Redis/DB session keys)
+
+```java
+// VULN: session never expires
+session.setMaxInactiveInterval(-1);
+```
+
+```python
+# VULN: PERMANENT_SESSION_LIFETIME unset or timedelta(days=365)
+PERMANENT_SESSION_LIFETIME = timedelta(days=365)
+```
+
+```java
+// SAFE: idle + absolute enforced
+session.setMaxInactiveInterval(1800);
+session.setAttribute("absoluteExpiry", Instant.now().plus(8, ChronoUnit.HOURS));
+```
+
+## Logout and Server-Side Invalidation
+
+Logout must destroy server-side session state, not only clear the client cookie.
+
+**Detection indicators:**
+- Logout handler calls `response.addCookie(emptyCookie)` or `res.clearCookie(...)` without `session.invalidate()` / `Session.Abandon()` / `session_destroy()`
+- Logout only redirects; no session store deletion
+- Cookie cleared with `Max-Age=0` but session record remains in Redis/DB/memory
+- Missing logout endpoint; only client-side `localStorage.removeItem(...)`
+
+```javascript
+// VULN: client cookie cleared, server session alive
+res.clearCookie('connect.sid');
+res.redirect('/');
+```
+
+```java
+// SAFE: server-side teardown then cookie clear
+HttpSession session = request.getSession(false);
+if (session != null) {
+    session.invalidate();
+}
+```
+
+```php
+// SAFE
+session_destroy();
+setcookie(session_name(), '', time() - 3600, '/');
+```
+
+## Privilege Change and Reauthentication
+
+Regenerate session ID on password change, role elevation, account recovery completion, and identity switch — not only initial login.
+
+**Detection indicators:**
+- Role/permission update writes to existing session without `changeSessionId()` / `regenerate()` / `invalidate()`
+- Admin impersonation or "switch user" retains pre-switch session ID
+- Password-change handler updates credential store but not session
+- OAuth account-linking binds new identity without session rotation
+
+```java
+// VULN: privilege elevation without rotation
+session.setAttribute("role", "admin");
+```
+
+```javascript
+// SAFE
+req.session.regenerate(() => {
+  req.session.role = 'admin';
+});
+```
+
+## Concurrent Session Controls
+
+Limit simultaneous authenticated sessions per user when policy requires (financial, admin consoles).
+
+**Detection indicators:**
+- Login creates new session without invalidating or counting prior sessions for same user ID
+- No server-side session registry keyed by user (only anonymous session store)
+- Missing `maxSessions(n)` (Spring Security) or equivalent per-user cap
+- Stolen session remains valid after victim logs in elsewhere with no notification or revocation
+
+```java
+// SAFE: Spring Security concurrent session control
+http.sessionManagement(s -> s
+    .maximumSessions(1)
+    .maxSessionsPreventsLogin(true));
+```
+
+## Cache and Transport Hardening
+
+Responses carrying session identifiers must not be cached.
+
+**Detection indicators:**
+- Authenticated pages missing `Cache-Control: no-store` (or `private, no-cache`)
+- Session cookie set before HTTPS redirect completes
+- Mixed HTTP/HTTPS within same session journey
+
 Commonly affected languages: JavaScript, C#.
 
 ## Static Analysis Patterns

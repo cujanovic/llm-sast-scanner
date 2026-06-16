@@ -153,6 +153,62 @@ Leaked information acts as a force multiplier for attackers — it maps the code
 
 Information disclosure is an amplifier. Convert leaks into precise, minimal exploits or clear architectural risks.
 
+## Secure Error Handling Configuration
+
+Separate **internal diagnostics** from **external responses**. Clients receive generic, stable messages; servers log full exception context for forensics.
+
+### Client-Facing Response Policy
+
+- Return generic messages (`"An error occurred, please retry"`) — never stack traces, file paths, framework versions, or SQL/ORM error text
+- Use consistent error envelopes (JSON `message` field or Problem Details `application/problem+json`) with appropriate HTTP status (4xx client, 5xx server)
+- Escape or encode error response bodies to block injection into HTML/JSON clients
+- Strip `Server`, `X-Powered-By`, and technology fingerprint headers from error responses
+
+### Production Debug & Error Pages
+
+- Disable interactive debuggers and verbose exception pages in production (`DEBUG=False`, `display_errors=0`, `customErrors mode="RemoteOnly"`)
+- Route unhandled exceptions through centralized handlers (`@RestControllerAdvice`, Express error middleware, Django `handler500`, ASP.NET Core `UseExceptionHandler`)
+- Redirect to custom generic error pages — not framework default pages with source snippets
+
+### Internal vs External Channel Split
+
+```python
+# VULN: same detail to client and logs
+except Exception as e:
+    return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+# SAFE: generic client response; rich server-side log only
+except Exception as e:
+    logger.exception("order_create_failed", extra={"user_id": user_id, "order_id": order_id})
+    return jsonify({"message": "Unable to process request"}), 500
+```
+
+```java
+// VULN: exception message/stack sent to HTTP response
+catch (Exception e) {
+    e.printStackTrace(response.getWriter());
+}
+
+// SAFE: log internally; generic JSON to client
+catch (Exception e) {
+    logger.error("payment_failed", e);
+    response.setStatus(500);
+    response.getWriter().write("{\"message\":\"An error occurred, please retry\"}");
+}
+```
+
+```xml
+<!-- VULN: ASP.NET exposes detailed errors to remote clients -->
+<customErrors mode="Off" />
+
+<!-- SAFE: generic page for remote; detail only locally -->
+<customErrors mode="RemoteOnly" defaultRedirect="~/ErrorPages/Generic.aspx" />
+```
+
+### Error-Logging Boundary (Cross-Reference)
+
+Log exceptions with correlation IDs, user/session identifiers (non-PII where possible), source IP, and timestamps — but **never** passwords, tokens, recovery codes, full request bodies, or cleartext PII in error logs. Redact or hash sensitive fields before write (see `log_injection.md`).
+
 ## Python/JS/PHP Source Detection Rules
 
 ### Python (Flask / Django)
@@ -172,6 +228,17 @@ Information disclosure is an amplifier. Convert leaks into precise, minimal expl
 - **VULN**: `phpinfo()` endpoint accessible without authentication
 - **VULN**: `die($e->getMessage())`, `echo $e->getTraceAsString()`
 - **SAFE**: `ini_set('display_errors', 0); ini_set('log_errors', 1)`
+
+### Java / Spring
+- **VULN**: `e.printStackTrace()` or `printStackTrace(response.getWriter())` — stack sent to client
+- **VULN**: `@ExceptionHandler` returning `exception.getMessage()` or full exception object in response body
+- **VULN**: Spring Boot `server.error.include-stacktrace=always` or `include-message=always` in production config
+- **SAFE**: `@RestControllerAdvice` returning generic `ProblemDetail`/`ResponseEntity` message; `include-stacktrace=never` in prod
+
+### C# / ASP.NET
+- **VULN**: `<customErrors mode="Off" />` or `app.UseDeveloperExceptionPage()` without environment guard in production
+- **VULN**: `return Json(new { error = ex.ToString() })` or `ex.StackTrace` in API error responses
+- **SAFE**: `customErrors mode="RemoteOnly"`; production `UseExceptionHandler("/error")` with generic JSON body
 
 ### Source Maps Shipped to Production (build-config class)
 Production builds that emit and deploy `.map` files (or inline maps) hand attackers the original, un-minified source — comments, internal endpoints, function names, and sometimes secrets. Detect at the **build-config** level, framework-agnostic:
@@ -193,6 +260,13 @@ Commonly affected languages: JavaScript, Java, Python, Go, Ruby, C#.
 **Sinks**: HTTP response bodies (`res.send(err.stack)`), `sendError` with exception, error handlers returning raw exception objects.
 
 **Sanitizers**: generic error messages to client; server-only logging; debug flags off in production.
+
+**SAST indicators (error response sinks)**:
+- `debug=True`, `DEBUG = True`, `app.run(debug=True)` without environment guard
+- `printStackTrace`, `getTraceAsString`, `traceback.format_exc`, `err.stack`, `ex.ToString()`, `ex.StackTrace` flowing to HTTP response sinks
+- Error handlers returning `str(e)`, `err.message`, raw exception objects, or SQL/ORM error strings to clients
+- Production config: `include-stacktrace=always`, `customErrors mode="Off"`, `display_errors=1`, `PROPAGATE_EXCEPTIONS=True` combined with client-visible responses
+- `res.json({ error: err })`, `sendError(500, exception)`, template rendering of `{{ exception }}` in user-facing pages
 
 ### Sensitive logging (CWE-312 / CWE-532)
 

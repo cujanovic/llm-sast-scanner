@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 59 vulnerability classes across web, API, auth, mobile, and logic layers.
+  code review of any language or framework. Covers 70 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.12.0"
+  version: "1.13.0"
   domain: application-security
-  references: 59 vulnerability knowledge bases
+  references: 70 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,19 +22,21 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 59 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 70 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
 |----------|----------------|
-| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM) |
+| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
 | **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Mass Assignment |
-| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation |
+| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
-| **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, Clickjacking, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
+| **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
+| **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / Cloud Orchestration, CI/CD & Container Security |
+| **API & AI/Agent Services** | API / REST / Web-Service Security, MCP (Model Context Protocol) Security |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
-| **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo) |
-| **Language/Platform** | PHP Security, Mobile Security (Android/iOS) |
+| **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
+| **Language/Platform** | PHP Security, Mobile Security (Android/iOS), C/C++ Memory Safety |
 
 ---
 
@@ -136,6 +138,17 @@ references/format_string_injection.md    — Externally-controlled format string
 references/output_encoding.md            — Inappropriate encoding for output context, encoder/context mismatch (CWE-838)
 references/hardcoded_code_backdoor.md    — Embedded malicious code / supply-chain backdoor patterns (CWE-506)
 references/aspnet_security_misconfig.md  — ASP.NET misconfiguration: debug binary, disabled request validation (CWE-011/016)
+references/dom_clobbering.md             — DOM clobbering: attacker id/name HTML shadowing JS globals/DOM APIs
+references/content_security_policy.md    — CSP weaknesses: missing/weak policy, unsafe-inline/eval, wildcard sources, allowlist bypass
+references/xs_leaks.md                    — Cross-site leaks (timing/frame/status/cache oracles), missing COOP/COEP/CORP/Fetch-Metadata
+references/privacy_data_protection.md    — Privacy / PII handling: over-collection, retention, PII in logs/URLs/third parties
+references/supply_chain_security.md      — Supply chain: unpinned deps, missing integrity/SRI, lifecycle scripts, untrusted registries
+references/api_security.md               — API / REST / web-service layer: excessive data exposure, rate limits, endpoint inventory, misconfig
+references/mcp_security.md               — MCP (Model Context Protocol): tool poisoning, injection via tool output, over-broad/unauth servers
+references/iac_security.md               — Infrastructure-as-Code misconfig (Terraform/CloudFormation/ARM/Bicep/Pulumi)
+references/kubernetes_cloud_security.md  — Kubernetes / cloud orchestration: privileged pods, RBAC, securityContext, secrets, NetworkPolicy
+references/cicd_container_security.md     — CI/CD pipeline + container/Docker security (PPE, untrusted inputs, root images, unpinned tags)
+references/memory_safety_c_cpp.md        — C/C++ memory safety: buffer overflow, UAF, unsafe string funcs, integer overflow, toolchain hardening
 ```
 
 **Sources / sinks / sanitizers:** Each reference documents the per-language sources and sinks for the class and the

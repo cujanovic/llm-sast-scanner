@@ -144,6 +144,28 @@ new URL('#');                                                           // reads
 
 ---
 
+## Pollution → DOM XSS Escalation Chain
+
+SAST triage requires four linked stages in the **same realm**. Sink-only or gadget-only hits stay LOW until the chain is complete.
+
+| Stage | What to find | Client indicator |
+|-------|--------------|------------------|
+| Source | Attacker-controlled parse input | `location.search`, `location.hash`, `postMessage` `event.data`, client `JSON.parse` of storage/WS payload |
+| Sink | Prototype write via merge or bracket walk | `_.merge`, `$.extend(true,…)`, hand-rolled `for…in`, hash/query parsers |
+| Gadget read | Inherited default on config-style object | `obj.<key>`, `obj.<key> ?? default`, optional chaining on unset flag |
+| DOM impact | Polluted value reaches HTML/URL/script sink | `innerHTML`, `srcdoc`, `src`, sanitizer `ALLOWED_ATTR`/`whiteList`, `new URL().href` |
+
+```javascript
+// source → sink → gadget → DOM XSS (one chain)
+const params = parseQuery(location.search);            // VULN — walks __proto__
+_.merge(appConfig, params);                           // VULN — pollution sink
+document.getElementById('x').innerHTML = appConfig.title ?? '';  // gadget + DOM sink → XSS
+```
+
+Primary browser sources for taint: **`location.search`**, **`location.hash`**, **`postMessage`** payloads merged without origin/key guard. Hash payloads never reach the server — prioritize parsers bound to `location.hash`.
+
+---
+
 ## Realm Isolation — Pollution Does Not Cross Realms
 
 Each JavaScript *realm* has its own `Object.prototype`, `Array.prototype`, etc. Pollution in one realm does NOT reach another. Relevant boundaries when triaging:
@@ -403,6 +425,32 @@ Three overlapping detection patterns cover the broadest signal. Each is high-pre
 
 The third query is the most useful in practice because it finds custom merges that no library list will catch.
 
+### SAST grep indicators (client bundle)
+
+Token-aware ripgrep starting points — pair hits with source (`location`/`postMessage`) and absence of safe guards:
+
+```bash
+# Known merge/set helpers in frontend bundle
+rg -n '\.(extend|merge|mergeWith|defaultsDeep|set|setWith|zipObjectDeep)\s*\(' --glob '*.{js,jsx,ts,tsx}'
+
+# jQuery deep extend
+rg -n '\$\.extend\s*\(\s*true\s*,' --glob '*.{js,jsx,ts,tsx}'
+
+# Hand-rolled recursive merge / deep-assign
+rg -n 'for\s*\(\s*(const|let|var)\s+\w+\s+in\s+\w+' --glob '*.{js,jsx,ts,tsx}'
+
+# Bracket assignment from dynamic/user key
+rg -n '\w+\[\s*\w+\s*\]\s*=' --glob '*.{js,jsx,ts,tsx}'
+
+# Browser pollution sources
+rg -n 'location\.(search|hash)|addEventListener\s*\(\s*[\'"]message[\'"]|postMessage' --glob '*.{js,jsx,ts,tsx}'
+
+# Hash/query parsers that walk dotted/bracket keys
+rg -n 'decodeURIComponent|split\s*\(\s*[\'"][&=.\\[\\]]' --glob '*.{js,jsx,ts,tsx}'
+```
+
+High-confidence triad: source grep + merge/set grep on same file or import chain + DOM/sanitizer gadget read (`innerHTML`, `ALLOWED_ATTR`, `whiteList`, `new URL(`).
+
 ### VULN — recursive `for…in` merge of attacker JSON / hash
 
 ```javascript
@@ -567,6 +615,28 @@ function merge(dst, src) {
 ```
 
 `IsPlainObjectGuard` — `__proto__` payloads (which are `Object.prototype`) and constructor-chained payloads (which point at `Function.prototype`) both fail the plain-object test.
+
+### SAFE — JSON Schema validation before merge (Ajv / Zod / similar)
+
+Validate parsed URL/JSON/postMessage payloads against a strict schema with `additionalProperties: false` (or equivalent) **before** any deep merge. Schema validators strip unknown keys including `__proto__`, `constructor`, `prototype` at the boundary.
+
+```javascript
+const parsed = JSON.parse(event.data);
+const valid = configSchema(parsed);                   // strict schema; no extra keys
+if (valid) Object.assign(safeConfig, valid);          // shallow assign of validated subset only
+```
+
+Do not treat schema validation as sufficient if validated output is later passed to `_.merge` / `$.extend(true,…)` with unvalidated sibling objects.
+
+### VULN — lodash/jQuery merge or set on untrusted browser input
+
+```javascript
+_.merge(state, JSON.parse(location.hash.slice(1)));   // VULN — never merge raw parsed URL/hash/postMessage
+_.set(opts, userPath, userVal);                       // VULN — userPath may be "__proto__.innerHTML"
+$.extend(true, settings, event.data);                 // VULN — deep extend of postMessage payload
+```
+
+Prefer `structuredClone` for deep copy, `Map` for dynamic keys, or shallow `Object.assign` after schema validation — not recursive merge on tainted objects.
 
 ---
 

@@ -13,6 +13,12 @@ When authentication endpoints impose no restrictions on the number of attempts, 
 - OTP / 2FA verification endpoints
 - Password reset token validation endpoints
 - Account enumeration via response differences
+- Security-question / knowledge-based recovery endpoints (legacy)
+
+**Attack taxonomy** (same missing-control surface; differ by attacker input):
+- **Brute force** — many passwords against one account.
+- **Credential stuffing** — breached username/password pairs against many accounts.
+- **Password spraying** — one weak password against many accounts (evades per-account lockout).
 
 ## Vulnerable Conditions
 
@@ -27,6 +33,68 @@ An authentication endpoint qualifies as vulnerable when it exhibits **all** of:
 - A login failure counter stored in session or database that locks the account after a configurable threshold.
 - CAPTCHA integration (`recaptcha`, `hcaptcha`) wired into the authentication flow.
 - Note: `time.sleep()` introduces a delay but is not a genuine defense — flag it but do not classify the endpoint as safe.
+
+## Defense Depth
+
+Layer controls; absence of any single layer is a SAST signal when the handler accepts credentials, OTP, or reset tokens.
+
+### Rate limiting / exponential backoff
+
+- **Per-IP**, **per-account**, and **global** counters (distributed stuffing/spraying).
+- **Exponential backoff** on consecutive failures — stronger than fixed `sleep()`:
+  ```python
+  delay = min(2 ** user.failed_attempts, 300)  # cap at 5 min
+  time.sleep(delay)
+  ```
+- **VULN**: fixed delay only, no counter reset, or backoff applied before credential check (timing oracle).
+
+### Account lockout (DoS trade-off)
+
+- Lock after N failures (`failed_attempts`, `locked_until`, `is_locked`).
+- **DoS risk**: attacker locks victim accounts — prefer IP throttling + soft lockout (`locked_until` TTL) + admin/unlock email over permanent lock.
+- **VULN**: lockout with no unlock path and no out-of-band notification.
+
+### CAPTCHA / proof-of-work
+
+- Trigger after failed attempts, high velocity, or bot signals — not only on registration.
+- **Proof-of-work** (client puzzle/token) raises automation cost when CAPTCHA is impractical:
+  ```js
+  if (failedAttempts >= 3 && !verifyPowToken(req.body.powNonce)) {
+    return res.status(429).json({ error: 'Challenge required' });
+  }
+  ```
+- **VULN**: CAPTCHA validated only client-side or on first page load, not on each auth attempt.
+
+### MFA
+
+- Blocks stuffing even with valid passwords — require MFA for admin/sensitive actions and on risk signals (new device, geo anomaly, recent failures).
+- **VULN**: `skipMfa`, `bypassMfa`, or session issued at login without MFA step when policy requires it.
+- OTP/TOTP verify specifics: see `references/authentication_jwt.md` (attempt caps, replay window, recovery codes).
+
+### Breached-password checks
+
+- Reject or force rotation when password appears in breach corpora (k-anonymity range lookup or local bloom filter).
+  ```python
+  prefix = hashlib.sha1(password.encode()).hexdigest()[:5].upper()
+  if prefix in fetch_breach_suffixes(prefix):
+      raise ValidationError('password_breached')
+  ```
+- **VULN**: registration/password-change handlers with no breach check alongside plaintext comparison.
+
+### Device / IP reputation and anomaly detection
+
+- Track device fingerprint, ASN, hosting-provider IP, impossible-travel velocity.
+- **VULN**: auth handler with no `riskScore` / reputation gate and unlimited attempts from datacenter IPs.
+  ```java
+  // VULN: login succeeds/fails with no IP reputation or velocity check
+  authenticationManager.authenticate(token);
+  ```
+
+### No username enumeration
+
+- Uniform response body, status, and timing for valid vs invalid username on login, reset, and OTP request.
+- **VULN**: distinct errors (`user_not_found` vs `wrong_password`) or reset endpoint returning 404 for unknown email.
+- Reset/password-recovery rate limits must apply per IP **and** per submitted identifier — see `references/authentication_jwt.md`.
 
 ---
 
@@ -220,6 +288,60 @@ if (isset($_POST['admin_password']) && $_POST['admin_password'] === ADMIN_PASSWO
 - Do NOT emit `brute_force` when the project is a vulnerability demonstration or benchmark — focus on whether brute force is an explicit vulnerability category demonstrated by the project, not an incidental missing defense.
 - Only emit when there is CONFIRMED: (a) a login/auth endpoint accepting credentials, AND (b) explicit evidence the endpoint processes unlimited attempts (e.g., a loop, no counter, no lockout after N attempts in the application code).
 - Do NOT infer CWE-307 from generic missing-rate-limiting findings alone unless the handler is clearly an authentication endpoint and no lockout exists in code — that query class covers DoS on expensive handlers, not login-specific lockout.
+
+## Security Questions (Legacy Recovery)
+
+**Why weak**: answers are guessable (public records, social media), shared across sites, rarely rotated, and often stored with weaker hashing than passwords.
+
+**Prefer alternatives**: MFA/TOTP, one-time recovery codes, verified email magic link — see `references/authentication_jwt.md` for recovery-token and re-auth requirements.
+
+**If present in code** — same brute-force surface as login; flag when missing rate limit, lockout, or CAPTCHA on verify:
+```python
+# VULN: security question check with no attempt tracking
+if normalize(request.form['answer']) == stored_answer_hash_compare(user, 'pet'):
+    reset_session['recovery_passed'] = True
+```
+
+**Legacy hardening signals** (missing → LIKELY):
+- Curated question list (not free-form user questions)
+- Answers hashed (Argon2id/bcrypt + per-answer salt), normalized before compare
+- Same question on failure (no rotation leaking other answers)
+- Email verified before questions shown; re-auth before answer change
+
+## SAST Grep Indicators
+
+Find auth handlers first, then confirm absence of limiter/lockout symbols in same file or middleware chain.
+
+**Auth route discovery**:
+```bash
+rg -n "(login|sign[_-]?in|authenticate|verify[_-]?otp|reset[_-]?password|forgot[_-]?password|security[_-]?question)" --glob "*.{py,js,ts,java,php,rb,go}"
+```
+
+**Missing rate limit / lockout** (handler file has route match above but none of below):
+```bash
+rg -n "limiter\.limit|rateLimit|ratelimit|RateLimiter|Bucket4j|django[_-]?ratelimit|django[_-]?axes|failed_attempts|lockout|locked_until|too many attempts|429" .
+```
+
+**Missing CAPTCHA / bot gate after failures**:
+```bash
+rg -n "recaptcha|hcaptcha|turnstile|verifyCaptcha|powNonce|proof[_-]?of[_-]?work" .
+```
+
+**Missing breach check on password set/change**:
+```bash
+rg -n "pwned|breach|compromised_password|password.*breach" .
+```
+
+**Username enumeration on auth/reset**:
+```bash
+rg -n "user_not_found|email_not_found|no such user|account does not exist" .
+```
+
+**Heuristic**: login/OTP/reset handler + zero grep hits for limiter/lockout/backoff in repo scope → **LIKELY** (`brute_force`); confirm handler processes unlimited attempts in application code (see FALSE POSITIVE rules for infra/WAF caveat).
+
+## Related References
+
+- `references/authentication_jwt.md` — MFA/OTP rate limits, recovery tokens, uniform reset responses, session revocation on password change, `skipMfa`/`bypassMfa` detection; lockout/backoff and reset rate-limit patterns cross-link here.
 
 ## Analyst Notes
 

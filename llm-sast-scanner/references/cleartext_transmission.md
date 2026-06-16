@@ -27,6 +27,9 @@ Sensitive data sent over HTTP, unencrypted sockets, or non-TLS channels is reada
 - TLS disabled via `verify=False`, `InsecureSkipVerify`, custom `TrustManager` that accepts all certs (related CWE-295, not cleartext but often co-located).
 - Sensitive values appended to URL query (visible in access logs and Referer).
 - WebSocket `ws://` carrying session tokens on untrusted networks.
+- Server/client allows TLS 1.0/1.1, SSLv3, or weak/export/null ciphers.
+- HTTPS site serves session cookies without `Secure` flag or accepts HTTP without redirect.
+- Active mixed content (`http://` scripts/XHR) on TLS pages; missing HSTS on production HTTPS hosts.
 
 ## Safe Patterns
 
@@ -34,8 +37,11 @@ Sensitive data sent over HTTP, unencrypted sockets, or non-TLS channels is reada
 - HSTS on web properties; upgrade-insecure-requests in CSP.
 - Send secrets in request body over TLS, never in query string.
 - Pin or trust-store validate production endpoints; use SSL socket factory patterns (Java).
+- TLS 1.3 default with TLS 1.2 minimum; disable SSLv3/TLS 1.0/1.1; strong AEAD cipher suites only.
+- HTTP 301/308 redirect to HTTPS; HSTS with `includeSubDomains` (and `preload` only when fully ready).
+- `Secure` flag on all session/auth cookies; no active mixed content on HTTPS pages.
 
-**Recognized mitigations**: explicit `https` scheme; `HttpsURLConnection`; modern TLS protocol constants; `requireSSL=true` (ASP.NET).
+**Recognized mitigations**: explicit `https` scheme; `HttpsURLConnection`; modern TLS protocol constants; `requireSSL=true` (ASP.NET); `Strict-Transport-Security` header; `ssl_protocols TLSv1.2 TLSv1.3`.
 
 ## Language Patterns
 
@@ -75,9 +81,80 @@ Note: JavaScript/Node has no dedicated cleartext-transmission rule in standard p
 | Secrets logged server-side after HTTPS transit | Cleartext storage/logging, not transport |
 | Session cookie without Secure flag on HTTPS site | Cookie may leak on downgrade paths |
 
-## HSTS and Mixed Content
+## TLS Protocol & Cipher Hardening
 
-Even with HTTPS APIs, pages that load active mixed content (`http://` scripts) weaken transport guarantees. Automated scans do not flag mixed content directly; pair non-HTTPS URL findings with front-end asset review.
+Production endpoints must negotiate TLS 1.2 or 1.3 only. Legacy protocols and weak ciphers defeat confidentiality even when the URL uses `https://`.
+
+**Protocol requirements**
+- Default to TLS 1.3; allow TLS 1.2 only when legacy client compatibility is required.
+- Disable SSLv2, SSLv3, TLS 1.0, and TLS 1.1 in server and client configs.
+- Enable TLS_FALLBACK_SCSV where fallback paths exist to block downgrade attempts.
+
+**Cipher requirements**
+- Prefer AEAD ciphers (AES-GCM, ChaCha20-Poly1305); disable null, anonymous, and EXPORT ciphers.
+- Disable TLS compression (CRIME mitigation).
+- Configure secure DH/ECDH groups (e.g., x25519, secp256r1, ffdhe3072).
+
+**Detection indicators — weak TLS config**
+
+| Signal | Example pattern |
+|--------|-----------------|
+| Legacy protocol enabled | `SSLProtocol all -SSLv2` (still allows TLS 1.0/1.1); `ssl_protocols TLSv1 TLSv1.1 TLSv1.2` |
+| Explicit legacy allow | `MinProtocol = TLSv1`; `SecurityProtocol = Ssl3 \| Tls` |
+| Weak/null cipher | `EXPORT`, `NULL`, `ADH`, `aNULL`, `RC4`, `DES`, `3DES` in cipher lists |
+| Compression on | `SSLCompression on`; OpenSSL `COMP` methods enabled |
+| Client downgrade | Node `secureProtocol: 'TLSv1_method'`; Java `SSLContext.getInstance("TLSv1")` |
+
+```nginx
+# VULN: legacy protocols and weak ciphers
+ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+ssl_ciphers 'ECDHE-RSA-DES-CBC3-SHA:RC4-SHA';
+```
+
+```java
+// SAFE: restrict to TLS 1.2+
+SSLContext ctx = SSLContext.getInstance("TLSv1.2");
+// or TLSv1.3 where supported
+```
+
+## HTTPS Enforcement, HSTS, and Mixed Content
+
+**HTTP → HTTPS redirect**
+- All HTTP requests must 301/308 redirect to HTTPS before sensitive data is exchanged.
+- Flag listeners bound to port 80 without redirect rules; flag hardcoded `http://` canonical/base URLs in prod configs.
+
+```nginx
+# SAFE: force HTTPS
+server { listen 80; return 301 https://$host$request_uri; }
+```
+
+**HSTS**
+- Emit `Strict-Transport-Security` on all HTTPS responses; include `includeSubDomains` when all subdomains are TLS-ready.
+- Add `preload` only after verifying full HTTPS coverage and subdomain readiness (misconfiguration causes long-lived browser lockout).
+
+```http
+Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+```
+
+**Secure cookies over TLS**
+- Session/auth cookies must set `Secure` on HTTPS sites; pair with `HttpOnly` and `SameSite`.
+- Flag `Set-Cookie` without `Secure` on TLS-terminated routes; ASP.NET `requireSSL="false"`; Express `cookie({ secure: false })` in production.
+
+```javascript
+// VULN: session cookie may leak on HTTP downgrade paths
+res.cookie('session', token, { httpOnly: true, secure: false });
+```
+
+**Mixed content**
+- Active mixed content (`http://` scripts, XHR, WebSocket upgrade, iframes) bypasses page TLS and enables session theft or script injection.
+- Flag hardcoded `http://` asset URLs in HTML/JS/CSS templates served over HTTPS; CSP missing `upgrade-insecure-requests` when legacy HTTP assets remain.
+
+```html
+<!-- VULN: active mixed content on HTTPS page -->
+<script src="http://cdn.example.com/app.js"></script>
+```
+
+Even with HTTPS APIs, pages that load active mixed content weaken transport guarantees. Pair non-HTTPS URL findings with front-end asset review and CSP header inspection.
 
 ## Common False Alarms
 

@@ -32,6 +32,75 @@ Stateful taint tracking applies in Ruby: user params start in an **unpermitted**
 - DTO/ViewModel layer that exposes only safe fields before persistence.
 - Mongoose `schema.pick` or explicit destructuring excluding privileged paths.
 
+## Allowlist vs Blocklist
+
+Prefer **allowlist** binding: only named fields reach the model. **Blocklist** (`exclude`, `$guarded`, `setDisallowedFields`) omits known-sensitive keys but fails when new privileged columns are added without updating the list.
+
+| Strategy | Mechanism | SAST risk |
+|----------|-----------|-----------|
+| Allowlist | Rails `permit`, Spring `setAllowedFields`, Laravel `$fillable`, Django `fields=` | Low when list is explicit and non-empty |
+| Blocklist | `$guarded`, `exclude=`, `setDisallowedFields`, `@JsonIgnore` on entity | High — new `role`/`balance` columns bind until blocklist updated |
+
+**VULN (blocklist gap)**: Model gains `is_premium`; `$guarded = ['is_admin']` still permits `is_premium=1`.
+**SAFE (allowlist)**: `permit(:name, :email)` — unknown keys dropped regardless of schema changes.
+
+## DTO / View-Model Binding
+
+Bind HTTP input to a **narrow input type**, then map to the persistence entity server-side. The entity must not appear as a direct binding target for user params.
+
+**VULN**: `@PostMapping create(@ModelAttribute User user)` — entity includes `role`.
+**SAFE**: `@PostMapping create(@ModelAttribute UserRegistrationDto dto)` → `user.setName(dto.getName())`; entity never receives raw request hash.
+
+Same pattern: Rails form object / `ActiveModel::Model`, ASP.NET view model, DRF `Serializer` with explicit `fields`, GraphQL input types separate from DB models.
+
+## Sensitive Fields to Protect
+
+Flag model columns and request keys that must never be client-writable:
+
+| Category | Examples |
+|----------|----------|
+| Privilege / role | `is_admin`, `isAdmin`, `role`, `permissions`, `verified`, `approved` |
+| Ownership / identity | `id`, `user_id`, `owner_id`, `account_id`, `organization_id`, `tenant_id` |
+| Financial / quota | `balance`, `credit`, `price`, `discount`, `plan_tier` |
+| Auth / lifecycle | `password_digest`, `reset_token`, `email_verified_at`, `locked_at` |
+
+Any create/update path that bulk-binds request data while the model defines these columns is a candidate sink.
+
+## Detection Indicators (Grep)
+
+Bulk-binding sinks — trace backward for allowlist/permit before the call:
+
+```text
+\.create\s*\(\s*params
+\.update\s*\(\s*params
+assign_attributes\s*\(
+update_attributes\s*\(
+permit!
+findByIdAndUpdate\s*\([^,]+,\s*req\.(body|query)
+findOneAndUpdate\s*\([^,]+,\s*req\.body
+\.update\s*\(\s*req\.body
+Model\.create\s*\(\s*req\.body
+\*\*request\.(POST|GET|data)
+objects\.create\s*\(\s*\*\*
+@ModelAttribute\s+\w+
+ModelForm\s*\([^)]*\)(?!.*fields\s*=)
+Serializer\s*\([^)]*\)(?!.*fields\s*=)
+\$fillable\s*=\s*\[\s*\]
+\$guarded\s*=\s*\[\s*\]
+setDisallowedFields\s*\(
+Bind\s*\(\s*"Include"
+```
+
+Missing allowlist signals (manual review):
+
+```text
+ModelForm\s*\(\s*\)
+ModelForm\s*\([^)]*exclude\s*=
+params\.permit\s*\(\s*\{\s*\}\s*\)
+params\.permit\s*\(\s*\)
+WebDataBinder(?!.*setAllowedFields)
+```
+
 ## Sources, Sinks & Sanitizers (Ruby)
 
 Commonly affected languages: Ruby (automated mass-assignment tracking); JavaScript/Node, Java/Spring, and Python/Django require manual review for Mongoose, Sequelize, `@ModelAttribute`, and `**request.POST` patterns.
@@ -68,7 +137,33 @@ The contrast between `permit!` vs `permit(:name, :email)` is the canonical safe 
 ### Python / Django
 
 **VULN**: `User.objects.create(**request.POST.dict())` including privilege fields on model.
-**SAFE**: Serializer with explicit `fields = ['username', 'email']` (DRF) or form with limited fields.
+**VULN**: `UserForm(request.POST)` with no `fields`/`exclude` — all model fields bind.
+**SAFE**: `class UserForm(ModelForm): class Meta: model = User; fields = ['username', 'email']`.
+**SAFE**: DRF `Serializer` with `fields = ['username', 'email']` (not `exclude = ['is_staff']` alone).
+
+### PHP / Laravel
+
+**VULN**: `User::create($request->all())` with `$guarded = []` or missing `$fillable`.
+**VULN**: `$guarded = ['is_admin']` — new `role` column remains assignable.
+**SAFE**: `protected $fillable = ['name', 'email'];` then `User::create($request->only('name', 'email'))`.
+
+### ASP.NET MVC / Core
+
+**VULN**: `public IActionResult Edit(User model)` — model binder maps all posted properties including `IsAdmin`.
+**SAFE**: `[Bind("Name,Email")] public IActionResult Edit(User model)` or bind a view model with only safe properties.
+**SAFE**: `[BindNever]` on entity properties that must not bind from request.
+
+### Java / Spring (extended)
+
+**VULN**: `@RequestBody User user` on entity with Jackson default — all JSON properties deserialize.
+**SAFE**: `@InitBinder` → `binder.setAllowedFields("name", "email")`.
+**SAFE**: `@JsonIgnore` on privileged entity fields **plus** separate request DTO for writes (ignore alone is blocklist-style).
+
+### JavaScript / Express (extended)
+
+**VULN**: `User.update(req.body)` or spread `{ ...req.body }` into ORM update.
+**SAFE**: `const { name, email } = req.body; User.update({ name, email })`.
+**SAFE**: `_.pick(req.body, ['name', 'email'])` or `lodash/omit(req.body, ['role', 'isAdmin'])` — prefer pick (allowlist).
 
 ## Common False Alarms
 
@@ -89,8 +184,9 @@ The contrast between `permit!` vs `permit(:name, :email)` is the canonical safe 
 1. Identify ORM create/update paths that accept a params hash or request body object.
 2. Trace whether a framework permit/whitelist runs before the ORM call.
 3. Enumerate model columns — flag any privileged field (`role`, `admin`, `verified`, foreign keys to other tenants).
-4. For Node/Java/Python stacks without automated mass-assignment rules, grep for `req.body`, `@ModelAttribute`, `**request.POST` passed directly to ORM.
-5. Confirm exploitability: can a non-admin HTTP request set a privileged column?
+4. For Node/Java/Python stacks without automated mass-assignment rules, grep for `req.body`, `@ModelAttribute`, `**request.POST` passed directly to ORM (see Detection Indicators).
+5. Classify binding as allowlist vs blocklist; downgrade confidence if only `$guarded`, `exclude=`, or `setDisallowedFields` protects privileged columns.
+6. Confirm exploitability: can a non-admin HTTP request set a privileged column?
 
 ## Core Principle
 

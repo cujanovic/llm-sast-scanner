@@ -15,7 +15,7 @@ This is a **configuration check**, not taint flow: verify whether HTTP server de
 - JavaScript: `Http::ServerDefinition` — Express/Fastify/Node HTTP servers with no route setting `x-frame-options`
 - C#: `Web.config` customHeaders, or `Response.AddHeader`/`AppendHeader("X-Frame-Options", ...)` in code
 
-**Not modeled**: `Content-Security-Policy: frame-ancestors` (modern replacement); per-route exceptions; headers set only at reverse proxy.
+**Not modeled**: `Content-Security-Policy: frame-ancestors` (modern replacement); per-route exceptions; headers set only at reverse proxy. Use **Detection Indicators** below to grep CSP alongside XFO.
 
 ## Vulnerable Conditions
 
@@ -74,13 +74,75 @@ Standard configuration checks cover only `X-Frame-Options`, not:
 - `Content-Security-Policy: frame-ancestors 'none'` or `'self'`
 - Legacy JavaScript `if (top !== self) top.location = self.location` (unreliable)
 
-When triaging missing X-Frame-Options findings, manually confirm CSP frame-ancestors is also absent before reporting.
+When triaging missing X-Frame-Options findings, manually confirm CSP frame-ancestors is also absent before reporting. Full CSP hardening patterns: `content_security_policy.md`.
+
+## Defense Hierarchy
+
+1. **Primary — CSP `frame-ancestors` (header)**: preferred control; takes precedence over XFO when both are present.
+2. **Legacy/compat — `X-Frame-Options`**: `DENY` or `SAMEORIGIN` fallback for browsers without CSP frame-ancestors.
+3. **Supporting — `SameSite` cookies**: limits cross-site cookie inclusion; does not replace framing headers.
+4. **Supplemental only — frame-busting JS**: bypassable; never sole control.
+
+## frame-ancestors Directive Values
+
+```http
+Content-Security-Policy: frame-ancestors 'none';
+Content-Security-Policy: frame-ancestors 'self';
+Content-Security-Policy: frame-ancestors 'self' https://partner.example;
+```
+
+- `'none'` — no origin may embed; use on auth, admin, and payment HTML.
+- `'self'` — same origin only; acceptable when no cross-origin embed is required.
+- **Allowlist** — space-separated origin URLs (`https://host`); narrow to trusted partners only.
+- **Weak/absent** — missing directive, `frame-ancestors *`, or permissive allowlist on sensitive routes.
+
+Deliver via HTTP response header (not meta tag — meta CSP cannot enforce `frame-ancestors` in all browsers; see `content_security_policy.md`).
+
+## X-Frame-Options Legacy Values
+
+```http
+X-Frame-Options: DENY
+X-Frame-Options: SAMEORIGIN
+```
+
+- `DENY` — equivalent intent to `frame-ancestors 'none'`.
+- `SAMEORIGIN` — equivalent intent to `frame-ancestors 'self'`.
+- **`ALLOW-FROM uri` — deprecated**: dropped from the HTML Living Standard; never implemented consistently in Chrome/Firefox; superseded by CSP allowlist; grep hit = migrate to `frame-ancestors` allowlist, not a safe finding.
+
+## SameSite Cookies (Supporting Control)
+
+Framing headers block embed; SameSite reduces session impact when navigation or CSRF chains still occur:
+
+```http
+Set-Cookie: session=...; SameSite=Strict; Secure; HttpOnly
+Set-Cookie: session=...; SameSite=Lax; Secure; HttpOnly
+```
+
+- `Strict` — cookie withheld on all cross-site requests (strongest).
+- `Lax` — cookie on top-level GET navigations; common default; not a framing substitute.
+- Elevated risk: sensitive HTML lacking frame-ancestors/XFO **and** session cookies without `SameSite` (chain with `csrf.md`).
+
+## Frame-Busting JavaScript (Insufficient Alone)
+
+Bypassable via sandboxed iframe (`sandbox` without `allow-top-navigation`), `onbeforeunload` traps, disabled JS, or nested frames. Supplement headers only:
+
+```html
+<script>if (top !== self) top.location = self.location;</script>
+```
+
+SAST signal: `top.location`, `self === top`, or anti-clickjack CSS hide without corresponding CSP/XFO in middleware, `Web.config`, or reverse-proxy config.
 
 ## Express Mitigations
 
-Recommended npm modules: `helmet`, `frameguard`, `x-frame-options`. Example fix:
+Recommended npm modules: `helmet`, `frameguard`, `x-frame-options`. Prefer CSP plus XFO fallback:
+
 ```javascript
-res.setHeader('X-Frame-Options', 'DENY');
+const helmet = require('helmet');
+app.use(helmet({
+  contentSecurityPolicy: { directives: { 'frame-ancestors': ["'none'"] } },
+}));
+app.use(helmet.frameguard({ action: 'deny' }));
+// or: res.setHeader('X-Frame-Options', 'DENY');
 ```
 
 ## C# Web.config Pattern
@@ -108,6 +170,57 @@ Equivalent manual checks:
 - Django: `XFrameOptionsMiddleware` (DEFAULT `SAMEORIGIN`)
 - Go: middleware setting `X-Frame-Options`
 - Rails: `headers['X-Frame-Options'] = 'SAMEORIGIN'` in `ApplicationController`
+
+### Framework Header Configuration
+
+```python
+# Django — settings.py
+MIDDLEWARE = ['django.middleware.clickjacking.XFrameOptionsMiddleware', ...]
+X_FRAME_OPTIONS = 'DENY'
+```
+
+```java
+// Spring Security 6+
+http.headers(h -> h
+    .contentSecurityPolicy(csp -> csp.policyDirectives("frame-ancestors 'none'"))
+    .frameOptions(FrameOptionsConfig::deny));
+```
+
+```csharp
+// ASP.NET Core — Program.cs / middleware
+ctx.Response.Headers.ContentSecurityPolicy = "frame-ancestors 'none'";
+ctx.Response.Headers.XFrameOptions = "DENY";
+```
+
+## Detection Indicators (Grep)
+
+Missing or weak framing controls in app source and server config:
+
+```bash
+# CSP present but no frame-ancestors
+rg -i "Content-Security-Policy|contentSecurityPolicy" | rg -vi "frame-ancestors"
+
+# Weak frame-ancestors
+rg -i "frame-ancestors\s+'none'|frame-ancestors\s+'self'"  # invert: pages lacking these
+rg -i "frame-ancestors\s+\*|frame-ancestors\s+https?://\*"
+
+# Missing X-Frame-Options / framework middleware
+rg -i "X-Frame-Options|XFrameOptions|frameguard|frameOptions|FrameOptionsMiddleware" \
+  --glob '*.{js,ts,py,java,cs,go,rb,yml,yaml,conf,xml}'
+
+# Deprecated ALLOW-FROM
+rg -i "ALLOW-FROM|allowFrom"
+
+# Frame-buster without header config (manual triage)
+rg -i "top\.location|self\s*===?\s*top|antiClickjack|frame.?bust"
+
+# Reverse-proxy / static server config
+rg -i "add_header.*X-Frame-Options|Content-Security-Policy" --glob '*.{conf,nginx,haproxy,cnf}'
+```
+
+**Positive signals**: `helmet.frameguard`, `XFrameOptionsMiddleware`, `frameOptions().deny()`, `customHeaders` + `X-Frame-Options`, CSP string containing `frame-ancestors 'none'` or `'self'`.
+
+**Report rule**: HTML-serving route with neither CSP `frame-ancestors` (`'none'`/`'self'`/narrow allowlist) nor `X-Frame-Options: DENY|SAMEORIGIN`. Cross-check CSP findings in `content_security_policy.md` before closing as false negative.
 
 ## CWE-829 Overlap
 

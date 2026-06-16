@@ -168,6 +168,150 @@ Automated checks flag **framework CSRF protection disabled or weakened**, not pe
 - CSRF + Clickjacking: steer user interactions to bypass confirmation dialogs in the UI
 - CSRF + OAuth mix-up: bind victim sessions to unintended OAuth clients
 
+## Secure Configuration (Defense Patterns)
+
+Layer defenses; no single control (including SameSite) is sufficient on its own.
+
+### Synchronizer Token Pattern
+
+Server generates an unpredictable token bound to the session; client echoes it on every state-changing request; server validates before processing.
+
+```python
+# Django — middleware + template tag (default when CsrfViewMiddleware enabled)
+# forms/template: {% csrf_token %}
+# view receives POST only if token matches session
+```
+
+```java
+// Spring MVC — hidden field wired to CsrfToken
+<input type="hidden" name="${_csrf.parameterName}" value="${_csrf.token}"/>
+```
+
+### Double-Submit Cookie (Signed)
+
+Cookie holds token; request must carry matching value in header or body. Sign or HMAC the cookie value so attackers cannot forge it without the server secret.
+
+```javascript
+// Signed cookie + header echo — verify signature before compare
+const cookieToken = req.signedCookies['csrf'];
+const headerToken = req.headers['x-csrf-token'];
+if (!cookieToken || cookieToken !== headerToken) return res.sendStatus(403);
+```
+
+Unsigned double-submit (predictable or client-writable cookies) is weak — see Token Weaknesses.
+
+### Per-Session vs Per-Request Tokens
+
+| Model | Trade-off |
+|-------|-----------|
+| Per-session | Lower overhead; token reuse window spans session lifetime |
+| Per-request | Stronger replay resistance; higher storage/rotation cost |
+
+Flag handlers that rotate tokens on GET but accept stale tokens on POST, or that issue per-request tokens but never invalidate after use.
+
+### Framework CSRF Middleware
+
+Prefer framework-native enforcement over ad-hoc checks in individual handlers.
+
+```ruby
+# Rails — default for ActionController::Base
+protect_from_forgery with: :exception
+```
+
+```python
+# Django — global middleware (do not disable without endpoint-level substitute)
+MIDDLEWARE = ['django.middleware.csrf.CsrfViewMiddleware', ...]
+```
+
+```java
+// Spring Security — enabled by default on SecurityFilterChain
+http.csrf(Customizer.withDefaults())
+```
+
+### SameSite Cookies (Defense-in-Depth)
+
+SameSite=Lax/Strict reduces cross-site cookie delivery but does not replace tokens — Lax still sends cookies on top-level GET; older clients ignore SameSite.
+
+```http
+Set-Cookie: session=...; Secure; HttpOnly; SameSite=Lax
+```
+
+Treat SameSite as supplemental only when synchronizer tokens or equivalent are also enforced.
+
+### Custom Header + CORS for Cookieless APIs
+
+SPAs and JSON APIs using bearer tokens: require a non-simple header (`X-Requested-With`, `X-CSRF-Token`) on unsafe methods so cross-origin form POST cannot satisfy the check. Pair with restrictive CORS (explicit allowlist, no wildcard with credentials).
+
+```javascript
+// API route — reject state-changing requests missing custom header
+if (['POST','PUT','PATCH','DELETE'].includes(req.method) && !req.headers['x-requested-with']) {
+  return res.sendStatus(403);
+}
+```
+
+Cookie-backed endpoints still need synchronizer tokens — custom headers alone do not protect cookie sessions.
+
+### Origin / Referer Validation
+
+Validate `Origin` (preferred) or `Referer` against an allowlist on every unsafe method; reject missing, null, or mismatched values before handler logic.
+
+```javascript
+const origin = req.headers.origin || req.headers.referer;
+if (!origin || !allowedOrigins.has(new URL(origin).origin)) return res.sendStatus(403);
+```
+
+Do not accept null Origin unless the endpoint is intentionally public and idempotent.
+
+## SAST Detection Indicators
+
+Static signals for missing or weakened CSRF controls on cookie/session-authenticated surfaces:
+
+| Indicator | Pattern |
+|-----------|---------|
+| Unsafe method without token check | POST/PUT/PATCH/DELETE handler parses body or persists state with no CSRF middleware, `@ValidateAntiForgeryToken`, `csrf_protect`, or equivalent |
+| GET with side effects | Route on GET/HEAD/OPTIONS performs create/update/delete, sends email, rotates keys, or toggles flags |
+| Protection disabled or exempted | `@csrf_exempt`, `csrf_exempt()`, `.csrf().disable()`, `CSRF_COOKIE_SECURE = False` with verification off, `protect_from_forgery except:`, `@DisableCsrf`, route-level CSRF skip decorators |
+| SameSite=None without compensating control | Session cookie set `SameSite=None; Secure` but handler lacks synchronizer token, origin check, or custom-header requirement |
+| Token present but not validated | Hidden input or meta tag emitted; server-side compare missing, commented out, or gated behind `if (debug)` |
+| Double-submit without signing | Plain cookie mirrored to header with no HMAC/signature verification |
+
+Scope: only flag when authentication relies on ambient browser credentials (session cookies, HTTP auth). Bearer-only JSON APIs without cookies are out of scope.
+
+## Triage: Correctly Protected Handlers
+
+Use these patterns to downgrade false positives when middleware or annotations enforce CSRF globally.
+
+**Spring (Java/Kotlin)** — CSRF enabled on `SecurityFilterChain`; forms include `_csrf` hidden field; `@PostMapping` methods inherit filter validation unless explicitly ignored.
+
+```java
+http.csrf(Customizer.withDefaults()); // default — do not pair with .disable() on cookie sessions
+```
+
+**Django (Python)** — `CsrfViewMiddleware` in `MIDDLEWARE`; templates use `{% csrf_token %}`; views lack `@csrf_exempt` unless replaced by token header validation.
+
+```python
+@csrf_protect  # explicit when middleware order is non-standard
+def update_profile(request): ...
+```
+
+**Rails (Ruby)** — `protect_from_forgery with: :exception` (default); forms include `authenticity_token`; API-only `ActionController::API` skips CSRF by design (no cookies).
+
+**Express / Node** — `csurf`, `lusca`, or `express.csrf` middleware applied before state-changing routers; token read from `(csrf|xsrf)` cookie/header pair.
+
+```javascript
+app.use(csrf({ cookie: { httpOnly: true, sameSite: 'lax', secure: true } }));
+```
+
+**ASP.NET** — `[ValidateAntiForgeryToken]` on POST actions or global auto-validation filter; Razor forms include `@Html.AntiForgeryToken()`.
+
+**Angular / SPA frontends** — HttpClient XSRF config maps cookie `XSRF-TOKEN` to header `X-XSRF-TOKEN`; backend must validate the header on unsafe methods.
+
+```typescript
+provideHttpClient(withXsrfConfiguration({ cookieName: 'XSRF-TOKEN', headerName: 'X-XSRF-TOKEN' }))
+```
+
+**Stateless JWT APIs** — `SessionCreationPolicy.STATELESS`, no session cookies, Bearer-only auth: CSRF not applicable; `.csrf().disable()` is correct.
+
 ## Analysis Workflow
 
 1. **Inventory endpoints** - Enumerate all state-changing operations, including admin and staff-facing routes

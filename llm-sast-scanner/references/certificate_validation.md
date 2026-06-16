@@ -29,6 +29,134 @@ Most certificate checks are **configuration/presence checks** — no remote tain
 - SSH client continuing after unknown host key instead of rejecting or requiring known key.
 - Certificate path validation with revocation checking turned off and no replacement OCSP/CRL checker.
 - Android/WebView or JavaMail connections without certificate validation enabled.
+- Self-signed or expired embedded certs used as production trust anchors.
+- Certificate pinning without backup pins or with user-bypass on pin failure.
+- Hardcoded PEM certs with weak keys (RSA < 2048), SHA-1/MD5 signatures, or past `notAfter`.
+
+## Certificate Chain & Hostname Verification
+
+Every TLS client must validate the full chain against a trusted store **and** verify the server hostname matches the certificate SAN/CN. Never disable either check in production.
+
+**Chain validation**
+- Use platform default trust store or an explicit KeyStore of trusted CAs — not an empty or trust-all manager.
+- Reject incomplete chains, expired/not-yet-valid certs, and signatures using MD5/SHA-1.
+
+**Hostname verification**
+- Delegate to platform default verifiers; do not return `true` unconditionally.
+- Mismatch between requested host and cert SAN/CN must fail the connection — fix DNS/cert, do not bypass.
+
+```java
+// VULN: accepts any hostname
+new HostnameVerifier() { public boolean verify(String h, SSLSession s) { return true; } }
+```
+
+```python
+# VULN: chain validation disabled
+requests.get("https://api.example.com", verify=False)
+```
+
+## Certificate Pinning — Patterns and Pitfalls
+
+Pinning binds a host to expected certificate or public-key material. Use only when both endpoints are controlled and rotation is managed; most apps should rely on standard CA validation alone.
+
+**When pinning may apply**
+- Native mobile clients with controlled release/update channels.
+- Threat model includes rogue or mis-issued CA certificates.
+- Backup pins and rotation plan exist before deployment.
+
+**When to avoid pinning**
+- Web browsers (HPKP deprecated; no modern browser support).
+- Endpoints where certificate lifecycle is not controlled.
+- No secure pin-update path without full app redeployment.
+
+**Pin types**
+- Leaf certificate: highest certainty; breaks on every cert rotation unless backup pins exist.
+- Subject public key (SPKI): survives cert renewal with same key pair — preferred balance.
+- Intermediate CA: trusts all certs from that CA — use sparingly with backup.
+- Root CA: not recommended — trusts entire CA subtree.
+
+**Implementation patterns**
+
+```xml
+<!-- Android: network-security-config pin-set -->
+<pin-set expiration="2027-01-01">
+  <pin digest="SHA-256">base64+primary+pin==</pin>
+  <pin digest="SHA-256">base64+backup+pin==</pin>
+</pin-set>
+```
+
+```java
+// OkHttp CertificatePinner — always include backup pin
+new CertificatePinner.Builder()
+    .add("api.example.com", "sha256/PRIMARY…")
+    .add("api.example.com", "sha256/BACKUP…")
+    .build();
+```
+
+**Common pitfalls (flag as risk)**
+- Pinning without backup pins → outage on cert rotation.
+- User-bypass UI on pin failure → defeats MITM protection.
+- Custom TLS/pinning from scratch instead of platform or vetted library.
+- TOFU (trust-on-first-use) pin preload — attacker can poison first connection.
+- Root CA pinning without understanding expanded trust scope.
+- Corporate interception proxy keys added to pinset without explicit risk acceptance.
+
+## Self-Signed & Embedded Certificates
+
+Self-signed or hardcoded certs (`Issuer == Subject`) must not ship in production client trust paths unless explicitly scoped to dev/test or internal mTLS with out-of-band trust distribution.
+
+**Detection indicators**
+- PEM literals: `-----BEGIN CERTIFICATE-----` embedded in source.
+- File loads: `.pem`, `.crt`, `.cer`, `.der` read into custom `TrustManager` or `RootCAs`.
+- `load_verify_locations` / `addCertPathChecker` with non-CA local cert as sole trust anchor in prod code.
+
+**Mandatory sanity checks on embedded/loaded certs**
+- `notAfter` not in the past; `notBefore` not in the future.
+- RSA key ≥ 2048 bits; EC curve ≥ P-256 (reject secp192r1, P-192, P-224).
+- Signature algorithm SHA-2 family — flag MD5/SHA-1 (`md5WithRSAEncryption`, `sha1WithRSAEncryption`).
+- Self-signed (`Issuer == Subject`) in prod-facing code → LIKELY misconfiguration.
+
+```go
+// VULN: self-signed cert as sole trust anchor in production client
+certPool := x509.NewCertPool()
+certPool.AddCert(selfSignedCert)
+tlsConfig := &tls.Config{RootCAs: certPool}
+```
+
+## OCSP, Revocation & Expiry Handling
+
+**Revocation**
+- Keep default PKIX revocation enabled; do not disable without registering a replacement checker.
+- Flag `PKIXParameters.setRevocationEnabled(false)` with no custom `PKIXRevocationChecker`.
+- Monitor OCSP stapling on servers; clients should fail closed when revocation status is required by policy.
+
+**Expiry**
+- Flag hardcoded certs or server configs with no rotation mechanism.
+- Alert on cert load paths missing notAfter validation before use.
+- Coordinate pin-set `expiration` attributes with backend cert rotation schedules.
+
+```java
+// VULN: revocation checking explicitly disabled
+params.setRevocationEnabled(false); // no addCertPathChecker replacement
+```
+
+## Detection Indicators — Disabled Verification
+
+| Signal | Pattern |
+|--------|---------|
+| Python skip verify | `verify=False`, `ssl._create_unverified_context()` |
+| Node skip verify | `NODE_TLS_REJECT_UNAUTHORIZED=0`, `rejectUnauthorized: false` |
+| Go skip verify | `InsecureSkipVerify: true` |
+| Rust skip verify | `danger_accept_invalid_certs(true)`, `danger_accept_invalid_hostnames(true)` |
+| Java trust-all | empty `checkServerTrusted`, `TrustAllStrategy`, `ALLOW_ALL_HOSTNAME_VERIFIER` |
+| OkHttp bypass | `hostnameVerifier((h,s) -> true)` |
+| cURL/libcurl | `CURLOPT_SSL_VERIFYPEER 0`, `CURLOPT_SSL_VERIFYHOST 0` |
+| OpenSSL client | `SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL)` |
+| .NET | `ServerCertificateValidationCallback` always returns `true` |
+| Paramiko SSH | `AutoAddPolicy()`, `WarningPolicy()` |
+| Android WebView | `onReceivedSslError` → `handler.proceed()` |
+
+Distinguish test-only usage (`_test.go`, `*Test.java`, mock servers) from production client initialization.
 
 ## Safe Patterns
 
@@ -37,7 +165,7 @@ Most certificate checks are **configuration/presence checks** — no remote tain
 - Go/Rust TLS clients with verification enabled; test-only skips isolated to `_test` files.
 - Paramiko `RejectPolicy` (default) — throws on unknown host keys.
 - `PKIXParameters.setRevocationEnabled(true)` (default) or custom `PKIXRevocationChecker`.
-- Android `network-security-config` pin-set, OkHttp `CertificatePinner`, or TrustManager backed by a KeyStore containing only expected certs.
+- Android `network-security-config` pin-set with backup pins, OkHttp `CertificatePinner`, or TrustManager backed by a KeyStore containing only expected certs.
 
 ## Recognized Sanitizers / Safe APIs
 
@@ -95,11 +223,13 @@ Commonly affected languages: Java, Go, Rust, Python (Paramiko, requests). No ded
 
 ## Analysis Workflow
 
-1. Search for custom `TrustManager`, `HostnameVerifier`, `InsecureSkipVerify`, `verify=False`, and Paramiko policy setters.
+1. Search for custom `TrustManager`, `HostnameVerifier`, `InsecureSkipVerify`, `verify=False`, `NODE_TLS_REJECT_UNAUTHORIZED`, and Paramiko policy setters.
 2. Distinguish test-only skips from production HTTP/HTTPS client initialization.
-3. For Android, check `AndroidManifest.xml` for `networkSecurityConfig` and OkHttp builder usage.
-4. For Java mail/integration code, check JavaMail `mail.smtp.ssl.checkserveridentity` and WebView SSL handlers.
-5. Confirm the client connects to external or user-influenced hosts — internal-only mTLS may be configured elsewhere.
+3. For Android, check `AndroidManifest.xml` for `networkSecurityConfig`, `<pin-set>` backup coverage, and OkHttp `CertificatePinner` usage.
+4. For Java mail/integration code, check JavaMail `mail.smtp.ssl.checkserveridentity` and WebView SSL handlers (`handler.proceed()`).
+5. Scan for embedded PEM blocks and cert file loads; verify key strength, signature algorithm, expiry, and self-signed status.
+6. Confirm revocation checking is not disabled without a replacement checker; verify pin rotation/expiry attributes.
+7. Confirm the client connects to external or user-influenced hosts — internal-only mTLS may be configured elsewhere.
 
 ## Core Principle
 

@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 59 vulnerability classes.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. Designed to be loaded by AI coding agents (Claude Code, OpenAI Codex, etc.) to perform structured source-to-sink taint analysis across 70 vulnerability classes.
 
 ---
 
@@ -14,7 +14,12 @@ This skill gives an LLM agent a structured, evidence-based workflow for finding 
 4. **Verify findings** — apply a Judge step to eliminate false positives
 5. **Report** — produce actionable findings with file path, line number, and remediation
 
-Supports **Java, Python, JavaScript/TypeScript, PHP, .NET** with language-specific detection rules.
+Supports a broad range of languages and ecosystems with language-specific detection rules and source→sink examples:
+
+- **Application languages:** Java, Python, JavaScript / TypeScript, PHP, C# / .NET, Go, Ruby, C / C++, Kotlin, Swift, Objective-C, Rust
+- **Infrastructure, config & markup:** Terraform / HCL, Kubernetes & CI/CD YAML, Dockerfile, XML, SQL, HTML
+
+Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest, dedicated source-detection rule sets; the remaining languages are covered with vulnerable-vs-secure detection patterns across the relevant vulnerability classes.
 
 ---
 
@@ -53,7 +58,7 @@ llm-sast-scanner/              ← repo root
 ├── README.md
 └── llm-sast-scanner/          ← skill directory (copy this)
     ├── SKILL.md               # 6-step workflow + Judge verification
-    └── references/            # 59 vulnerability knowledge bases
+    └── references/            # 70 vulnerability knowledge bases
         ├── xss.md
         ├── sql_injection.md
         ├── path_traversal_lfi_rfi.md
@@ -61,7 +66,7 @@ llm-sast-scanner/              ← repo root
         ├── server_side_prototype_pollution.md
         ├── client_side_prototype_pollution.md
         ├── shared_client_cache_leak.md
-        └── ... (59 files total)
+        └── ... (70 files total)
 ```
 
 ### SKILL.md
@@ -80,7 +85,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 
 ## Vulnerability Coverage
 
-59 reference files covering the following categories:
+70 reference files covering the following categories:
 
 ### Injection
 | File | Vulnerability |
@@ -99,6 +104,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `csv_injection.md` | CSV / Formula Injection (CWE-1236) |
 | `log_injection.md` | Log Injection / Log Forging (CWE-117) |
 | `prompt_injection.md` | LLM Prompt Injection (CWE-1427) |
+| `dom_clobbering.md` | DOM Clobbering — attacker id/name HTML shadowing JS globals/DOM APIs (CWE-79 gadget) |
 
 ### Access Control & Auth
 | File | Vulnerability |
@@ -124,6 +130,7 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `shared_client_cache_leak.md` | Shared-Client Cache/Dedup Cross-User Leak — in-process leakage via shared client caches, request dedup/coalescing, mutable-auth singletons, pooled-connection & thread-local reuse, module-global request state (CWE-488 / CWE-524 / CWE-567 / CWE-362) |
 | `cleartext_transmission.md` | Cleartext Transmission / Missing TLS (CWE-319 / 311) |
 | `certificate_validation.md` | TLS Certificate / Hostname / Pinning / Revocation Failures (CWE-295 / 297 / 299 / 322) |
+| `privacy_data_protection.md` | Privacy / Data Protection — PII over-collection, retention, PII in logs/URLs/third parties (CWE-359 / 200) |
 
 ### Server-Side Attacks
 | File | Vulnerability |
@@ -149,10 +156,25 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | `host_header_poisoning.md` | Host Header Poisoning / Email-Link Injection (CWE-640) |
 | `cors_misconfiguration.md` | CORS Misconfiguration / Permissive Origin Reflection (CWE-346 / 942) |
 | `clickjacking.md` | Clickjacking / Missing X-Frame-Options / CSP frame-ancestors (CWE-451) |
+| `content_security_policy.md` | CSP Weaknesses — missing/weak policy, unsafe-inline/eval, wildcard sources, allowlist bypass (CWE-693 / 1021) |
+| `xs_leaks.md` | Cross-Site Leaks — timing/frame/status/cache oracles, missing COOP/COEP/CORP/Fetch-Metadata (CWE-200 side channel) |
 | `web_cache_deception.md` | Web Cache Deception / Cache Poisoning — cached personalized/authenticated responses, unkeyed-input poisoning, cache-key confusion (CWE-525) |
 | `denial_of_service.md` | Denial of Service / Resource Exhaustion |
 | `regex_injection_redos.md` | Regex Injection / ReDoS / Incomplete Regex Validation (CWE-730 / 1333 / 20 / 625 / 116) |
 | `cve_patterns.md` | Known CVE Patterns |
+
+### Cloud & Infrastructure-as-Code
+| File | Vulnerability |
+|------|--------------|
+| `iac_security.md` | Infrastructure-as-Code Misconfiguration — Terraform/CloudFormation/ARM/Bicep/Pulumi (public storage, open security groups, wildcard IAM, missing encryption) |
+| `kubernetes_cloud_security.md` | Kubernetes / Cloud Orchestration — privileged pods, hostPath/hostNetwork, RBAC over-permission, missing securityContext/NetworkPolicy, secrets in manifests |
+| `cicd_container_security.md` | CI/CD Pipeline + Container/Docker Security — poisoned pipeline execution, untrusted workflow inputs, root images, unpinned tags, build-time secrets |
+
+### API & AI/Agent Services
+| File | Vulnerability |
+|------|--------------|
+| `api_security.md` | API / REST / Web-Service Security — excessive data exposure, missing rate limiting, endpoint inventory, security misconfig |
+| `mcp_security.md` | MCP (Model Context Protocol) Security — tool poisoning, injection via tool output, over-broad/unauthenticated servers, token passthrough |
 
 ### Output & Hardening
 | File | Vulnerability |
@@ -166,12 +188,14 @@ The main entry point. Defines the detection workflow, taint propagation rules, a
 | File | Vulnerability |
 |------|--------------|
 | `dependency_confusion.md` | Dependency Confusion / substitution — candidate flagging of internal packages a public registry could shadow, across npm, PyPI, RubyGems, Maven/Gradle, NuGet, Go, Composer, Cargo (CWE-1357) |
+| `supply_chain_security.md` | Supply Chain Security — unpinned/unlocked deps, missing integrity hashes/SRI, malicious lifecycle scripts, untrusted registries, provenance gaps (CWE-1104 / 829) |
 
 ### Language / Platform
 | File | Vulnerability |
 |------|--------------|
 | `php_security.md` | PHP-specific security issues |
 | `mobile_security.md` | Mobile security (Android / iOS) |
+| `memory_safety_c_cpp.md` | C/C++ Memory Safety — buffer overflow, use-after-free, unsafe string functions, integer overflow, toolchain hardening (CWE-119 / 120 / 416 / 190 / 787) |
 
 ---
 
