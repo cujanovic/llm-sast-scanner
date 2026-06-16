@@ -319,7 +319,7 @@ Use RCE only when the execution primitive is **NOT an OS command shell** but rat
 - **VULN**: `exec($userInput)`, `system($userInput)`, `passthru($userInput)`
 - **VULN**: `` `$userInput` `` — backtick operator executes shell command
 - **VULN**: `shell_exec($userInput)`, `proc_open($userInput, ...)`
-- **SAFE**: `escapeshellarg()` + `escapeshellcmd()` wrapping (reduces risk but not a complete fix)
+- **PARTIAL** (not a complete fix): `escapeshellarg()` + `escapeshellcmd()` wrapping reduces risk but is unreliable (the two interact badly and still allow argument/option injection); prefer avoiding the shell entirely (`proc_open` with an arg array)
 
 ## Java Servlet Patterns — Command Injection (CWE-78)
 
@@ -397,7 +397,7 @@ app.post('/convert', (req, res) => {
     // Both arguments shell-interpreted — injection via ; | && etc.
 });
 
-// VULNERABLE: execSync with shell:true
+// VULNERABLE: spawnSync invoking bash -c with tainted input (shell interpretation)
 const { spawnSync } = require('child_process');
 spawnSync('bash', ['-c', req.query.cmd], { shell: true });
 
@@ -509,6 +509,7 @@ Flag any of these when user-controlled data flows into them:
 | `spawn(cmd, [args])` | cmd hardcoded, args = user input | SAFE (no shell) |
 | `spawn(cmd, args, {shell:true})` | any user arg | VULN |
 | `child_process.fork(userInput)` | user-controlled module path | VULN (arbitrary module load) |
+
 - Direct `Runtime.getRuntime().exec(...)`, `ProcessBuilder`, shell wrappers, or SSI/CGI-to-command chains should use benchmark tag `command_injection`, not generic `rce`, when the first dangerous sink is OS command execution.
 - In `SecExample`, `rcecontroller` is project-level `command_injection`.
 - In `vulhub`, `httpd/ssi-rce` and similar upload/SSI execution samples should preserve `command_injection` at project-tag layer.
@@ -557,3 +558,41 @@ if (clazz == null) throw new IllegalArgumentException("Unknown format");
 - When the reflection sink leads to arbitrary class instantiation or method invocation: tag as `rce`
 - When the reflection is limited to loading a class without instantiation and no further exploitation is evident: tag as `unsafe_reflection` if supported, otherwise `rce`
 - In benchmark mode, prefer the tag that matches the ground truth taxonomy of the project
+
+## Source -> Sink Pattern
+
+**Sources**
+- `ActiveThreatModelSource` — HTTP request data (all languages)
+- JavaScript command injection: `ClientRequest.getAResponseDataNode()` (server response as second-order source)
+
+**Sinks — Command Injection (CWE-078)**
+- **Java**: tainted arg to `Runtime.exec` when script interpreter invoked
+- **JavaScript**: `SystemCommandExecution.getACommandArgument()` — `child_process.exec`, `execSync`, `spawn` with shell; indirect/second-order command injection; shell command injection from environment
+- **Python**: `SystemCommandExecution.getCommand()` — `os.system`, `os.popen`, `subprocess.Popen/run/call` (excludes internal stdlib wrapper noise)
+- **Go**: `SystemCommandExecution.getCommandName()` — `exec.Command`, `exec.CommandContext`
+- **C#**: `System.Diagnostics.Process.Start` args; `ProcessStartInfo` constructor and `Arguments`/`FileName`/`WorkingDirectory` setters
+- **Ruby**: shell/backtick/`Open3`/`IO.popen` execution sinks
+
+**Sinks — Code Injection / Eval (CWE-094)**
+- **Java**: `ExpressionParser.parseExpression/parseRaw` (SpEL); Groovy, MVEL, JEXL, OGNL injection sinks (CWE-917 for OGNL)
+- **JavaScript**: `eval`, `Function`, `setTimeout/setInterval(string)`, `vm` module, `node-serialize.unserialize`; template engines (`pug`, `ejs`, `handlebars`, `lodash.template`, etc. via unsafe code construction); AngularJS expressions; MongoDB `$where` code operators
+- **Python**: `eval`, `exec`, `compile` + execution sinks via `CodeExecution.getCode()`
+
+**Sanitizers / barriers**
+- JavaScript: `JSON.stringify` (code injection); model `command-injection`/`code-injection` barriers; `shell-quote` parsing (recommended manual barrier, not automatic)
+- Python/JS: `ConstCompareBarrier` (allowlist guards)
+- Go command injection: `RegexpCheckBarrier`; prefix check that string does not start with `--` (flag injection mitigation)
+- C#/Java: `SimpleTypeSanitizedExpr`, `GuidSanitizedExpr`
+- Java SpEL: `SimpleEvaluationContext` (not flagged — full `StandardEvaluationContext` is vulnerable)
+
+Commonly affected languages: JavaScript, Python, Go, C#, Ruby, Java.
+
+**Safe patterns**: `child_process.execFile`/`spawn` with array args (no shell); `subprocess.run([...], shell=False)`; hardcoded command allowlists; Go `exec.Command("binary", arg)` without `sh -c`.
+
+### Static analysis false alarms
+
+- `spawn('ping', [host])` with hardcoded binary — treated as safe (no shell)
+- `ProcessBuilder` with fixed command array and taint only in non-argument env var (context-dependent)
+- Go commands where input is validated by regexp barrier before reaching sink
+- Template engines where user data is passed as interpolation options, not embedded in template source string
+- Java `Runtime.exec` with fully static string array — no remote source reaches args

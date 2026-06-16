@@ -336,3 +336,55 @@ tf.setAttribute(XMLConstants.ACCESS_EXTERNAL_DTD, "");
 - XML parsed from server-controlled resources only (classpath, config files) — no user input reaches parser
 - `XMLDecoder` — tag as `insecure_deserialization`, not `xxe`
 - Do not emit `xxe` for plain XML rendering pages that have no XML parsing path or module intent
+
+## XXE (external entity / file read / SSRF)
+
+Commonly affected languages: Java, Python, JavaScript, Ruby. No dedicated XXE coverage for Go or C# (C# has separate missing schema-validation checks).
+
+**Parsers / sinks**:
+- **Java**: `DocumentBuilder.parse`, `SAXParser.parse`, `XMLStreamReader`, JDOM/SAXBuilder, dom4j `SAXReader`, `XMLReader`, `SAXSource`, `TransformerFactory`, `SchemaFactory`, JAXB `Unmarshaller`, `XPathExpression` — when factory lacks safe features
+- **Python**: `lxml`, stdlib XML parsers vulnerable to external entities
+- **JavaScript**: parsers that resolve external entities or parameter+internal entities
+- **Ruby**: Nokogiri/libxml backends vulnerable to external entities
+
+**Java safe configuration** (parser not flagged when present):
+- `DocumentBuilderFactory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)`, or both external general/parameter entities disabled.
+- StAX: `IS_SUPPORTING_EXTERNAL_ENTITIES=false`, `SUPPORT_DTD=false`.
+- `TransformerFactory`: secure processing feature, empty `ACCESS_EXTERNAL_STYLESHEET` / `ACCESS_EXTERNAL_DTD`.
+- Pre-built safe SAX source flowing to parse call.
+
+**Sanitizers**: Python/JS XML escaping output nodes (limited — prefer parser hardening).
+
+## XML Bomb / entity expansion (CWE-776)
+
+- **Python**: `xml.etree` default expansion — use `defusedxml`
+- **JavaScript**: unbounded internal entity expansion
+
+## XSLT injection (CWE-074 / XXE-adjacent)
+
+- **Java**: user XSLT → `TransformerFactory.newTransformer`, Saxon `XsltCompiler.compile`, `Templates.newTransformer` without secure processing
+- **Python**: lxml/libxslt transform with user stylesheet
+
+## Missing schema validation (CWE-112)
+
+- **C#**: `XmlReader.Create` without `ValidationType.Schema`, or with `ProcessInlineSchema` / `ProcessSchemaLocation`
+
+## Source → Sink Pattern
+
+Remote input → XML/XSLT bytes or stream → parse/transform call on **insecurely configured** factory (Java: parser lacks safe feature configuration).
+
+## Common False Alarms
+
+- Java factory with `disallow-doctype-decl` or paired external-entity disables — safe.
+- `XMLDecoder.readObject` — tag `insecure_deserialization`, not `xxe`.
+- Python `lxml` with `XMLParser(resolve_entities=False, no_network=True)` — not XXE sink.
+- PHP 8.0+ default external-entity off — verify parser API still used.
+- C# missing schema validation is recommendation severity — DTD validation against user DTD is still weak.
+
+## Business Risk
+
+Confirmed XXE/XSLT paths imply file read, SSRF, OOB exfil, DoS (billion laughs / xml-bomb), and XSLT `document()` RCE on weak JDK transforms.
+
+## Core Principle
+
+Treat XML consumers as vulnerable until parser/transformer hardening is proven in the same flow; mirror those settings across every parse path including uploads, SOAP, SAML, and background jobs.

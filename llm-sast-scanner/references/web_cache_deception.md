@@ -89,3 +89,54 @@ X-Forwarded-Host: evil.tld
 ## Core Principle
 
 A cache is only safe when its key matches the response's true authority boundary. Any response whose body depends on identity, or on an input absent from the cache key, must not be stored in a shared cache.
+
+---
+
+---
+
+## Go Web Cache Deception Detection
+
+Commonly affected languages: Go only for automated wildcard-route + cache-header detection. Java/Spring, JavaScript/Express, and CDN-config patterns require heuristic/manual review per the sections above. Cache poisoning via unkeyed headers (CWE-444-adjacent), Next.js `force-static` misconfiguration, and CDN suffix-normalization remain manual.
+
+### Detection pattern
+
+Flag **wildcard route registration combined with cacheable responses** — a structural proxy for "any URL suffix may hit one handler that sets caching headers."
+
+**Sinks (framework-specific):**
+
+1. **`net/http.HandleFunc`** — route pattern matches `%/` (wildcard prefix) AND the handler function writes a `Cache-Control` response header via `http.ResponseWriter.Header().Set`.
+2. **`github.com/gofiber/fiber` / `fiber/v2`** — route pattern matches `%/*%` (catch-all).
+3. **`github.com/go-chi/chi/v5`** — catch-all route pattern `%/*%`.
+4. **`github.com/julienschmidt/httprouter`** — catch-all route pattern `%/*%`.
+
+**Sources:** not taint-based — configuration/registration site of the wildcard handler.
+
+**Sanitizers:** none modeled automatically — mitigations must be verified manually (`Cache-Control: private, no-store` on authenticated handlers, strict static-only cache rules, URL validation rejecting fake extensions).
+
+### Good / bad examples
+
+**BAD:** authenticated admin handler registered at `/adminusers/` with in-memory session keyed by `r.RequestURI`; template cache keyed by request path — attacker appends `.css` to a personalized URL and shared cache stores the admin body.
+
+```go
+http.HandleFunc("/adminusers/", ShowAdminPageCache)
+// handler sets sessionMap[r.RequestURI] and renders user-specific template
+```
+
+**SAFE:** non-cacheable response headers on identity-bearing routes; no catch-all that maps arbitrary suffixes to personalized handlers; static assets on dedicated non-personalized paths only.
+
+**Vulnerable router patterns (Fiber / Chi / httprouter samples):** catch-all `/*` or `/{path:*}` routes that serve dynamic content without opting out of caching — same class as wildcard `HandleFunc`.
+
+### Mapping static signals to manual WCD tests
+
+| Static signal | Manual confirmation |
+|---|---|
+| Wildcard Go route + `Cache-Control` write in handler | Request `/account/nonexistent.css` — does origin return personalized body? |
+| Fiber/Chi catch-all registration | Check middleware cache headers and CDN "cache by extension" rules |
+| No automated signal | Still test authenticated routes for `Cache-Control: public` and missing `Vary: Cookie` |
+
+### Common False Alarms
+
+- **Wildcard static file servers** (`/assets/*` only serving hashed bundles) may match the route pattern but are not WCD if responses are identity-independent — confirm body content before escalating.
+- **Catch-all registration alerts even when handler sets `no-store`** for Fiber/Chi/httprouter sinks — the `net/http` variant requires a cache header write; others do not.
+- **Expect false positives** on intentional catch-all API routers; false negatives when caching is configured only at CDN/proxy layer (outside Go source).
+- **No cross-user proof in static analysis** — architecture risk must be confirmed with cached response containing victim session data.

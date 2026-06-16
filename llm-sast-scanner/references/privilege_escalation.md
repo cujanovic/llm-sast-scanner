@@ -288,3 +288,42 @@ Privilege escalation is frequently a **consequence** of another primary vulnerab
 - Information disclosure that reveals data but does not grant elevated access
 - XSS or CSRF alone (unless the XSS/CSRF specifically targets admin functionality)
 - Default credentials alone — tag as `default_credentials`; only add `privilege_escalation` if the credentials grant admin-level access AND there is a separate mechanism (not just "login as admin with known password")
+
+## Sources, Sinks & Sanitizers
+
+Commonly affected languages: Java, JavaScript, C#, Go, Ruby. No dedicated vertical privilege-escalation rules in Python or Rust — use manual patterns below.
+
+### Source → Sink Pattern (`ConditionalBypass`)
+
+- **Source**: Remote/user-controlled input — cookies, request parameters, headers.
+- **Sink**: Condition expression guarding a **sensitive method** (authentication, authorization, password change).
+- **Sanitizer**: Validation against a fixed server-side allowlist; condition uses only server-derived data (DB lookup, verified session).
+
+**VULN (Java)**: `if (cookie.get("loggedIn").equals("true")) { authenticate(); }` — auth gated on user-controlled cookie.
+**SAFE (Java)**: `if (securityDb.isAuthenticated(sessionId)) { ... }`.
+
+**VULN (JS)**: `if (req.cookies.skipAuth === '1') return next();` before protected handler.
+**SAFE (JS)**: Auth decision based on verified server session only.
+
+### Source → Sink Pattern (`TaintedPermissionsCheck`)
+
+- **Source**: User-controlled string used to name the permission being checked.
+- **Sink**: Shiro `subject.isPermitted(userSuppliedPermission)` or equivalent dynamic permission check.
+- **Sanitizer**: Fixed permission string literal in the check — not derived from request input.
+
+**VULN**: `subject.isPermitted(whatDoTheyWantToDo)` where `whatDoTheyWantToDo` comes from request.
+**SAFE**: `subject.isPermitted("account:read:" + accountId)` with fixed action prefix and validated ID.
+
+### What to Look For (`MissingAccessControl` — C#)
+
+Flags WebForms/MVC action methods performing sensitive operations (edit, delete, admin pages) without `[Authorize]`, `User.IsInRole`, or `<authorization>` in Web.config.
+
+**VULN**: Admin delete action with no authorization attribute.
+**SAFE**: `[Authorize(Roles = "Admin")]` on the action method.
+
+### What to Look For (`PamAuthBypass` — Go)
+
+Flags login flows calling `pam.Authenticate` without a subsequent `pam.AcctMgmt` — expired/disabled accounts may still pass credential check.
+
+**VULN**: Only `pam.Authenticate(t)` — no account-status verification.
+**SAFE**: `pam.Authenticate(t)` followed by `pam.AcctMgmt(t, 0)`.

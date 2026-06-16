@@ -78,3 +78,35 @@ response.addCookie(c);   // SAFE
 **Decision rule**: cookie added to response without both `setSecure(true)` AND `setHttpOnly(true)` → **VULN**.
 - In `verademo`, cookie flag handling should not be emitted as `insecure_cookie` when the scored taxonomy prefers `session_fixation` or `trust_boundary`.
 - FALSE POSITIVE guard: SameSite/Secure/HttpOnly flag issues alone do not justify `insecure_cookie` when the benchmark omits a cookie-specific class.
+
+## Cookie Flag Detection Patterns
+
+Commonly affected languages: Go, C#, JavaScript, Python. Java, Ruby, and Rust require manual Servlet patterns above.
+
+These are **not** taint-flow detections — the missing or incorrect flag on `Set-Cookie` is the finding.
+
+**CookieWithoutSecure (Go)**
+- **Sink**: `http.Cookie{Secure: false}` or cookie added without `Secure: true`.
+- **SAFE**: `Secure: true` on session/auth cookies.
+
+**ClearTextCookie (JS)**
+- **Sink**: `res.cookie(name, value)` or `cookie.serialize` without `{ secure: true }`.
+- **SAFE**: `res.cookie(name, value, { secure: true, httpOnly: true })`.
+
+**SameSiteNoneCookie (JS/Python)**
+- **Sink**: Auth cookie with `sameSite: 'none'` / `samesite='none'` — cross-site send enabled.
+- **SAFE**: `sameSite: 'strict'` or `'lax'` on authentication cookies.
+
+**NonHttpOnlyCookie (Python)**
+- **Sink**: Flask/Django cookie set with `httponly=False` or missing `HttpOnly` in raw header.
+- **SAFE**: `httponly=True` or `; HttpOnly` in Set-Cookie.
+
+**CookieWithoutSecure (C#)**
+- **Sink**: `CookieOptions` / `HttpCookie` with `Secure = false` or unset when global policy is not `Always`; `IResponseCookies.Append` two-arg overload without secure options.
+- **SAFE**: `SecurePolicy = CookieSecurePolicy.Always` or explicit `Secure = true`.
+
+**VULN (JS)**: `res.cookie('session', token)` — no secure/httpOnly flags.
+**SAFE (JS)**: `res.cookie('session', token, { secure: true, httpOnly: true, sameSite: 'strict' })`.
+
+**VULN (Go)**: `http.SetCookie(w, &http.Cookie{Name: "session", Value: id})` — Secure defaults false.
+**SAFE (Go)**: `&http.Cookie{Name: "session", Value: id, Secure: true, HttpOnly: true}`.

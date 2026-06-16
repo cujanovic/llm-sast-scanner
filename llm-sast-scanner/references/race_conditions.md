@@ -190,7 +190,7 @@ Concurrency safety is a property of every path that mutates state. If any path l
 
 ### FALSE POSITIVE
 - `static final` constants — immutable, not a race condition.
-- Fields annotated with `@Autowired`, `@Inject`, or Spring-managed dependencies — these are injected once and are effectively immutable references (though their internal state may still be mutable).
+- Fields annotated with `@Autowired`, `@Inject`, or Spring-managed dependencies — injected once and safe only for stateless singletons; mutable per-request state on singleton beans is a real concurrency hazard and must not be blanket-dismissed.
 - Fields only read, never written per-request.
 
 ## Python/JS/PHP Source Detection Rules
@@ -222,3 +222,91 @@ Concurrency safety is a property of every path that mutates state. If any path l
 - **SAFE**: `SELECT ... FOR UPDATE` inside a transaction before modifying balance
 - In `JavaSecLab` payment demos, replay/double-submit and delayed balance updates under `logic/pay` should preserve benchmark tag `concurrency` when concurrent interleaving is the intended flaw.
 - FALSE POSITIVE guard: do not emit `race_conditions` as a separate tag when the benchmark taxonomy already collapses the same evidence into `concurrency`.
+
+---
+
+## Sources, Sinks & Sanitizers
+
+Static analysis for race/TOCTOU detects **check-then-use gaps** and **auth-before-bind** patterns in source — complementary to runtime parallel-request testing above.
+
+Commonly affected languages: Java, JavaScript, C/C++, GitHub Actions workflows. Generic Spring `@Controller` singleton mutable fields (CWE-362 heuristic in this reference) and web/API double-spend rely on manual recon and the patterns above.
+
+### CWE-367 — TOCTOU (`TOCTOURace`, `FileSystemRace`, `TOCTOUFilesystemRace`)
+
+**Java sources:** not taint-based — structural match on control flow.
+
+**Java pattern:**
+1. `if (obj.syncMethod1())` — condition contains synchronized call on receiver `r`
+2. Later `obj.syncMethod2()` on same `r`, controlled by the `if` branch
+3. Calls **not** inside a common `synchronized(r)` block
+4. Enclosing callable is `PossiblyConcurrentCallable` (has `synchronized` blocks, `volatile` fields, or `ThreadLocal`)
+
+**JavaScript sources:** `fs.exists`/`existsSync`/`stat`/`statSync`/`access`/`accessSync` on path argument.
+
+**JavaScript sinks:** `readFile`/`writeFile`/`appendFile`/`open` (same path or aliased via `AccessPath`).
+
+**JavaScript exclusions (sanitizer-like):**
+- `exists` then `readFile` on same path — allowed (read-after-exists is fine)
+- Path flows through `open`/`openSync` file handle before use
+
+**C/C++ pattern:** `access`/`_access` check then `open`/`remove`/`chmod`/`rename` on same filename expression; uses guard/control-flow dominance.
+
+**Actions TOCTOU:** `MutableRefCheckoutStep` in privileged workflow protected by `untrusted-checkout` check but not `untrusted-checkout-toctou` — ref mutable after check.
+
+### CWE-421 — Socket auth race (`SocketAuthRace`)
+
+**Sources:** authentication method call (`AuthMethod` from `SensitiveActions`) in condition guarding connection.
+
+**Sinks:** `ServerSocket.accept()` or `ServerServerChannel.accept()` — listening sockets only (client `Socket.connect` excluded as requiring MITM).
+
+**Interpretation:** Auth on channel A, then accept on channel B — attacker may bind the port first.
+
+### CWE-362 — Double-fetch (kernel-only)
+
+**Sink:** second `copy_from_user(dest, userPtr, ...)` where `userPtr` equals first fetch.
+
+**Pattern:** second fetch reachable via `if` false-successor chain from first; no pointer arithmetic on user pointer between fetches.
+
+**Scope:** Linux kernel C/C++ only; not applicable to mobile/web app code.
+
+### CWE-609 — Double-checked locking init race
+
+**Pattern:** DCL on field `f`, assignment visible before post-sync side effects (`SideEffect` — method calls or field writes after assign).
+
+### Good / bad examples
+
+**BAD (JS — file system race):**
+```javascript
+if (fs.existsSync(path)) {
+  fs.writeFileSync(path, data);  // TOCTOU: attacker swaps path between check and write
+}
+```
+
+**SAFE (JS):** open with `O_CREAT|O_EXCL` or write through fd from single `openSync` without prior exists check.
+
+**BAD (Java — TOCTOU race):**
+```java
+if (collection.contains(key)) {   // synchronized contains
+  collection.remove(key);         // synchronized remove — not atomic together
+}
+```
+
+**SAFE (Java):** single `synchronized(collection) { if (contains) remove; }` block.
+
+**BAD (Java — socket auth race):**
+```java
+if (authenticate(user)) {
+  Socket s = serverSocket.accept();  // auth was on different channel
+}
+```
+
+### Common False Alarms
+
+- **TOCTOU race (Java):** ignores locals that never escape; ignores fields with consistent external locking (`alwaysLocked`); excludes `Throwable` synchronized methods; loop conditions excluded.
+- **TOCTOU race (Java):** two synchronized calls on same object inside one `synchronized(obj)` block — not flagged.
+- **File system race (JS):** intentional read-after-exists for read-only paths — suppressed.
+- **File system race (JS):** uses `mayHaveStringValue` for path equality — dynamic paths with same runtime value but different AST nodes may be missed or over-approximated.
+- **Socket auth race (Java):** heuristic — auth guard must match `AuthMethod` model; custom auth not recognized.
+- **Double-fetch (kernel):** high false-positive rate on legitimate re-reads; not in standard Java/Go/JS suites.
+- **Double-checked locking init race:** tagged `quality`/`reliability`, not always security-relevant.
+- **Actions TOCTOU:** only applies to GitHub Actions workflows, not application code.

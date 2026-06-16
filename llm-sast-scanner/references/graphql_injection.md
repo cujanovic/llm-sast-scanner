@@ -41,7 +41,7 @@ GraphQL APIs present a distinct attack surface that differs significantly from R
 ### Flask-GraphQL introspection
 - **VULN**: `GraphQLView.as_view('graphql', schema=schema)` with no introspection guard
 - **VULN**: `graphene.Schema(query=Query)` served at `/graphql` with no auth decorator
-- **SAFE**: Introspection disabled: `GraphQLView.as_view('graphql', schema=schema, graphiql=False)` + validation rule
+- **NOT sufficient for introspection**: `GraphQLView.as_view('graphql', schema=schema, graphiql=False)` hides the GraphiQL IDE only; introspection remains enabled unless explicitly disabled via `introspection=False` or validation rules blocking `__schema`/`__type`
 
 ### No depth limit
 - **VULN**: Schema served without `query_depth_limit` or `query_complexity_limit` middleware
@@ -149,7 +149,7 @@ public List<User> users(@Argument String filter) {
 ### GraphQL TRUE POSITIVE Rules
 
 - GraphQL endpoint accepting user-controlled query string without schema validation → **CONFIRM** (`graphql`)
-- Resolver using string concatenation with GraphQL argument in SQL/NoSQL query → **CONFIRM** (`graphql` + `sqli`)
+- Resolver using string concatenation with GraphQL argument in SQL/NoSQL query → **CONFIRM** (`graphql_injection` + `sql_injection`)
 - `introspection: true` in production Apollo/Graphene config → **CONFIRM** (`graphql` + `information_disclosure`)
 - No depth limit + no complexity limit on public GraphQL endpoint → **CONFIRM** (`graphql`)
 - GraphQL resolver accessing object by ID without ownership check → **CONFIRM** (`graphql` + `idor`)

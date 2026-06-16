@@ -28,6 +28,8 @@ A true positive requires **both** of the following:
 
 ## Python Source Detection Rules
 
+These patterns detect hardcoded secrets generally, but the `default_credentials` tag is reserved for reachable username/password login pairs — hardcoded signing keys, API keys, and DB credentials should be tagged `weak_crypto` or `information_disclosure` per the FALSE POSITIVE rules below.
+
 ### Direct assignment
 - **VULN**: `password = "admin"` — literal credential assigned to password variable
 - **VULN**: `SECRET_KEY = "changeme"` — Flask/Django secret key hardcoded
@@ -117,3 +119,36 @@ A true positive requires **both** of the following:
 - Do NOT emit for test data, seed data, or demo account setup in database initialization scripts UNLESS those accounts are accessible through a reachable production login endpoint.
 - Do NOT emit for hardcoded secrets used in JWT signing, encryption keys, or API keys — these should be tagged as `weak_crypto` or `information_disclosure` instead.
 - Only emit when there is a REACHABLE authentication endpoint that accepts a hardcoded username/password pair defined in the application code.
+
+### Source → Sink Patterns
+
+**HardcodedCredentials (JS/Python/Go/Ruby/C#)**
+- **Source**: String literals, config constants — passwords, API keys, tokens in source.
+- **Sink**: Authentication or connection APIs — DB connect strings, HTTP Authorization headers, AWS SDK calls, ORM credentials.
+
+**HardcodedCredentialsComparison (Java)**
+- **Source**: Hardcoded string literal (password/secret).
+- **Sink**: `String.equals`, `MessageDigest.isEqual`, or similar comparison used in an auth check.
+
+**InsecureBasicAuth (Java)**
+- **Sink**: HTTP URL connection or request using `Authorization: Basic ...` over non-HTTPS scheme.
+
+**ImproperLdapAuth (Go/Python/Ruby)**
+- **Sink**: LDAP bind or search using cleartext/simple bind without TLS — credentials or queries sent unencrypted.
+
+### Sanitizers / Safe Patterns
+
+- Credentials read from environment variables (`process.env`, `os.environ`, `System.getenv`).
+- Placeholder literals flagged as non-sensitive by heuristics (`"SampleToken"`, `"MyPassword"`).
+- Basic auth over `https://` URLs (InsecureBasicAuth).
+
+**VULN (Java)**: `if (password.equals("admin123"))` — hardcoded comparison at login.
+**SAFE (Java)**: `if (password.equals(System.getenv("ADMIN_PASSWORD")))`.
+
+**VULN (JS)**: `mongoose.connect('mongodb://admin:password@host/db')`.
+**SAFE (JS)**: `mongoose.connect(process.env.MONGODB_URI)`.
+
+**VULN (Java)**: `new URL("http://api.example.com").openConnection()` with Basic auth header.
+**SAFE (Java)**: Same pattern over `https://`.
+
+Commonly affected languages: Python, JavaScript, Go, Ruby, C#, Java, Swift.

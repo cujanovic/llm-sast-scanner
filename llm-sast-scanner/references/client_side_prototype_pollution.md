@@ -5,7 +5,7 @@ description: Client-Side Prototype Pollution (CSPP) — pollution sources (URL q
 
 # Client-Side Prototype Pollution (CSPP)
 
-**CWE coverage**: CWE-1321 (primary, *Improperly Controlled Modification of Object Prototype Attributes*) plus the downstream CWEs the gadget actually lands. CodeQL maps the same query family (`js/prototype-polluting-assignment`, `js/prototype-polluting-merge-call`, `js/prototype-pollution-utility`) to **CWE-79** (DOM XSS), **CWE-94** (code injection), **CWE-400** (resource exhaustion), **CWE-471** (modification of assumed-immutable data); HackTricks-class browser-API gadgets land **CWE-601** (open redirect) and cookie-injection variants. Choose the downstream CWE that matches the gadget reached.
+**CWE coverage**: CWE-1321 (primary, *Improperly Controlled Modification of Object Prototype Attributes*) plus the downstream CWEs the gadget actually lands. Prototype-pollution detection maps to **CWE-79** (DOM XSS), **CWE-94** (code injection), **CWE-400** (resource exhaustion), **CWE-471** (modification of assumed-immutable data); HackTricks-class browser-API gadgets land **CWE-601** (open redirect) and cookie-injection variants. Choose the downstream CWE that matches the gadget reached.
 
 Client-Side Prototype Pollution lets an attacker inject a property into `Object.prototype` (or `Array.prototype`, `String.prototype`, etc.) **inside the victim's browser**. Like SSPP, the pollution itself is rarely the impact — it is an *amplifier* that becomes DOM XSS, sanitizer bypass, open redirect, or arbitrary script load only when combined with a downstream **gadget**: existing client-side code (in the page bundle, a third-party tag, or even a built-in browser API) that reads an undefined property and uses it as a security-sensitive parameter (`innerHTML`, `src`, `href`, `srcdoc`, `onerror`, `template`, `whiteList`, `ALLOWED_ATTR`, `sourceURL`, etc.).
 
@@ -27,7 +27,7 @@ A vulnerable page therefore needs two things to be exploitable:
 > - Kirill89 — *prototype-pollution-explained* (`https://github.com/Kirill89/prototype-pollution-explained`) — minimal lab-style demo, lodash `_.merge` CVE-2018-16487.
 > - Acunetix — *Client-Side Prototype Pollution* vulnerability profile (`https://www.acunetix.com/vulnerabilities/web/client-side-prototype-pollution/`) — concise remediation guidance.
 > - Dodir.sec — *JavaScript Prototype Pollution Attack: A Simplified Guide* (`https://medium.com/@dodir.sec/javascript-prototype-pollution-attack-a-simplified-guide-c3b4ba8a6441`).
-> - GitHub CodeQL — `js/prototype-polluting-assignment`, `js/prototype-polluting-merge-call`, `js/prototype-pollution-utility` (`https://codeql.github.com/codeql-query-help/javascript/`); the upstream `PrototypePollutionUtility.ql` source defines the named guard predicates this reference uses (`HasOwnPropertyGuard`, `BlacklistEqualityGuard`, `WhitelistEqualityGuard`, `InExprGuard`, `InstanceOfGuard`, `TypeofGuard`, `IsPlainObjectGuard`, `BlacklistInclusionGuard`, `WhitelistInclusionGuard`, `ObjectCreateNullCall`).
+> - Named guard predicates used in detection: `HasOwnPropertyGuard`, `BlacklistEqualityGuard`, `WhitelistEqualityGuard`, `InExprGuard`, `InstanceOfGuard`, `TypeofGuard`, `IsPlainObjectGuard`, `BlacklistInclusionGuard`, `WhitelistInclusionGuard`, `ObjectCreateNullCall`.
 
 For the **server-side variant** (Node.js / Deno / NPM-package gadgets, RCE/SSRF chains, `execArgv`, `lodash.template`, `bson`, `child_process`), see `references/server_side_prototype_pollution.md` — sources, sinks, and the conceptual flow are the same; only the gadget surface differs.
 
@@ -50,7 +50,7 @@ For the **server-side variant** (Node.js / Deno / NPM-package gadgets, RCE/SSRF 
   - `V4Fire Core`, `CanJS deparam`, `HubSpot Tracking Code`, `YUI 3 querystring-parse`, `Mutiny`, `jQuery parseParams`, `php.js parse_str`, `arg.js`, `davis.js`, `Component querystring`, `Aurelia path`, `analytics-utils < 1.0.3`, `Wistia Embedded Video`, `Swiftype Site Search`.
 - Generic browser-side merge / extend / set: `$.extend(true, target, src)` (jQuery deep merge — CVE-2023-26136 / CVE-2023-26140 in 3.6.0–3.6.3), `_.merge`, `_.mergeWith`, `_.defaultsDeep`, `_.set`, `_.setWith`, `_.zipObjectDeep` shipped in the page bundle, `deepmerge`, `merge-deep`, `extend`, `just-extend`, hand-rolled recursive `for…in` merges.
 - Hand-rolled hash parsers: `location.hash.slice(1).split('&').reduce(...)` patterns that walk attacker keys.
-- Functions matching CodeQL's `js/prototype-pollution-utility` shape — recursive copy where the destination base, key, AND right-hand side all derive from an enumerated property name.
+- Functions matching the prototype-pollution-utility shape — recursive copy where the destination base, key, AND right-hand side all derive from an enumerated property name.
 
 **Script gadgets (where polluted defaults turn into XSS)**
 - App code: any `if (config.<flag>) ...` / `el.innerHTML = config.<x>` / `new Image().src = config.<src>` reading a config-style object.
@@ -119,7 +119,7 @@ location.hash.slice(1).split('&').forEach(kv => {
   o[keys.at(-1)] = decodeURIComponent(v || '');
 });                                                  // VULN — walks __proto__/constructor
 
-// VULN — recursive for…in merge (matches CodeQL js/prototype-pollution-utility)
+// VULN — recursive for…in merge (matches prototype-pollution-utility pattern)
 function merge(dst, src) {
   for (const key in src) {                           // walks inherited keys
     if (typeof src[key] === 'object') merge(dst[key] = dst[key] || {}, src[key]);
@@ -272,11 +272,11 @@ The presence of any of these libraries in a page's bundle is a high-confidence e
 
 ## Browser-API Gadgets (PortSwigger Research, 2023–2025)
 
-PortSwigger Research and HackTricks documented that **built-in browser APIs themselves are gadgets** once `Object.prototype` is polluted — this means even a page whose own bundle and third-party tags are clean is exploitable through standard `URL` / `Notification` / `Worker` / `Image` / `URLSearchParams` constructors. Confirmed working in evergreen browsers as of 2024-11.
+PortSwigger Research and HackTricks documented that **built-in browser APIs themselves are gadgets** once `Object.prototype` is polluted — this means even a page whose own bundle and third-party tags are clean may be exploitable through standard `URL` / `Notification` / `Worker` / `Image` / `URLSearchParams` constructors. Behavior is engine/version-dependent and not universally exploitable.
 
 | Gadget API | Polluted property read | Primitive |
 |------------|------------------------|-----------|
-| `new URL('#')` | `Object.prototype.href` | XSS via `javascript:` URL navigation when the URL is later assigned to `location` / used with `<a href>` |
+| `new URL('#')` | `Object.prototype.href` | Potential XSS/open-redirect via `javascript:` URL navigation when the URL is later assigned to `location` / used with `<a href>` — engine-dependent, not a guaranteed primitive |
 | `new Notification('test')` | `title` | `alert()` payload via notification click |
 | `new Worker(blob)` | `name` | JS execution inside the dedicated Worker |
 | `new Image()` | `src` | Traditional `onerror` XSS — the polluted `src` is dereferenced when the image errors |
@@ -288,7 +288,7 @@ A typical dynamic confirmation, harmless variant:
 <script>
   // For demo we pollute manually; in the wild the source is one of the parsers above.
   Object.prototype.href = 'javascript:alert(`polluted`)';
-  new URL('#');     // → in Chrome: alert; in Firefox: navigates to javascript: URL
+  new URL('#');     // → engine-dependent: may alert in some Chrome versions; not reliably exploitable across browsers
 </script>
 ```
 
@@ -391,15 +391,15 @@ Any time you see a string-replacement defense rather than an own-property guard,
 
 ## Detection Rules
 
-### JS / TS Source Patterns (CodeQL-aligned)
+### JS / TS Source Patterns
 
-CodeQL ships three sibling queries that overlap — running all three covers the broadest signal. Each is high-precision when paired with the safe patterns below.
+Three overlapping detection patterns cover the broadest signal. Each is high-precision when paired with the safe patterns below.
 
-| CodeQL query | What it catches |
-|--------------|-----------------|
-| `js/prototype-polluting-assignment` | Direct `obj[user]` / `obj[user][..]` assignments where `user` could be `__proto__` or `constructor` |
-| `js/prototype-polluting-merge-call` | Calls to known-vulnerable merge/extend helpers (`lodash.merge`, `_.defaultsDeep`, `extend`, `just-extend`, `merge.recursive`, `jQuery.extend(true, …)`, `Hoek.merge`/`applyToDefaults`, `deepmerge` pre-4.2) |
-| `js/prototype-pollution-utility` | Helpers inside the codebase that *themselves* perform polluting recursive copy / deep assignment — i.e. the application's own `merge` is the sink. The query enforces the structural shape: an enumerated property name simultaneously flows to the **base**, the **property** AND the **right-hand side** of a dynamic write. Hand-rolled merges this shape exactly almost always. |
+| Pattern | What it catches |
+|---------|-----------------|
+| Prototype-polluting assignment | Direct `obj[user]` / `obj[user][..]` assignments where `user` could be `__proto__` or `constructor` |
+| Known merge/extend helpers | Calls to known-vulnerable merge/extend helpers (`lodash.merge`, `_.defaultsDeep`, `extend`, `just-extend`, `merge.recursive`, `jQuery.extend(true, …)`, `Hoek.merge`/`applyToDefaults`, `deepmerge` pre-4.2) |
+| Prototype-pollution utility | Helpers inside the codebase that *themselves* perform polluting recursive copy / deep assignment — i.e. the application's own `merge` is the sink. Enforces the structural shape: an enumerated property name simultaneously flows to the **base**, the **property** AND the **right-hand side** of a dynamic write. Hand-rolled merges this shape exactly almost always. |
 
 The third query is the most useful in practice because it finds custom merges that no library list will catch.
 
@@ -413,7 +413,7 @@ function deepCopy(dst, src) {
     else dst[k] = src[k];
   }
 }
-deepCopy(config, JSON.parse(location.hash.slice(1)));    // VULN — matches js/prototype-pollution-utility
+deepCopy(config, JSON.parse(location.hash.slice(1)));    // VULN — matches prototype-pollution-utility pattern
 ```
 
 ### VULN — split-and-reduce hash parser
@@ -467,9 +467,9 @@ const config = Object.create(null);                      // no prototype; pollut
 config[userKey] = userValue;
 ```
 
-CodeQL's `PrototypePollutionUtility.ql` whitelists this: `class ObjectCreateNullCall extends CallNode` — a base reachable through `Object.create(null)` is excluded from results.
+`Object.create(null)` excludes this case — a base reachable through `Object.create(null)` is not flagged.
 
-### SAFE — destination-side `hasOwnProperty` guard (CodeQL recommendation)
+### SAFE — destination-side `hasOwnProperty` guard
 
 ```javascript
 function merge(dst, src) {
@@ -481,7 +481,7 @@ function merge(dst, src) {
 }
 ```
 
-CodeQL's `HasOwnPropertyGuard` only treats this as a sanitizer when applied to the **destination** object, not the source — `__proto__`/`constructor` are own properties of attacker-crafted source objects but are NOT own properties of normal destination objects.
+`HasOwnPropertyGuard` only treats this as a sanitizer when applied to the **destination** object, not the source — `__proto__`/`constructor` are own properties of attacker-crafted source objects but are NOT own properties of normal destination objects.
 
 ### SAFE — explicit blocklist (`__proto__`, `constructor`, `prototype`)
 
@@ -496,7 +496,7 @@ function safeMerge(target, source) {
 }
 ```
 
-CodeQL's `BlacklistEqualityGuard` and `BlacklistInclusionGuard` recognise these patterns as sanitizers.
+`BlacklistEqualityGuard` and `BlacklistInclusionGuard` recognise these patterns as sanitizers.
 
 ### SAFE — `Object.freeze(Object.prototype)` (and friends) at startup
 
@@ -566,7 +566,7 @@ function merge(dst, src) {
 }
 ```
 
-CodeQL recognises this via `IsPlainObjectGuard` — `__proto__` payloads (which are `Object.prototype`) and constructor-chained payloads (which point at `Function.prototype`) both fail the plain-object test.
+`IsPlainObjectGuard` — `__proto__` payloads (which are `Object.prototype`) and constructor-chained payloads (which point at `Function.prototype`) both fail the plain-object test.
 
 ---
 
@@ -615,8 +615,8 @@ Object.defineProperty(Object.prototype, 'YOUR-PROPERTY', {
 
 ## False Alarms — Do NOT Report
 
-- The "merge" target is `Object.create(null)` *and* the prototype-less object never feeds back into a real `Object`-prototyped object. CodeQL's `PrototypePollutionUtility.ql` excludes this case.
-- The merge is gated by a destination-side `hasOwnProperty` guard (CodeQL `HasOwnPropertyGuard`) on the destination — `__proto__`/`constructor` are *not* own properties of normal destination objects.
+- The "merge" target is `Object.create(null)` *and* the prototype-less object never feeds back into a real `Object`-prototyped object (`ObjectCreateNullCall` excludes this case).
+- The merge is gated by a destination-side `hasOwnProperty` guard (`HasOwnPropertyGuard`) on the destination — `__proto__`/`constructor` are *not* own properties of normal destination objects.
 - The merge is gated by an explicit `key === '__proto__' || key === 'constructor' || key === 'prototype'` blocklist (`BlacklistEqualityGuard` / `BlacklistInclusionGuard`).
 - The merge is preceded by `is-plain-object` / `is-extendable` (`IsPlainObjectGuard`).
 - Patched library versions: lodash >= 4.17.21, jQuery >= 3.7.0 (CVE-2023-26136/26140 patched), DOMPurify >= 3.0.9 (CVE-2024-45801 patched), sanitize-html >= 2.8.1.
@@ -680,3 +680,21 @@ For server-side variants of this same conceptual flow (Node.js `child_process` /
 6. Browser-API gadgets (PortSwigger 2023+) make every page exploitable once any pollution source on the same origin is reached. Recommend `Object.freeze(Object.prototype)` at the top of the load order regardless of the bundle's library mix.
 7. For DOM Invader-confirmed CSPP, also re-test in incognito / a fresh profile to rule out a stale extension polluting the prototype chain. Browser extensions can pollute, too.
 8. When a finding involves a third-party tag (Tealium, Adobe DTM, Boomerang, etc.), document which tag's gadget is reached — the tag vendor, not the app team, is usually the upstream fix owner.
+
+## Sources, Sinks & Sanitizers
+
+Three JavaScript detection patterns cover **browser and Node** contexts; CSPP findings arise when sources are `location.search`/`hash`, `postMessage`, or client-side `JSON.parse` reaching merge sinks in bundled code.
+
+| Pattern | CSPP relevance |
+|---------|----------------|
+| Prototype-polluting assignment | `config[userKey]=…` in SPA bundle; `__proto__` from decoded query |
+| Known merge/extend helpers | `$.extend(true,…)`, `_.merge` in client bundle |
+| Prototype-pollution utility | Hand-rolled hash parsers / `for…in` merges in frontend code |
+
+**Sources**: client remote sources (URL, DOM storage, WebSocket) modeled as tainted objects after parse.
+
+**Sanitizers**: identical to server-side — `Object.create(null)`, destination `Object.hasOwn`, blocklists, `is-plain-object`, `structuredClone` (no merge).
+
+**Pair with manual gadget review**: automated rules do not enumerate BlackFan script gadgets or browser-API gadgets (`URL`, `Image`) — sink-only hits stay LOW until gadget confirmed.
+
+Per-library URL parser CVE list (jquery-deparam, etc.) requires dependency/version heuristics; DOMPurify sanitizer-bypass gadgets require separate XSS/sanitizer analysis.

@@ -324,7 +324,7 @@ public Cursor query(Uri uri, String[] proj, String selection, String[] args, Str
 **SAFE**:
 ```java
 public Cursor query(Uri uri, String[] proj, String selection, String[] args, String sort) {
-    return db.query("messages", proj, "sender=?", new String[]{selection}, null, null, sort);
+    return db.query("messages", proj, "sender=?", new String[]{ args[0] }, null, null, sort);
 }
 ```
 
@@ -782,3 +782,140 @@ func urlSession(_ session: URLSession,
 | Hardcoded encryption key literal | iOS | CWE-798 | HIGH |
 | arc4random for security token generation | iOS | CWE-338 | HIGH |
 | TLS certificate accepted without SecTrustEvaluateWithError | iOS | CWE-295 | CRITICAL |
+
+---
+
+## Sources, Sinks & Sanitizers
+
+### CWE-079 — WebView XSS / script injection
+
+**Detection patterns (Android):**
+- Any `WebView.addJavascriptInterface(...)` call
+- `WebSettings.setJavaScriptEnabled(true)`
+- Taint: `ActiveThreatModelSource` → `WebView.loadUrl`/`postUrl` when JS enabled and/or cross-origin file access enabled
+- `setAllowFileAccess` / `setAllowUniversalAccessFromFileURLs` / `setAllowFileAccessFromFileURLs` set `true`
+- `setAllowContentAccess(true)` or WebView never calling `setAllowContentAccess(false)`
+
+**Detection patterns (Swift/iOS):**
+- Taint into `loadHTMLString`/`load(_:)` where `baseURL` is absent, `nil`, or tainted
+
+**Sources (Android taint):** `ActiveThreatModelSource` — remote/user/Intent/deep-link inputs.
+
+**Sinks (Android):**
+- `UrlResourceSink` via `WebView.loadUrl` / `postUrl` first argument
+- Subtypes: `JavaScriptEnabledUrlResourceSink` (JS on WebView), `CrossOriginUrlResourceSink` (also `setAllowFileAccess(true)`)
+
+**Sanitizers (Android):** `RequestForgerySanitizer` (URL allowlist/host validation).
+
+**Sinks (Swift):** WebView HTML load with unrestricted/tainted `baseURL`.
+
+**Sanitizers (Swift):** Non-tainted `baseURL` set to a fixed trusted URL or `about:blank` (not `nil`).
+
+**Good / bad:**
+- **BAD (Android):** `webView.addJavascriptInterface(new MyBridge(), "bridge")` on a WebView that loads untrusted content.
+- **BAD (Swift):** `webView.loadHTMLString(html, baseURL: nil)` — `nil` does not restrict `file://` or attacker URLs.
+- **SAFE (Swift):** `webView.loadHTMLString(html, baseURL: URL(string: "about:blank")!)`.
+
+### CWE-200 / CWE-312 — Cleartext storage and sensitive UI leak
+
+**Detection patterns:**
+- **Android:** `SensitiveSource` → `SharedPreferences$Editor.put*` → `commit()`/`apply()`; sensitive data → `FileOutputStream` / local file write; sensitive data → SQLite local DB store; `AndroidManifest.xml` `android:allowBackup="true"` (or default-allowed); Intent from `onActivityResult` → file path sink without `startsWith` guard; sensitive data → `NotificationManager.notify`; sensitive data → `TextView.setText` / password fields without masking
+- **Swift/iOS:** Sensitive data → `UserDefaults` / preference store; local database write; log output
+- **JavaScript (web):** `express.static` / `serve-static` exposing `node_modules`, project root, home, or cwd
+
+**Sources:** `SensitiveSource` (password/token/PII heuristics) for Android cleartext rules; Swift uses dedicated cleartext taint configs.
+
+**Sanitizers (Android SharedPreferences):** `EncryptedSharedPreferences.create(...)` — editors from encrypted prefs are excluded.
+
+**Sanitizers (sensitive file leak):** `path.startsWith(...)` guard on the taint path.
+
+### CWE-295 — Certificate pinning / WebView TLS
+
+**Detection patterns:**
+- Network call with no certificate pin for the target domain (Android)
+- `WebViewClient.onReceivedSslError` handler that accepts all certs (`trustsAllCerts`) (Android)
+- TLS configuration allowing weak/insecure protocols (Swift/iOS)
+
+### CWE-489 — Debug exposure
+
+**Detection patterns:**
+- Taint/enabled path to `WebView.setWebContentsDebuggingEnabled(true)` (Android)
+- Manifest `android:debuggable="true"` outside build dirs (Android)
+
+### CWE-749 — Unsafe Android WebView resource access
+
+Primary taint pattern linking user input to `loadUrl` with dangerous WebSettings — see CWE-079 WebView section above.
+
+### CWE-925 / 926 / 927 / 940 — Intent and component exposure
+
+**Detection patterns:**
+- Exported receiver registered for system action without intent verification
+- Manifest component has `<intent-filter>` but no explicit `android:exported`
+- Exported provider missing read or write permission attribute
+- Implicit mutable `PendingIntent` sent via `startActivity`/`startActivities`
+- Sensitive data in implicit `Intent` broadcast/start
+- Sensitive data sent to untrusted `ResultReceiver`
+- User input → `startActivity`/`startService`/`sendBroadcast` with attacker-controlled component
+
+**Sources:** `ActiveThreatModelSource`, `ImplicitPendingIntentSource`.
+
+**Sinks:** `IntentRedirectionSink`, `ImplicitPendingIntentSink`, `SensitiveCommunication` broadcast/start sinks.
+
+**Sanitizers:**
+- `IntentRedirectionSanitizer` / `OriginalIntentSanitizer` — relaunching the same incoming Intent (component not attacker-set)
+- `ExplicitIntentSanitizer` — fully explicit Intent (`setComponent`/`setClass`/`setClassName` with non-tainted class)
+- `RequestForgerySanitizer` (URL context)
+
+**Good / bad (intent verification):** receivers registered for `BOOT_COMPLETED` must verify sender; permission/explicit component check vs no verification.
+
+### CWE-470 — Fragment injection
+
+**Detection patterns:**
+- User input → `Fragment.instantiate` / reflective fragment creation
+- Exported `PreferenceActivity` with `isValidFragment` always returning `true`
+
+**Sanitizers:** `FragmentInjectionSanitizer` from external flow model (`barrierNode(..., "fragment-injection")`).
+
+### CWE-287 — Local authentication / key generation
+
+**Detection patterns:**
+- `KeyGenParameterSpec` / biometric key with insecure parameters when local auth is used
+- `BiometricPrompt` callback without `CryptoObject` result use
+
+### CWE-441 / CWE-266 — Content URI and permission manipulation
+
+**Detection patterns:**
+- User input → `ContentResolver` query/open/getType on URI
+- User-controlled Intent → `setResult` with URI permission flags
+
+### Swift security patterns (non-WebView)
+
+Commonly tracked classes: SQL injection (CWE-089), predicate injection (CWE-943), path injection (CWE-022), cleartext transmission (CWE-311), unsafe JS eval (CWE-094).
+
+iOS cookie storage and ATS plist keys (`NSAllowsArbitraryLoads`) remain heuristic-only for this scanner.
+
+## Manifest & WebView Config
+
+**Android manifest (XML models):**
+- `android:exported` implicit when `<intent-filter>` present
+- `android:allowBackup`, `android:debuggable` on `<application>`
+- Provider `android:readPermission` / `android:writePermission` completeness
+
+**Android WebView config chain:**
+- `getSettings()` → `setJavaScriptEnabled`, cross-origin file access methods, `setAllowContentAccess`
+- `loadUrl` / `postUrl`, `addJavascriptInterface`, `setWebViewClient` → `shouldOverrideUrlLoading`
+
+**iOS WebView config:**
+- `baseURL` parameter on HTML load APIs — must not be `nil` or user-controlled
+
+## Common False Alarms
+
+- **`setJavaScriptEnabled(true)`** flags every call — not limited to user-controlled URLs; pair with unsafe WebView fetch taint for exploitable XSS paths.
+- **`addJavascriptInterface`** is syntactic — any bridge registration alerts regardless of loaded origin; downgrade when WebView loads only bundled `file:///android_asset/` assets.
+- **Missing certificate pinning** is absence-based — apps using system trust store without pins alert on all network calls; not equivalent to MITM-vulnerable custom trust managers.
+- **Cleartext SharedPreferences** excludes `EncryptedSharedPreferences` but not other custom crypto wrappers unless modeled.
+- **`allowBackup` manifest flag** is manifest-only — no data-flow proof that backups contain secrets.
+- **Sensitive file leak** narrowly tracks `onActivityResult` Intent paths with `startsWith` as the only modeled sanitizer.
+- **Implicit PendingIntents** sanitizes explicit Intents — `FLAG_IMMUTABLE` alone is insufficient if the base Intent is implicit.
+- **Fragment injection in PreferenceActivity** only covers exported activities whose `isValidFragment` unconditionally returns `true`.
+- **Swift unsafe WebView fetch** requires taint flow — hardcoded safe `baseURL` with static HTML is not flagged.

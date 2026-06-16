@@ -93,3 +93,18 @@ const userId = req.headers['x-user-id'];                // spoofable identity us
 - Do NOT emit `trust_boundary` when the stored value has no security-relevant impact (e.g., display preferences, pagination settings).
 - Do NOT emit `trust_boundary` when the vulnerability is better described by a more specific tag (e.g., `xff_spoofing` for X-Forwarded-For abuse, `session_fixation` for session management issues).
 - Prefer narrow tags: if the pattern is a role/privilege stored from user input, use `privilege_escalation`; if it is IP trust, use `xff_spoofing`.
+
+## Client-Supplied IP (CWE-348)
+
+Commonly affected languages: Java, Python.
+
+### Source → Sink Pattern
+
+- **Source**: HTTP request headers — `X-Forwarded-For`, `X-Real-IP`, `Proxy-Client-IP`, and similar client-influenced IP headers.
+- **Sink**: Security-sensitive use of the extracted IP — ban-list checks, rate limiting keyed on IP, admin-only access gated on `127.0.0.1`, audit allowlists.
+- **Sanitizer**: Using the **last** (appended) entry in a comma-separated `X-Forwarded-For` chain when behind a trusted reverse proxy; validating IP against a server-side session; ignoring client-supplied headers entirely.
+
+**VULN**: `String ip = request.getHeader("X-Forwarded-For").split(",")[0]; if (blocked.contains(ip)) deny();` — first XFF entry is attacker-controlled.
+**SAFE**: Take the last XFF hop added by the trusted proxy, or derive client IP from the TCP connection at the edge.
+
+Relates to header-based trust patterns above — prefer `xff_spoofing` when the sole issue is IP spoofing; use `trust_boundary` when spoofed IP crosses into session state or privileged configuration.

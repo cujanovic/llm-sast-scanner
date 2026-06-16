@@ -580,7 +580,7 @@ Typical chain:
 1. Application has a Settings page that issues `fetch('/api/users/me/email', { method: 'POST', body: ... })`.
 2. The endpoint URL is built using a decoded path param: `fetch(\`/api/users/\${userId}/email\`, …)`.
 3. Attacker crafts a link `https://victim/settings/..%2F..%2Fadmin%2Fdelete-all` that, when the victim visits while logged in, causes the POST to land on `/api/admin/delete-all` instead of the user's own email endpoint.
-4. Because the request shares the legitimate session, server-side CSRF tokens (if any) are also sent by the first-party page — bypassing the standard CSRF defenses.
+4. Because the request shares the legitimate session, the chain succeeds when the endpoint does not require a CSRF token or the app's fetch wrapper auto-includes one — do not assume server-side CSRF tokens are always sent on redirected fetch calls.
 
 Detection rule: flag any state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) `fetch` whose URL template interpolates a decoded source as a high-priority CSPT-to-CSRF finding, NOT just a CSPT-to-data-disclosure finding.
 
@@ -723,3 +723,23 @@ Treat every value returned by a frontend router's param/query API as URL-decoded
 5. SvelteKit param matchers (`[id=id]`) are the strongest framework-level defense; recommend them in remediation.
 6. For Nuxt, also audit `revive-payload.client.js` consumers and any `__NUXT__` payload sources for stored CSPT (CVE-2025-59414 class).
 7. When triaging, distinguish CSPT (client `fetch`) from secondary-context PT (server `fetch` with internal reachability) — the latter is materially higher impact.
+
+## Sources, Sinks & Sanitizers
+
+The closest automated models map CSPT primitives to **client-side request forgery** and **client-side open redirect** when untrusted data is concatenated into URL/fetch targets.
+
+**Sources**: non-server-side remote sources (browser `useParams`, `useSearchParams`, `location`-derived values).
+
+**Sinks**: `fetch`, `axios`, `XMLHttpRequest.open`, URL template concatenation before HTTP request.
+
+**Sanitizers**: numeric coercion of IDs; allowlist regex before interpolation; `encodeURIComponent` at sink; `URLSearchParams.set` for query values; sanitizing prefix edges in URL builders.
+
+**SAFE pattern**: restrict param to digits — parse `message_id` as number before fetch; matches manual `encodeURIComponent` / allowlist guidance in this reference.
+
+**Related patterns** (not CSPT):
+- Client-side URL redirect — open redirect via decoded param in `location` / router
+- Server-side request forgery — secondary-context PT in route handlers / server fetch (not browser-normalized)
+- Path injection — server-side path sinks (Next route handler internal paths)
+- HTTP-to-file access — separate CWE-912 backdoor pattern, not CSPT
+
+Framework-specific decoding tables (React Router vs SolidStart) require heuristic/manual review. Vue/Nuxt/Angular/SvelteKit CSPT requires taint from client source to fetch sink when URL is built in the browser bundle.

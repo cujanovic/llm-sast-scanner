@@ -42,7 +42,7 @@ The attack works in three steps: (1) the attacker obtains or forces a known sess
 ### Python / Django
 
 - Django's built-in auth views call `login()` which rotates the session key by default — manual login flows that skip `django.contrib.auth.login()` and directly set `request.session['user']` are vulnerable
-- Flask: `session['user'] = username` without regenerating the session via `session.regenerate()` or equivalent
+- Flask: `session['user'] = username` without rotating the session — Flask has no built-in `session.regenerate()`; on privilege change, clear and repopulate the session (e.g., `session.clear()` then set the authenticated identity), or use Flask-Login (`login_user(...)`) with `SESSION_PROTECTION` configured
 
 ## Java / Spring Detection Rules
 
@@ -136,3 +136,26 @@ req.session.regenerate(function(err) {
 ## Core Principle
 
 Every authentication state change — login, privilege elevation, identity switch — must issue a fresh session identifier. The pre-authentication session ID must never survive into the authenticated context.
+
+Commonly affected languages: JavaScript, C#.
+
+## Static Analysis Patterns
+
+### What to Look For (JavaScript)
+
+Config-only pattern (no taint flow). Flag Express route setups where:
+
+1. Path matches `%login%` and a handler writes to `req.session` (login establishes session state).
+2. No call to `req.session.regenerate` anywhere in that route setup.
+
+Passport.js is explicitly excluded — modern Passport includes built-in session-fixation protection.
+
+**VULN**: Login handler sets `req.session.user = authenticatedUser` without `req.session.regenerate(...)`.
+**SAFE**: `req.session.regenerate(function(err) { req.session.user = authenticatedUser; })`.
+
+### What to Look For (C#)
+
+Config-only pattern. Flag ASP.NET login/logout handlers that mutate session state without calling `HttpSessionState.Abandon()`.
+
+**VULN**: After authentication, session ID reused — no `Session.Abandon()` before binding authenticated user.
+**SAFE**: `Session.Abandon()` called on login/logout so a new session is started.

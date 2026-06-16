@@ -94,3 +94,57 @@ The attacker sends: `{"username": {"$gt": ""}, "password": {"$gt": ""}}` to bypa
 ### Laravel MongoDB (jenssegers/laravel-mongodb)
 - **VULN**: `User::where('username', request('username'))->first()` — no type validation in middleware
 - **VULN**: `User::where(request()->all())->first()` — entire request object used as query
+
+## Source -> Sink Pattern
+
+**Sources**
+- `ActiveThreatModelSource` — `request.json`, `req.body`, `req.query`, form/URL params
+- Python: remote flow into string state; dict state after `json.loads` or NoSQL decode (tracks `String` vs `Dict` flow states)
+- JavaScript: tainted objects tracked via `TaintedObject` flow state (deep object taint)
+
+**Sinks**
+- **Python**: `NoSqlExecution.getQuery()` where execution `vulnerableToStrings()` or `interpretsDict()` — PyMongo `find`/`find_one`, MongoEngine queries
+- **JavaScript**: `NoSql::Query` — MongoDB driver/mongoose query documents; code operators flagged under code-injection sinks (`$where`)
+- **Java**: `BasicDBObject.parse(userInput)`; cast to `com.mongodb.DBObject`; `JSON.parse` → Mongo object
+- **Go**: `NoSql::Query` — MongoDB Go driver query construction
+
+**Sanitizers / barriers**
+- MongoDB `$eq` operator wrapping user value
+- `typeof input === 'string'` / `isinstance(input, str)` validation before query
+- Go/Java: `SimpleTypeSanitizer` (numeric/boolean)
+- Model barriers: `nosql-injection` (Go, JS)
+- Python: string-only sinks vs dict sinks — type validation on string path acts as guard via flow state
+
+Commonly affected languages: Python, JavaScript, Go, Java.
+
+**Examples**
+- **VULN**: `collection.deleteOne({ _id: req.body.id })` when `req.body.id` can be `{"$gt": ""}`
+- **SAFE**: `collection.deleteOne({ _id: { $eq: req.body.id } })` or reject non-string types
+
+## Vulnerable Conditions
+
+- User input reaches query document without type validation
+- JSON body parsed into object used directly as filter (`find(req.body)`)
+- `$where` clause contains interpolated user string (also code-injection class in JavaScript)
+
+## Safe Patterns
+
+- Explicit string type check before query field assignment
+- `$eq` (or equivalent) to force literal interpretation
+- Never pass raw `request.json` / `req.body` as entire query object
+
+## Common False Alarms
+
+- Query fields set only from validated `typeof x === 'string'` / `isinstance(x, str)` branches
+- Numeric ObjectId lookups where simple-type sanitizer applies (Go/Java)
+- ORM methods with framework-enforced scalar types (verify — not all ORMs are modeled)
+
+## Business Risk
+
+- Authentication bypass via operator injection (`$gt`, `$ne`, `$regex`)
+- Unauthorized data read/write when filter logic is attacker-controlled
+- Server-side JS execution via MongoDB `$where` (JavaScript code-injection class)
+
+## Core Principle
+
+NoSQL injection exploits schema-less query documents, not SQL quoting. Treat every request field as potentially an operator object until proven a scalar literal.

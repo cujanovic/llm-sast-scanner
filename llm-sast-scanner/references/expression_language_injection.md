@@ -26,6 +26,24 @@ EL injection occurs when user-controlled input is passed into an expression lang
 - Groovy: `new GroovyShell().evaluate(userInput)`, `Eval.me(userInput)`
 - Scripting: `ScriptEngine.eval(userInput)`, `new ScriptEngineManager().getEngineByName("groovy").eval(userInput)`
 
+**Additional sinks by engine** (Java):
+- SpEL: `ExpressionParser.parseExpression` / `parseRaw`; `Expression.getValue(...)` unless arg0 is `SimpleEvaluationContext`
+- OGNL: `Ognl.getValue`, `parseExpression`, `compileExpression`; Struts2 `OgnlValueStack`, `TextParseUtil.translateVariables`; MyBatis OGNL sinks
+- JEXL: `JexlEngine.createScript` / `createExpression` / `createTemplate` (JEXL 2/3) unless engine built with `JexlBuilder.sandbox()` / custom `JexlUberspect`
+- MVEL: `MVEL.eval`, `compileExpression`, `ExpressionCompiler`, `MvelScriptEngine.compile`, `TemplateCompiler`
+- Groovy: `GroovyShell.evaluate`, `GroovyClassLoader.parseClass`, `Eval.me`, `CompilationUnit.addSource`
+- Jakarta EL: `ExpressionFactory.createValueExpression`, EL evaluation APIs
+- BeanShell: `Interpreter.eval` / `source`
+- JShell: `JShell.eval`
+- Jython: Jython script execution
+
+**Sanitizers / barriers**:
+- SpEL: `SimpleEvaluationContext` constructor or `.forReadWriteDataBinding().build()` passed to `getValue`.
+- JEXL: `JexlBuilder.uberspect(...)` / `.sandbox(...)` before `createScript`/`createExpression`.
+- MVEL: numeric/boolean typed data.
+- Groovy: extension barriers on dynamic evaluation paths.
+- OGNL: sandbox via `-Dognl.security.manager` (not auto-detected unless modeled).
+
 ## Vulnerable Code Patterns
 
 ### OGNL (Struts2 / Apache Commons OGNL)
@@ -56,8 +74,10 @@ ExpressionParser parser = new SpelExpressionParser();
 Expression expr = parser.parseExpression(input);  // RCE if input = "T(Runtime).getRuntime().exec('id')"
 Object result = expr.getValue();
 
-// VULNERABLE: SpEL in @Value annotation with user-controlled property
-@Value("#{systemProperties['user.home'] + '/' + userInput}")
+// VULNERABLE: controller passes request param directly to parseExpression
+String userInput = request.getParameter("expr");
+ExpressionParser parser = new SpelExpressionParser();
+parser.parseExpression(userInput).getValue();
 
 // VULNERABLE: SpEL template with user input
 TemplateParserContext ctx = new TemplateParserContext();
@@ -140,7 +160,7 @@ return template;  // if Thymeleaf processes the path as a fragment expression, S
 
 - `SimpleEvaluationContext` used with SpEL — blocks `T(...)` type references and method invocations
 - SpEL used only with property paths on trusted bean objects with no user-controlled expression string
-- OGNL in Struts2 param binding where no version vulnerability applies and OGNL sandbox is in effect (Struts >= 2.5.31 with `struts.ognl.excludedClasses`)
+- OGNL in Struts2 with sandbox/version mitigations (Struts >= 2.5.31, `struts.ognl.excludedClasses`) reduces but does not eliminate risk — still flag `Ognl.getValue(userInput, ...)` when `userInput` is HTTP-driven
 - EL in JSP rendering where user data is passed as a value binding argument (the *value*, not the *expression itself*)
 
 ## PHP/Python/Node.js EL-Equivalent Patterns
@@ -199,3 +219,37 @@ fn();
 | PHP eval() with user input | Critical |
 | Python eval()/exec() with user input | Critical |
 | Thymeleaf fragment expression injection | High |
+
+## Language one-liners
+
+**Java/Spring**
+- **VULN**: `new SpelExpressionParser().parseExpression(request.getParameter("q")).getValue()` — no `SimpleEvaluationContext`.
+- **SAFE**: `parser.parseExpression(input).getValue(SimpleEvaluationContext.forReadOnlyDataBinding().build())`.
+- **VULN**: `Ognl.getValue(userExpr, ctx, root)` with HTTP-derived `userExpr`.
+- **VULN**: `new GroovyShell().evaluate(userScript)` / `MVEL.eval(userExpr)`.
+
+**JS/Node**
+- **VULN**: `eval(req.body.code)` / `vm.runInThisContext(userInput)`.
+- **VULN**: `obj[userKey]()` when `userKey` is remote.
+
+**Python**
+- **VULN**: `eval(request.args['expr'])` (not template injection unless building a Jinja template string).
+
+**Go / C#**
+- No dedicated SpEL/OGNL/MVEL detection; flag dynamic evaluation (`ScriptEngine`, Roslyn scripting) manually.
+
+## Common False Alarms
+
+- SpEL with `SimpleEvaluationContext` on the `getValue` call — not flagged.
+- JEXL engine from sandboxed `JexlBuilder` — not flagged for createScript/createExpression.
+- MVEL sink receiving only numeric/boolean — sanitized.
+- Property-path SpEL on a trusted bean where the *expression string* is constant — no remote-to-parse flow.
+- Struts OGNL without vulnerable version/path — downgrade per project rules; still flag sink if taint reaches `Ognl.getValue`.
+
+## Business Risk
+
+EL evaluators run with JVM method access; one attacker-controlled expression string typically equals RCE (SpEL `T(Runtime)`, OGNL chains, GroovyShell, MVEL, JEXL without sandbox).
+
+## Core Principle
+
+Treat the expression *string* as code, not data. Restrict evaluation context (SpEL `SimpleEvaluationContext`, JEXL sandbox) or eliminate user influence on the expression entirely.

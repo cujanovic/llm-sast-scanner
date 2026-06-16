@@ -160,7 +160,7 @@ Information disclosure is an amplifier. Convert leaks into precise, minimal expl
 - **VULN**: `DEBUG = True` in production Django settings
 - **VULN**: `app.config['PROPAGATE_EXCEPTIONS'] = True` + traceback returned in response
 - **VULN**: `return str(e)` or `return traceback.format_exc()` inside an error handler
-- **SAFE**: `DEBUG = os.environ.get('DEBUG', 'False') == 'True'`
+- **SAFE**: `DEBUG = os.environ.get('DEBUG', 'False') == 'True'` — only safe when production env does not set `DEBUG=True`; env-dependent, not inherently safe
 
 ### JavaScript (Node.js / Express)
 - **VULN**: `res.json({ error: err.stack })` — stack trace leaked to client
@@ -181,3 +181,53 @@ Production builds that emit and deploy `.map` files (or inline maps) hand attack
 - **VULN**: `GENERATE_SOURCEMAP=true` (CRA) or any pipeline that copies `*.map` to the public/CDN dir
 - **Note**: this is the static signature of the "reverse the bundle via the `.map`" technique; the `//# sourceMappingURL=` comment in shipped JS is the runtime tell.
 - **SAFE**: source maps disabled for prod, or uploaded to an access-controlled error-tracking service (e.g. Sentry) and **not** served publicly.
+
+## Automated Detection Patterns
+
+### Stack trace / exception exposure (CWE-209)
+
+Commonly affected languages: JavaScript, Java, Python, Go, Ruby, C#.
+
+**Sources**: exceptions, stack traces flowing from catch blocks.
+
+**Sinks**: HTTP response bodies (`res.send(err.stack)`), `sendError` with exception, error handlers returning raw exception objects.
+
+**Sanitizers**: generic error messages to client; server-only logging; debug flags off in production.
+
+### Sensitive logging (CWE-312 / CWE-532)
+
+Commonly affected languages: Java, JavaScript, Python, Go, Ruby, Rust, Swift.
+
+**Sources**: credentials, tokens, PII fields marked sensitive in type/annotation models.
+
+**Sinks**: log appenders (Log4j/SLF4J), clear-text logging of passwords/tokens.
+
+**Sanitizers**: structured logging with redaction; avoid logging sensitive fields.
+
+### Sensitive data in GET query (CWE-598)
+
+Commonly affected languages: JavaScript, Ruby.
+
+**Sinks**: passwords, tokens, or PII read from GET query parameters.
+
+### Cross-window information leak (CWE-201)
+
+**JavaScript**: `postMessage(data, '*')` with unrestricted target origin.
+
+**Sanitizers**: fixed postMessage target origin.
+
+### Build artifact / file exposure (CWE-200)
+
+**JavaScript**: sensitive data in build artifacts; private file exposure; local file served over HTTP.
+
+**C#**: exposure in transmitted data (CWE-201); exposure of private information (CWE-359).
+
+**C++**: exposed system data (CWE-497).
+
+### Debug mode exposure (CWE-215 / CWE-489)
+
+**Python**: Flask app run in debug mode (`app.run(debug=True)`).
+
+**C#**: ASP.NET debug binary in production.
+
+**No automated query**: `.git`/source-map exposure (static artifact hunt). GraphQL introspection, Swagger UI exposure—not dedicated queries. Align with existing FALSE POSITIVE rules: config-file credentials → `default_credentials`, not info disclosure.

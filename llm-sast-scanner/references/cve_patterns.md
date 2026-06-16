@@ -40,7 +40,7 @@ Even when the library is up to date, the pattern signals an architectural risk w
 
 ### Django ALLOWED_HOSTS
 - **VULN**: `ALLOWED_HOSTS = ['*']` — allows Host header injection, cache poisoning
-- **VULN**: `ALLOWED_HOSTS = []` in production — may fall back to wildcard in some configurations
+- **NOTE**: `ALLOWED_HOSTS = []` with `DEBUG=False` rejects all requests (DisallowedHost / 400) — does NOT fall back to wildcard
 - **SAFE**: `ALLOWED_HOSTS = ['example.com', 'www.example.com']`
 
 ### Jinja2 Sandbox Escape

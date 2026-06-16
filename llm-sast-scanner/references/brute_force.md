@@ -219,3 +219,8 @@ if (isset($_POST['admin_password']) && $_POST['admin_password'] === ADMIN_PASSWO
 - Do NOT emit `brute_force` merely because an authentication endpoint exists without visible rate limiting. The absence of rate limiting code in the scanned repository does NOT confirm brute force vulnerability — rate limiting may be implemented at the infrastructure level (WAF, reverse proxy, API gateway, load balancer) outside the application code.
 - Do NOT emit `brute_force` when the project is a vulnerability demonstration or benchmark — focus on whether brute force is an explicit vulnerability category demonstrated by the project, not an incidental missing defense.
 - Only emit when there is CONFIRMED: (a) a login/auth endpoint accepting credentials, AND (b) explicit evidence the endpoint processes unlimited attempts (e.g., a loop, no counter, no lockout after N attempts in the application code).
+- Do NOT infer CWE-307 from generic missing-rate-limiting findings alone unless the handler is clearly an authentication endpoint and no lockout exists in code — that query class covers DoS on expensive handlers, not login-specific lockout.
+
+## Analyst Notes
+
+Brute-force resistance (CWE-307) is not modeled as a dedicated auth-endpoint property in standard SAST packs. Adjacent automated findings may surface related gaps — e.g., Express handlers doing expensive work without rate-limit middleware (DoS-oriented, not login-specific lockout), or hardcoded credential comparison at login (different vulnerability class). For brute-force findings, continue using the manual detection rules above.

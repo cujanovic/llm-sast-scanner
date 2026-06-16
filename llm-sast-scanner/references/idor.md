@@ -98,7 +98,7 @@ Object-level authorization failures (BOLA/IDOR) expose data and permit unauthori
 - Overfetch through fragments targeting privileged types
 
 ```graphql
-query IDOR {
+query CrossAccountAccess {
   me { id }
   u1: user(id: "VXNlcjo0NTY=") { email billing { last4 } }
   u2: node(id: "VXNlcjo0NTc=") { ... on User { email } }
@@ -211,6 +211,17 @@ query IDOR {
 ## Core Principle
 
 Authorization must bind the subject, the action, and the specific object on every request, independent of identifier opacity or transport protocol. Any gap in that binding creates a vulnerability.
+
+## C# ASP.NET Detection Patterns
+
+Config/heuristic detection on ASP.NET action methods. Flags methods that accept a user-controlled ID parameter to load or modify a resource when no authorization check binds that resource to the current user.
+
+Checks WebForms and MVC patterns — methods that fetch entities by ID without `User.IsInRole`, `[Authorize]`, or resource-owner comparison (e.g. `comment.AuthorId == UserId`).
+
+No IDOR/BOLA detection in Java, JavaScript, Python, Go, Ruby, or Rust — use manual source rules below.
+
+**VULN (WebForms/MVC)**: `Comment GetComment(int id) => db.Comments.Find(id)` — no check that current user owns the comment.
+**SAFE**: `if (comment.AuthorId != currentUserId) return Forbid();` or `[Authorize]` with resource-based policy for admin-only cross-user access.
 
 ## Java Source Detection Rules
 

@@ -20,7 +20,7 @@ SSTI arises when an application passes user-supplied data into a template engine
 
 ### Test Payloads
 - Jinja2 / Twig: `{{7*7}}` → expects `49`
-- Mako / Smarty: `${7*7}` → expects `49`
+- Mako: `${7*7}` / Smarty: `{7*7}` → expects `49`
 - EJS / ERB: `<%= 7*7 %>` → expects `49`
 
 ## Exploitation Chain
@@ -36,6 +36,10 @@ Full RCE is achievable through class-hierarchy traversal.
 - `render_template('fixed_name.html', var=user_input)` — safe; template path is hardcoded.
 - `Environment().get_template('report.html').render(data=row)` — safe; template is loaded from disk.
 - Only flag cases where the template **content string** itself originates from user-controlled input.
+- User input bound as a template *variable* (`render('page.html', name=user)`) — not a sink.
+- Java numeric/boolean template arguments — simple-type sanitizers treat these as safe.
+- Ruby/Python string compared to a constant or allowlisted set before template construction.
+- Express `res.render()` with user-controlled *template object* only fires when the router uses a known vulnerable view engine configuration (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, or `whiskers`).
 
 ---
 
@@ -100,3 +104,34 @@ Full RCE is achievable through class-hierarchy traversal.
 - In `SecExample`, if the visible source snapshot still contains `templates/spel/spel.html`, `templates/spel/speloutput.html`, and an explicit SpEL payload hint, preserve `spel_injection` as at least `LIKELY` even when the controller or parser helper is missing from the checked-in Java sources.
 - In benchmark/demo repositories, once a dedicated template or expression-injection module has been confirmed from a reachable route plus checked-in template evidence, do not drop the benchmark tag on a later rerun solely because the parser helper is indirect, relocated, or outside the smaller file subset reviewed in that pass.
 - In `JavaSecLab`, `SSTIController.vul1` returning `"vul/ssti/" + para` or similar user-controlled view names should preserve project tag `ssti`, while explicit `parseExpression(...)` or SpEL execution should stay under `spel_injection`.
+
+## Source → Sink Pattern
+
+**Sources**: remote user input — HTTP params, body, headers, cookies, and other remote input (Python/Ruby/JS threat-model sources; Java active threat-model sources).
+
+**Sinks** (template *source string*, not variable slot):
+- **Java** (`template-injection` sinks): Velocity `RuntimeServices.evaluate` / `parse`, `VelocityEngine.evaluate` / `mergeTemplate`; FreeMarker `Template` constructors and `StringTemplateLoader.putTemplate`; Pebble `getTemplate` / `getLiteralTemplate`; Jinjava `render` / `renderForResult`; Thymeleaf `ITemplateEngine.process` / `processThrottled`.
+- **Python** (template construction source argument): Jinja2 `Template` / `Environment.from_string`, Flask `render_template_string`, Mako `Template`, Django/Bottle/Genshi/Chameleon/Chevron/Airspeed/TRender template constructors.
+- **Ruby**: ERB `TemplateRendering.getTemplate()` — user input passed as template body.
+- **JavaScript**: user-controlled *template object* passed to Express `res.render()` when view engine is `ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, or `whiskers`.
+
+**Sanitizers / barriers**:
+- Java: simple/numeric/boolean types not treated as template code.
+- Python/Ruby: comparison against constant; Ruby also allowlist of template names.
+
+Commonly affected languages: Java, Python, Ruby, JavaScript. No dedicated SSTI coverage for Go, C#, PHP. Related Spring view/SpEL paths should be tagged `spel_injection`, not `ssti`.
+
+## Safe Patterns
+
+- Fixed template path/name with user data only in the render context map.
+- Jinja2: `SandboxedEnvironment` for unavoidable dynamic templates.
+- Spring: `@ResponseBody` / `@RestController` so return value is not interpreted as a view name.
+- Express: avoid passing user objects as the template argument to `res.render()` on vulnerable engines.
+
+## Business Risk
+
+Attacker-controlled template syntax yields server-side code execution (Jinja2/Mako/Velocity/FreeMarker) or, on Express misconfiguration, local file read and RCE via template object injection.
+
+## Core Principle
+
+Never pass untrusted data as the template *source*; only as escaped data bound into a fixed template. Separate Spring view-name manipulation and SpEL from generic SSTI tagging.

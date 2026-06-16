@@ -5,7 +5,7 @@ description: Server-Side Prototype Pollution (SSPP) — pollution sinks (merge /
 
 # Server-Side Prototype Pollution (SSPP)
 
-**CWE coverage**: CWE-1321 (primary, *Improperly Controlled Modification of Object Prototype Attributes*) plus the downstream CWEs your gadget actually lands — CodeQL maps the same query family (`js/prototype-pollution-utility`, `js/prototype-polluting-assignment`, `js/prototype-polluting-merge-call`) to **CWE-78** (OS command injection), **CWE-79** (XSS), **CWE-94** (code injection), **CWE-400** (resource exhaustion), **CWE-471** (modification of assumed-immutable data), **CWE-915** (mass assignment). Choose the downstream CWE that matches the gadget reached.
+**CWE coverage**: CWE-1321 (primary, *Improperly Controlled Modification of Object Prototype Attributes*) plus the downstream CWEs your gadget actually lands — prototype-pollution detection maps to **CWE-78** (OS command injection), **CWE-79** (XSS), **CWE-94** (code injection), **CWE-400** (resource exhaustion), **CWE-471** (modification of assumed-immutable data), **CWE-915** (mass assignment). Choose the downstream CWE that matches the gadget reached.
 
 Server-Side Prototype Pollution lets an attacker write to `Object.prototype` (or another shared prototype) on the server. Because every plain JavaScript object inherits from `Object.prototype`, a single polluted key changes the *default* value seen by every undefined-property read in the entire process. SSPP itself is rarely the impact — it is an **amplifier**: pollution becomes RCE, SSRF, command injection, path traversal, privilege escalation, or DoS only when combined with a downstream **gadget**, i.e. existing code that reads an undefined property and uses it as a security-sensitive parameter (`shell`, `env.NODE_OPTIONS`, `hostname`, `socketPath`, `cwd`, `mode`, `escapeFunction`, `sourceURL`, etc.).
 
@@ -25,7 +25,6 @@ A vulnerable application therefore needs two things to be exploitable:
 > - Jake-Schoellkopf — *Server-Side_Prototype_Pollution: What is it? How to detect it? How to exploit it?* — walks the PortSwigger Web Security Academy SSPP labs end-to-end (`https://github.com/Jake-Schoellkopf/Server-Side_Prototype_Pollution`)
 > - Kirill89 — *prototype-pollution-explained* — minimal vulnerable chat-server demo using lodash CVE-2018-16487 to bypass authorization via `__proto__: {canDelete: true}` (`https://github.com/Kirill89/prototype-pollution-explained`)
 > - Serhatcck — *server-side-prototype-pollution* — full Node.js + MySQL vulnerable web app for hands-on practice (`https://github.com/Serhatcck/server-side-prototype-pollution`)
-> - GitHub CodeQL — query help for `js/prototype-pollution-utility`, `js/prototype-polluting-assignment`, `js/prototype-polluting-merge-call` (`https://codeql.github.com/codeql-query-help/javascript/js-prototype-pollution-utility/`)
 
 ---
 
@@ -445,7 +444,7 @@ The full live catalog is maintained at `https://github.com/KTH-LangSec/server-si
 | HackerOne #852613, #861744 | Kibana | 7.6.2 / 7.7.0 | Pollution → `lodash.template.sourceURL` → RCE |
 | CVE-2022-24760 / -39396 / -41878 / -41879 / -36475 | Parse Server | 4.10.6 / 5.3.1 / 6.2.1 | Pollution → `bson.evalFunctions` → RCE |
 | CVE-2023-23917 | Rocket.Chat | 5.1.5 | Pollution → `bson.evalFunctions` → RCE |
-| CVE-2023-31414 | Kibana | 8.7.0 | Pollution → `require.main2` → RCE |
+| CVE-2023-31414 | Kibana | 8.7.0 | Pollution → `require.main` → RCE |
 | CVE-2023-31415 | Kibana | 8.7.0 | Pollution → `nodemailer` → ACI |
 | CVE-2020-7699 | `express-fileupload` | <= 1.1.6 | `parseNested` field-name pollution |
 | Blitz.js HackerOne write-up | Blitz.js | (see post) | Body pollution → template gadget → RCE |
@@ -535,8 +534,8 @@ function safeMerge(a, b) {
 }
 ```
 
-**SAFE — destination-side own-property guard (CodeQL `js/prototype-pollution-utility` recommendation)**
-The CodeQL query help recommends recursing only when the destination already has the key as its *own* property. This is a stronger structural guard than a `__proto__`/`constructor` blocklist because it eliminates the entire class of "walk into `Object.prototype` via any inherited key" — not just the two well-known ones.
+**SAFE — destination-side own-property guard (recommended structural guard)**
+Recursing only when the destination already has the key as its *own* property is a stronger structural guard than a `__proto__`/`constructor` blocklist because it eliminates the entire class of "walk into `Object.prototype` via any inherited key" — not just the two well-known ones.
 ```javascript
 function merge(dst, src) {
   for (const key in src) {
@@ -550,7 +549,7 @@ function merge(dst, src) {
 }
 ```
 
-**SAFE — explicit blocklist combined with own-property guard (CodeQL recommendation #2)**
+**SAFE — explicit blocklist combined with own-property guard**
 ```javascript
 function merge(dst, src) {
   for (const key in src) {
@@ -695,26 +694,32 @@ Recommend `structuredClone` / `Reflect.set` / shallow-spread in remediation when
 
 ## Named Source-Code Tools (research analyzers)
 
-For deeper static analysis beyond CodeQL, these academic / open-source tools target SSPP specifically:
+For deeper static analysis, these academic / open-source tools target SSPP specifically:
 
-- **Silent Spring** (Shcherbakov et al., USENIX 2023) — `https://github.com/KTH-LangSec/silent-spring` — CodeQL-based pipeline that systematically detects pollution sinks and matches them against the Node.js stdlib gadget set. Produces ranked findings; underpins many of the table entries above.
+- **Silent Spring** (Shcherbakov et al., USENIX 2023) — `https://github.com/KTH-LangSec/silent-spring` — static-analysis pipeline that systematically detects pollution sinks and matches them against the Node.js stdlib gadget set. Produces ranked findings; underpins many of the table entries above.
 - **GHunter** (Cornelissen et al., USENIX 2024) — `https://github.com/KTH-LangSec/ghunter` — universal prototype-pollution gadget detector across Node.js and Deno runtimes. Outputs the gadget catalogs mirrored in this reference.
 - **Dasty** — `https://github.com/KTH-LangSec/Dasty` — automated pipeline for finding SSPP gadgets in NPM packages. The NPM-package table in this reference (better-queue, fluent-ffmpeg, gh-pages, cross-spawn, nodemailer, …) is largely Dasty-discovered.
 - **UoPGadget** — `https://github.com/jackfromeast/UoPGadget` — Undefined-Oriented Programming gadget detector specialised for template-engine ACE chains (ejs, pug, doT, hamlet, mote, jade, ect, ractive.js, saker, dustjs).
 
-When the user asks for "deep" SSPP triage on a real codebase, recommending one of these tools alongside CodeQL is generally higher-value than a hand-rolled grep.
+When the user asks for "deep" SSPP triage on a real codebase, recommending one of these tools is generally higher-value than a hand-rolled grep.
 
-## CodeQL Queries (cross-reference for triagers)
+## Static Analysis Coverage
 
-If the target has CodeQL JavaScript suites enabled, three sibling queries cover SSPP — running all three together gives the broadest signal:
+Commonly affected languages: JavaScript/TypeScript only (server-side Node). Tagged CWEs include 915, 78, 79, 94, 400, 471.
 
-| Query ID | Detects |
-|----------|---------|
-| `js/prototype-polluting-assignment` | Direct assignments to `obj[user]`/`obj[user][..]` where `user` could be `__proto__` or `constructor` |
-| `js/prototype-polluting-merge-call` | Calls to known-vulnerable merge/extend functions (`lodash.merge`, `_.defaultsDeep`, `extend`, `just-extend`, `merge.recursive`, `jQuery.extend(true, …)`, `Hoek.merge`/`applyToDefaults`) with attacker-influenced sources |
-| `js/prototype-pollution-utility` | Helper functions inside the codebase that *themselves* perform polluting recursive copies / deep assignments — i.e. the application's own merge implementation is the pollution sink |
+Three complementary detection patterns cover SSPP — running all three together gives the broadest signal:
 
-The third query is the most useful in practice because it finds hand-rolled merges that are not on the well-known library list. CodeQL classifies all three under CWE-78 / 79 / 94 / 400 / 471 / 915 — match your finding's downstream CWE to the gadget reached.
+1. **Direct polluting assignment** — `obj[userKey] = …` where key may be `__proto__`/`constructor`; dynamic property write on object with real prototype.
+2. **Known polluting library calls** — calls to `_.merge`, `_.defaultsDeep`, `_.set`, `deepmerge`, `Hoek.merge`, `jQuery.extend(true,…)`, `just-extend`, etc. with tainted object argument.
+3. **Custom recursive merge/set helpers** — hand-rolled `for…in` copy matching polluting shape; most useful in practice because it finds hand-rolled merges not on the well-known library list.
+
+Classify findings under CWE-78 / 79 / 94 / 400 / 471 / 915 — match your finding's downstream CWE to the gadget reached.
+
+**Sources**: tainted objects (`req.body`, `req.query` with nested keys), user-controlled strings flowing through `JSON.parse`.
+
+**Sanitizers**: `Object.create(null)` target; own-property guard on destination; blocklist for `__proto__`/`constructor`/`prototype`; plain-object guard; `Object.freeze(Object.prototype)` (partial).
+
+Python/Go/Java/Ruby/Rust server-side prototype pollution is not modeled (language lacks mutable object prototype chain). PHP `parse_str` array pollution is a separate class.
 
 ---
 
@@ -737,7 +742,7 @@ The third query is the most useful in practice because it finds hand-rolled merg
 - A merge where the `target` is `Object.create(null)` *and* the merged value never escapes (no further write to `Object.prototype`).
 - Pollution sinks that strip `__proto__`/`constructor`/`prototype` via reviver, allowlist, or own-property guard before walking nested keys.
 - `_.set` / `_.setWith` where the path argument is fully developer-controlled (constant, derived from a literal map, or from a strict allowlist).
-- Patched library versions: `lodash@4.17.21+`, `hoek@4.2.1+`/`6.1.3+`, `deepmerge@4.2.2+` (with default options), `qs@6.10.x+` defaults, `express-fileupload@1.1.10+`, `node@v18.19.0+` (for the `require.main2` gadget specifically).
+- Patched library versions: `lodash@4.17.21+`, `hoek@4.2.1+`/`6.1.3+`, `deepmerge@4.2.2+` (with default options), `qs@6.10.x+` defaults, `express-fileupload@1.1.10+`, `node@v18.19.0+` (for the `require.main` gadget specifically).
 - Gadget-side warnings without a paired pollution sink in the same process. Without the sink, the gadget cannot be triggered remotely. Capped at INFO unless a separate finding establishes the sink.
 - Code that runs `Object.freeze(Object.prototype)` at startup, *and* the merge target is not a known-tainted prototype-chain object (Map/Set/typed array). Freeze raises throws in strict mode and silently no-ops in sloppy mode — verify the runtime mode before declaring SAFE.
 

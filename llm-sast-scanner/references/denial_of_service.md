@@ -97,8 +97,9 @@ while ((entry = zis.getNextEntry()) != null) {
 // SAFE: enforce uncompressed size limit
 long totalSize = 0;
 while ((entry = zis.getNextEntry()) != null) {
-    totalSize += entry.getSize();
+    totalSize += entry.getSize();  // often -1 for stored/unknown entries — do not rely on getSize() alone
     if (totalSize > MAX_DECOMPRESSED_BYTES) throw new IOException("Zip bomb detected");
+    // Also cap actual bytes read during decompression (count zis.read() output), not just entry metadata
 }
 ```
 
@@ -220,7 +221,7 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 - `ZipInputStream` extraction with no total-size limit on user-uploaded files → **CONFIRM**
 - `DocumentBuilderFactory` without `disallow-doctype-decl` feature processing user XML → **CONFIRM** (billion laughs possible)
 - DB query / `findAll()` with user-controlled unbounded page size (no upper bound enforcement) → **CONFIRM**
-- Auth endpoint with no rate limiting or attempt counter → **CONFIRM** (enables brute force DoS of account lockout)
+- Missing rate limiting on auth endpoints → classify under `brute_force`, NOT `denial_of_service` (requires an actual unbounded/amplifiable resource sink)
 - `tarfile.extractall()` / `ZipFile.extractall()` without member size validation → **CONFIRM**
 
 ### FALSE POSITIVE
@@ -241,5 +242,17 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 | Zip/Tar decompression bomb without size limit | High |
 | Unbounded file upload (no size limit) | Medium |
 | Missing pagination on bulk data endpoints | Medium |
-| Missing rate limiting on auth/expensive endpoints | Medium |
+| Missing rate limiting on auth endpoints | N/A — use `brute_force` tag |
 | User-controlled hash iterations (bcrypt rounds) | Medium |
+
+## Sources, Sinks & Sanitizers
+
+**Sources**: remote user input controlling regex pattern, allocation size, loop bound, XML payload, archive stream, JSON validation depth.
+
+**Sinks**: `RegExp`/`Pattern.compile`, `Buffer.alloc(n)`, large array loops, `setTimeout(ms)`, XML parsers with entity expansion, unzip without size cap, Express handlers without rate limit middleware.
+
+**Sanitizers**: constant regex patterns; capped `Math.min(size, MAX)`; `disallow-doctype-decl` / secure XML features; rate-limit middleware (`express-rate-limit`); `ajv` without `allErrors: true`.
+
+Commonly affected languages: JavaScript, Java, Python, Ruby, C#, Go, Rust, Swift.
+
+**Not modeled**: database calls in loops; Java hash-collision DoS (HashDoS). Generic "missing pagination" without tainted page size requires explicit unbounded tainted allocation for HIGH severity per existing analyst rules.

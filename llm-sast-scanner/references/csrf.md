@@ -58,6 +58,21 @@ Cross-site request forgery exploits ambient authority — cookies and HTTP authe
 
 ## Vulnerability Patterns
 
+### Configuration-Level CSRF Disable
+
+Automated checks flag **framework CSRF protection disabled or weakened**, not per-endpoint missing tokens in all stacks:
+
+| Pattern | Languages |
+|---------|-----------|
+| Spring `.csrf().disable()` / `csrf.disable()` in `SecurityFilterChain` | Java |
+| Django `CSRF_*` verification disabled globally without local override | Python |
+| Rails `protect_from_forgery` verification off or weak `:null_session` downgrade | Ruby |
+| Express cookie session routes without `csurf`/`lusca`/`express.csrf` middleware | JavaScript |
+| ASP.NET MVC/Core POST actions missing `[ValidateAntiForgeryToken]` when project uses tokens elsewhere | C# |
+| OAuth2 `AuthCodeURL` with constant `state` parameter | Go |
+| Spring/Stapler state change via safe HTTP method (GET/HEAD) | Java |
+| JSONP callback parameter reflected in GET response without validation | Java |
+
 ### Navigation CSRF
 
 - An auto-submitting form targeting the victim origin succeeds when cookies are automatically sent and no token or origin check is enforced
@@ -178,6 +193,14 @@ Cross-site request forgery exploits ambient authority — cookies and HTTP authe
 - Only idempotent, non-sensitive read operations are reachable cross-site
 - Login/logout CSRF producing only generic session confusion without a concrete, demonstrable security consequence should generally not be reported
 - Endpoints protected exclusively by bearer-token or header-based authentication rather than browser cookies are not CSRF-prone
+- Missing token validation on JS routes: routes reading cookies only for CSRF/captcha checks (`csrf`, `xsrf`, `captcha` property names) are excluded
+- Missing token validation on C#: projects with no anti-forgery token usage anywhere, or global anti-forgery filters, are excluded
+- CSRF protection disabled on Python: test settings paths and projects with mixed vulnerable/non-vulnerable settings modules
+- Constant OAuth2 state: out-of-band OAuth (`urn:ietf:wg:oauth:2.0:oob`, localhost listener redirects)
+
+## Recognized Mitigations
+
+**JavaScript**: `csurf`, `tiny-csrf`, `lusca` with `csrf`, `express.csrf`, Fastify `csrfProtection`; CSRF token property reads on `(csrf|xsrf)` fields.
 
 ## Java Source Detection Rules
 

@@ -162,6 +162,38 @@ Verification must bind the token to the correct issuer, audience, key, and clien
 - Cookie flag issues alone are not `authentication_jwt` unless a JWT validation or token-trust flaw is present.
 - Emit `jwt` only when an attacker-supplied token from a header, cookie, or parameter is actually verified or accepted by a mapped vulnerable route. Helper classes, token-generation demos, and storage-only examples are insufficient alone.
 
+## Source → Sink Patterns
+
+### Java — Missing JWT Signature Check
+
+- **Source**: `JwtParser.setSigningKey(...)` / `setSigningKeyResolver(...)` — a signing key is configured on the parser.
+- **Sink**: Insecure parse on the same parser qualifier — `parse(token)`, `parseClaimsJwt(token)`, `parsePlaintextJwt(token)`, or `parse(token, handler)` where the handler overrides `onClaimsJwt`/`onPlaintextJwt` without extending `JwtHandlerAdapter`.
+- **Sanitizer**: Use `parseClaimsJws(token)` / `parsePlaintextJws(token)`, or override `onClaimsJws` / `onPlaintextJws` on `JwtHandlerAdapter`.
+
+**VULN**: `parser.setSigningKey(key).parse(untrustedToken)` — jjwt accepts empty-signature tokens via `parse`.
+**SAFE**: `parser.setSigningKey(key).parseClaimsJws(untrustedToken)`.
+
+### JavaScript — Decode Without Verification
+
+- **Source**: Remote user input — e.g. `req.headers.authorization`.
+- **Sink (unverified)**: `jwt.decode()`, `jwt-decode()`, `jwt-simple.decode(token, key, true)` (noVerify), `jose.decodeJwt()`.
+- **Sanitizer**: Subsequent verified decode on the same token — `jwt.verify()`, `jose.jwtVerify()`, `jwt-simple.decode(token, key)` without noVerify.
+
+**VULN**: `jwtJsonwebtoken.decode(UserToken)` used for auth decisions.
+**SAFE**: `jwtJsonwebtoken.verify(UserToken, getSecret())`.
+
+### Python — Missing Secret or Public Key Verification
+
+- **Sink**: Any `JwtDecoding` where `verifiesSignature()` is false — PyJWT `decode(..., options={"verify_signature": False})`, python-jose without key, Authlib decode without verification.
+
+**VULN**: `jwt.decode(token, options={"verify_signature": False})`.
+**SAFE**: `jwt.decode(token, SECRET_KEY, algorithms=["HS256"])` with `verify=True` (default).
+
+### Auth0 / Ruby Patterns
+
+- **Auth0NoVerifier (Java)**: `JWT.decode(token)` or `JWT.require(...).build().verify(token)` missing — reading claims from unverified Auth0 tokens.
+- **EmptyJWTSecret (Ruby)**: JWT encoded with empty secret or `alg: "none"`.
+
 ## Session Fixation Detection
 
 See dedicated `references/session_fixation.md` for CWE-384 detection rules, Java Servlet patterns, and Spring Security configuration checks.

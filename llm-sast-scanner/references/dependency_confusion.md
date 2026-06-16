@@ -98,4 +98,83 @@ Flag a dependency when ALL hold:
 
 ## Core Principle
 
-A private dependency is safe only when its name/namespace is **bound to a trusted private source** at resolution time. Any internal package that a public registry could serve, with no private pin, is a dependency-confusion candidate worth confirming.
+A private dependency is safe only when its name/namespace is **bound to a trusted private source** at resolution time. Any internal package that a public registry could serve, with no private pin, is a **dependency-confusion candidate** worth confirming.
+
+---
+
+## Insecure Resolution Channels (Adjacent CWE-829 / CWE-300)
+
+Namespace-confusion / dependency-substitution (CWE-1357) is covered by the candidate heuristics in this reference. **Adjacent supply-chain transport and repository-trust issues** — insecure resolution channels — are detectable separately:
+
+- **Java Maven**: `<repository><url>` using `http://` or `ftp://` (excluding `localhost`) and not disabled (CWE-300, CWE-829)
+- **Java Maven**: repository URL containing `.bintray.com` — deprecated host, supply-chain sunset risk (CWE-1104)
+- **Ruby Bundler**: gem `source` or `remote` URL using unencrypted protocol (CWE-300, CWE-829)
+- **JavaScript**: taint from HTTP URL to download of sensitive file types — executables, archives (CWE-829)
+- **JavaScript**: script/import from URL without integrity check (CWE-830)
+- **JavaScript**: script/content from domain not on trusted allowlist, no SRI (CWE-830)
+
+**Not covered by automated queries**: npm `@scope` confusion, NuGet `packageSourceMapping` gaps, Go `GOPRIVATE` omissions, pip `--extra-index-url` merging, Composer Packagist shadowing, or Cargo alternate-registry misconfiguration — those are covered only by the candidate heuristics in this reference.
+
+### CWE-829 / CWE-300 — Insecure dependency resolution
+
+**Java Maven sources:** `DeclaredRepository` XML elements in `pom.xml` (and parent POMs via Maven model).
+
+**Java pattern (non-HTTPS repository URL):**
+```xml
+<repository>
+  <url>http://internal.repo/artifacts</url>  <!-- BAD: http:// or ftp:// -->
+</repository>
+```
+
+**SAFE:** `https://` repository URLs; `localhost` HTTP allowed by regex exception.
+
+**Java Bintray:** any active repository URL matching `%.bintray.com%` — deprecated host, supply-chain sunset risk.
+
+**Ruby pattern:** gem `source` or `remote` URL using non-HTTPS protocol — flags unencrypted gem hosts.
+
+### CWE-829 — Insecure download (JavaScript)
+
+**Sources:** HTTP (non-TLS) URLs from remote/network input.
+
+**Sinks:** download APIs for sensitive file types (executables, archives).
+
+**Sanitizers:** HTTPS URLs; modeled barriers in the download dataflow config.
+
+### CWE-830 — Untrusted source / domain (JavaScript)
+
+**Sinks:** dynamic `<script src=...>`, `import()`, `require()` of remote URLs, and similar inclusion APIs.
+
+**Pattern split:**
+- Untrusted source — any remote inclusion without integrity/subresource integrity
+- Untrusted domain — URL host not on the trusted-domain allowlist
+
+**Sanitizers:** Subresource Integrity (`integrity=` attribute); trusted domain allowlist.
+
+**BAD (conceptual):**
+```html
+<script src="http://cdn.example.com/lib.js"></script>  <!-- no integrity, HTTP -->
+```
+
+**SAFE:**
+```html
+<script src="https://cdn.example.com/lib.js"
+        integrity="sha384-..." crossorigin="anonymous"></script>
+```
+
+### Candidate vs transport-issue triage
+
+| This reference (candidate) | Confirmed transport/repo issue |
+|---|---|
+| `@acme/pkg` with no scope registry pin | not detected — manual registry lookup required |
+| Internal gem via `source "http://rubygems.org"` only | not detected — unless gem *host* URL is HTTP |
+| Maven resolves from HTTP internal repo | non-HTTPS Maven repository URL |
+| Build still points at Bintray | Bintray repository URL present |
+| Runtime `fetch('http://.../tool.bin')` in CI script | insecure download of sensitive file |
+
+### Common False Alarms
+
+- **Maven non-HTTPS URL:** `localhost` HTTP repos excluded — CI mirror on `127.0.0.1` not flagged; production HTTP repos are.
+- **Bintray dependency:** flags URL presence, not whether artifacts are actually resolved from Bintray today.
+- **Untrusted source vs domain:** intentionally split — same script may trigger one but not the other depending on allowlist.
+- **No substitution detection:** a perfectly HTTPS-configured project remains vulnerable to public-registry shadowing of internal names — keep candidate severity at Informational until registry ownership check.
+- **Insecure download:** requires sensitive-file download sink — generic `npm install` / `mvn dependency:get` not covered.

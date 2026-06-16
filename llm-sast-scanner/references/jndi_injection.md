@@ -10,7 +10,7 @@ JNDI (Java Naming and Directory Interface) injection occurs when user-controlled
 ## CWE Classification
 
 - **CWE-74**: Improper Neutralization of Special Elements in Output Used by a Downstream Component (parent)
-- **CWE-917**: Improper Neutralization of Special Elements used in an Expression Language Statement (JNDI lookup injection)
+- **CWE-917**: Improper Neutralization of Special Elements used in an Expression Language Statement (secondary/scanner alias — primary classes for JNDI injection are CWE-74 and CWE-502)
 - **CWE-502**: Deserialization of Untrusted Data (remote class/object loading via JNDI)
 - **CWE-918**: Server-Side Request Forgery (when used to reach internal services)
 
@@ -23,6 +23,21 @@ JNDI (Java Naming and Directory Interface) injection occurs when user-controlled
 - `context.lookup(userInput)` — any `javax.naming.Context`
 - `jndiTemplate.lookup(userInput, ...)`
 - Logging frameworks that perform JNDI lookups on `${jndi:...}` patterns in log messages
+- `Context.lookup` / `InitialContext.lookup` name argument
+- `Hashtable.put` / `setProperty` with `Context.PROVIDER_URL` or `"java.naming.provider.url"`
+- Spring LDAP `LdapOperations.lookup`, `search`, `list`, `findByDn`, etc. (name/base DN args)
+- `LdapOperations.search(..., scope=true)` and `unbind(..., recursive=true)` when name is tainted
+- Taint steps: `new CompositeName(tainted)`, `CompoundName.add(tainted)`, `new JMXServiceURL(tainted)`, `JMXConnectorFactory.newJMXConnector`, `new RMIConnector(tainted)`
+- **Log4Shell**: user data flowing into Log4j2 `Logger` methods (`info`, `warn`, `error`, `debug`, etc.) — message lookup substitution; version may not be verified statically
+- **XSLT overlap** (CWE-074, not JNDI): user-controlled XSLT stylesheet → file read/RCE via transform pipeline
+
+**Sanitizers / barriers**:
+- Name validation before lookup (`isValid(name)` pattern)
+- Hardcoded JNDI names — no remote flow
+- Log4j ≥2.15 default, `-Dlog4j2.formatMsgNoLookups=true`, remove `JndiLookup` class — upgrade mitigates (version may not be modeled)
+- `TransformerFactory.setFeature(FEATURE_SECURE_PROCESSING, true)` for XSLT paths
+
+Commonly affected languages: Java (primary); Python, JavaScript, Ruby, and C# require manual review for equivalent patterns.
 
 ## Vulnerable Code Patterns
 
@@ -71,7 +86,7 @@ logger.warn("Request path: {}", request.getRequestURI());
 3. `log4j2.formatMsgNoLookups=false` (default in vulnerable versions)
 
 **SAFE indicators** (Log4Shell):
-- `log4j-core` version >= 2.17.0 (lookups disabled by default)
+- `log4j-core` version >= 2.16.0 closes the JNDI lookup RCE path (CVE-2021-44228/45046); >= 2.17.1 required for fully patched (CVE-2021-45105 DoS, CVE-2021-44832 RCE-via-config)
 - JVM arg `-Dlog4j2.formatMsgNoLookups=true`
 - `LOG4J_FORMAT_MSG_NO_LOOKUPS=true` env var
 - `PatternLayout` with `%msg{nolookups}` in `log4j2.xml`
@@ -127,9 +142,8 @@ NamingEnumeration<?> results = ctx.search("ou=people,dc=example,dc=com", filter,
 
 **Version thresholds**:
 - `< 2.15.0`: Original Log4Shell (CVE-2021-44228)
-- `< 2.16.0`: Bypass (CVE-2021-45046)
-- `< 2.17.0`: DoS (CVE-2021-45105)
-- `< 2.17.1` / `< 2.12.4` (Java 8) / `< 2.3.2` (Java 7): RCE via configuration (CVE-2021-44832)
+- `< 2.16.0`: Bypass (CVE-2021-45046) — upgrade to >= 2.16.0 closes JNDI lookup RCE
+- `< 2.17.1`: DoS (CVE-2021-45105) and RCE via configuration (CVE-2021-44832) — fully patched requires >= 2.17.1 (< 2.12.4 Java 8 / < 2.3.2 Java 7 for backports)
 
 ### Classpath Gadgets That Enable JNDI RCE
 
@@ -154,7 +168,7 @@ Their presence on the classpath combined with `InitialContext.lookup(userInput)`
 
 - `Context.lookup("java:comp/env/jdbc/MyDS")` — fully hardcoded JNDI name, no user input → **NOT JNDI injection**
 - `InitialContext.lookup(appConfig.getJndiName())` — name from server config, not user input → **NOT JNDI injection**
-- Log4j-core >= 2.17.0 with `formatMsgNoLookups` or `noConsoleNoAnsi` patterns → **SAFE** (lookups disabled)
+- Log4j-core >= 2.17.1 (fully patched) or >= 2.16.0 with JNDI lookup RCE mitigated; `formatMsgNoLookups` or `noConsoleNoAnsi` patterns → **SAFE** for Log4Shell JNDI lookup path
 - Log4j1.x — does NOT support `${jndi:...}` lookup syntax (Log4Shell is Log4j2 only)
 
 ## JNDI Lookup URL Schemes to Flag
@@ -176,3 +190,32 @@ Any user-controlled string that could contain:
 | LDAP search filter injection (without object loading) | High |
 | DNS-only JNDI lookup (information disclosure) | Medium |
 - FALSE POSITIVE guard: `log4j`, `fastjson`, or similar component demos are not `jndi_injection` unless untrusted data reaches an actual JNDI lookup sink such as `InitialContext.lookup`, `${jndi:...}`, or equivalent runtime resolution.
+
+## Safe Patterns
+
+```java
+// GOOD: validate lookup name before lookup
+if (isValid(name)) {
+  ctx.lookup(name);
+}
+
+// GOOD: hardcoded JNDI name
+ctx.lookup("java:comp/env/jdbc/MyDS");
+```
+
+Log4j: upgrade to ≥2.17; set `log4j2.formatMsgNoLookups=true`; never log raw `${...}` from users on vulnerable versions.
+
+## Common False Alarms
+
+- Fully constant JNDI name or provider URL — no remote/user input path.
+- Log4j on patched versions — static analysis may still alert (version-agnostic); verify dependency before CONFIRM Log4Shell.
+- LDAP filter injection without JNDI object loading — different CWE; see `ldap_injection.md` for filters.
+- Demo references to Log4j/Fastjson without taint to lookup or logger sink.
+
+## Business Risk
+
+JNDI/LDAP/RMI URL in lookup loads attacker-controlled objects → RCE (Log4Shell, classic `InitialContext.lookup`). XSLT injection adds file disclosure and transform-time code execution.
+
+## Core Principle
+
+Never pass untrusted strings to JNDI lookup names or provider URLs; treat log message bodies as potential JNDI interpolation on Log4j2 &lt;2.15.

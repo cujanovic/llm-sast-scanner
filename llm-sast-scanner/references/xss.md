@@ -201,6 +201,12 @@ Maintain a compact, context-tuned set:
 - CSP policies enforcing nonces or hashes with no inline events and no dangerous sources
 - Trusted Types enforced on all relevant sinks; DOMPurify configured in strict mode with URI allowlists
 - Scriptable contexts disabled, raw HTML passthrough prohibited, and safe URL schemes enforced
+- `@RestController` returning `application/json` — not an HTML sink
+- Express/Fastify handlers setting `Content-Type: application/json` before `send`
+- Thymeleaf `th:text` and React `{variable}` text interpolation (not `th:utext` / `dangerouslySetInnerHTML`)
+- URI-encoding sanitizer on URL attributes (C# URL sanitizers)
+- DOM XSS where data flows only to `textContent`/`innerText`
+- JSON/plain-text responses with non-HTML Content-Type; framework auto-escape (`th:text`, React JSX text); DOMPurify/sanitizer barriers; numeric/boolean output
 
 ## Business Risk
 
@@ -274,7 +280,7 @@ Auto-escaping protects HTML *text/attribute* context but NOT a URL that is later
 - **VULN**: `echo $_POST['msg']` — no escaping
 - **VULN**: `print $userInput` — no escaping
 - **SAFE**: `echo htmlspecialchars($_GET['name'], ENT_QUOTES, 'UTF-8')`
-- **SAFE**: `echo htmlentities($userInput)`
+- **SAFE**: `echo htmlentities($userInput, ENT_QUOTES, 'UTF-8')` — ENT_QUOTES required for attribute contexts (default ENT_COMPAT leaves single quotes unencoded)
 
 ## Java Servlet Patterns (CWE-79)
 
@@ -298,3 +304,27 @@ StringEscapeUtils.escapeHtml4(tainted)
 - `response.getWriter().println(bar.toCharArray())` is **VULN** when `bar` is tainted — converting to `char[]` does not sanitize output.
 - `response.getWriter().format(locale, bar, obj)` is **VULN** when `bar` itself is tainted and used as the format string.
 - `printf`/`format` with a **fixed** format string is **SAFE** when every inserted argument is fixed or already HTML-encoded.
+
+## Source -> Sink Pattern
+
+**Sources**
+- Active threat-model sources — request params, body, headers, cookies (all languages)
+- JavaScript reflected: HTTP request input access with third-party controllable inputs; `Referer` header
+- JavaScript DOM: `location.hash/search`, `document.referrer`, `postMessage`, storage
+- JavaScript stored: filenames, torrent metadata, database reads
+
+**Sinks**
+- **Java**: `PrintWriter.print/println/write/format/append`; Spring `@ResponseBody` HTML; JSF/JAX-RS writers; `WebView.loadData`; model sinks `html-injection`, `js-injection`
+- **JavaScript reflected**: HTTP response send arguments when Content-Type is HTML-like (`text/html`, `application/xhtml+xml`, `image/svg+xml`, etc.)
+- **JavaScript DOM**: `innerHTML`/`outerHTML`, jQuery HTML methods, Angular `$compile`, `document.write`, `setAttribute`, `eval`/`Function`/`setTimeout(string)`, React `dangerouslySetInnerHTML`, `{@html}`, `v-html`
+- **JavaScript**: HTML string concat reaching XSS sink; error pages writing tainted data to response
+- **Python**: `HttpResponse` body where mimetype is `text/html`
+- **C#**: Razor/HTML writers, `Response.Write`, Blazor render fragments; ASP inline `Request.QueryString`
+- **Ruby**: ERB output; unsafe HTML construction
+
+**Sanitizers / barriers**
+- Java: `HtmlUtils.htmlEscape` (and `html_?escape.*` methods); numeric/boolean types; model `html-injection`/`js-injection` barriers
+- JavaScript: HTML metachar `replace` chains; `encodeURI`/`encodeURIComponent`; `JSON.stringify`; JavaScript serialization sanitizer; model `html-injection` barriers
+- Python: HTML escaping output (e.g., `html.escape`, MarkupSafe); constant-comparison barriers
+- C#: HTML and URL sanitizers; numeric parse; model barriers
+- Reflected XSS skips sinks when route sets safe Content-Type (non-HTML MIME)

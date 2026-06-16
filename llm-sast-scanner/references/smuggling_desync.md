@@ -19,15 +19,31 @@ HTTP Request Smuggling (HRS) exploits ambiguity in how a chain of HTTP servers (
 - Poison other users' requests (request hijacking).
 - Cache poisoning, credential capture via redirect.
 
-## TRUE POSITIVE Criteria
+## Source -> Sink Pattern
 
-- Detected architecture has a **frontend proxy** (nginx, HAProxy, CDN) + **backend** (Gunicorn, uWSGI, PHP-FPM).
-- Configuration allows both `Content-Length` and `Transfer-Encoding` on the same request path.
-- Backend server version or config known to have differential TE/CL handling.
+Static analysis does not model CL.TE/TE.CL smuggling at the proxy layer. Manual review targets **Node.js HTTP parser configuration**:
 
-## FALSE POSITIVE Criteria
+**Sources**: `process.env.NODE_OPTIONS` containing `--insecure-http-parser`; HTTP/HTTPS server or client options object with `insecureHTTPParser: true`.
 
-- Single-layer architecture: direct client-to-application with no proxy in between.
+**Sinks**: `http.createServer(options)`, `https.createServer(options)`, `http.request(options)`, `https.request(options)` — any invocation whose options flow includes the insecure parser flag.
+
+## Vulnerable Conditions
+
+- `insecureHTTPParser: true` on Node HTTP server or client options
+- `NODE_OPTIONS=--insecure-http-parser` in environment configuration checked into repo or deployment manifests
+- Node.js before v14.5.0 historically rejected ambiguous CL+TE less strictly
+
+## Safe Patterns
+
+- Leave `insecureHTTPParser` at default (`false`) or omit it entirely
+- Do not set `NODE_OPTIONS=--insecure-http-parser` in production
+- Use patched Node.js (post-February 2020 security releases) and reject ambiguous requests at reverse proxies
+
+Commonly affected languages: JavaScript/Node.js only for parser-configuration checks. Java servlets, Python WSGI/ASGI, Go net/http, C#, Ruby, and nginx/Apache proxy configuration require deployment-audit review — smuggling at the proxy/backend boundary is outside typical static web query packs.
+
+## Common False Alarms
+
+- Single-layer architecture: direct client-to-application with no proxy in between
 - Modern, patched server stack configured to reject ambiguous requests.
 
 ---
@@ -81,3 +97,34 @@ HTTP Request Smuggling (HRS) exploits ambiguity in how a chain of HTTP servers (
 - Any `nginx.conf`, `apache2.conf`, `haproxy.cfg` present in the repository alongside a backend application
 - `keepalive` connections enabled between proxy and backend
 - No explicit CL/TE conflict rejection in proxy config
+
+## Core Principle
+
+HTTP request smuggling requires inconsistent message-boundary parsing between chained parsers. Static analysis can flag only the Node.js opt-in to lenient parsing; broader desync risk still requires reviewing proxy + backend pairs for dual CL/TE acceptance.
+
+## Deployment Audit Checklist
+
+When proxy configs are present alongside application code, manually verify:
+- nginx: `proxy_http_version 1.1`; `proxy_set_header Connection ""`; reject ambiguous TE on upstream
+- Apache mod_proxy: version ≥ 2.4.48; `RequestHeader unset Transfer-Encoding early`
+- HAProxy: `http-reuse safe` and strict HTTP parsing options
+- Disable `insecureHTTPParser` in any Node tier behind the proxy
+
+## Node.js Examples
+
+```javascript
+// BAD — insecure parser enabled
+http.createServer({ insecureHTTPParser: true }, handler);
+
+// BAD — environment flag
+process.env.NODE_OPTIONS = '--insecure-http-parser';
+
+// SAFE — default strict parser
+http.createServer(handler);
+```
+
+## Analyst Notes
+
+- Treat `insecureHTTPParser: true` or `NODE_OPTIONS=--insecure-http-parser` as a high-confidence misconfiguration when present
+- Proxy/backend desync findings from nginx+Gunicorn patterns below remain valid manual heuristics
+- Do not conflate with SSRF or open redirect — smuggling poisons connection reuse, not URL validation

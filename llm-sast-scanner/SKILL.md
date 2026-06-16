@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 40 vulnerability classes across web, API, auth, mobile, and logic layers.
+  code review of any language or framework. Covers 59 vulnerability classes across web, API, auth, mobile, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.10.0"
+  version: "1.12.0"
   domain: application-security
-  references: 40 vulnerability knowledge bases
+  references: 59 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,15 +22,17 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 40 vulnerability classes. Each has a dedicated reference file loaded on demand:
+This skill covers the following 59 vulnerability classes. Each has a dedicated reference file loaded on demand,
+documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
 |----------|----------------|
-| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection |
-| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation |
-| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak |
-| **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions |
-| **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, Web Cache Deception/Poisoning, Denial of Service, CVE Patterns |
+| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM) |
+| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Mass Assignment |
+| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation |
+| **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
+| **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, Clickjacking, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
+| **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo) |
 | **Language/Platform** | PHP Security, Mobile Security (Android/iOS) |
 
@@ -115,7 +117,29 @@ references/denial_of_service.md          — Denial of service / resource exhaus
 references/php_security.md               — PHP-specific security issues
 references/mobile_security.md            — Mobile security (Android / iOS)
 references/session_fixation.md           — Session fixation
+references/ldap_injection.md             — LDAP injection (CWE-090, RFC 4515 filter/DN escaping)
+references/xpath_injection.md            — XPath (CWE-643), XQuery (CWE-652), XML injection (CWE-091)
+references/cors_misconfiguration.md      — CORS misconfiguration / permissive origin reflection (CWE-346/942)
+references/http_response_splitting.md    — HTTP response splitting / header injection (CWE-113)
+references/host_header_poisoning.md      — Host header poisoning / email-link injection (CWE-640)
+references/clickjacking.md               — Clickjacking / missing X-Frame-Options / CSP frame-ancestors (CWE-451)
+references/log_injection.md              — Log injection / log forging (CWE-117)
+references/certificate_validation.md     — TLS certificate / hostname / pinning / revocation failures (CWE-295/297/299/322)
+references/cleartext_transmission.md     — Cleartext transmission, missing TLS (CWE-319/311)
+references/mass_assignment.md            — Mass assignment / autobinding of privileged fields (CWE-915)
+references/regex_injection_redos.md      — Regex injection, ReDoS, incomplete regex/URL validation (CWE-730/1333/020/625/116)
+references/csv_injection.md              — CSV / formula injection on spreadsheet export (CWE-1236)
+references/prompt_injection.md           — LLM prompt injection (CWE-1427)
+references/file_permissions.md           — Incorrect permission assignment / world-writable files / weak DACLs (CWE-732)
+references/insecure_temp_file.md         — Insecure temporary file creation / predictable names / race window (CWE-377)
+references/format_string_injection.md    — Externally-controlled format strings in printf-style APIs (CWE-134)
+references/output_encoding.md            — Inappropriate encoding for output context, encoder/context mismatch (CWE-838)
+references/hardcoded_code_backdoor.md    — Embedded malicious code / supply-chain backdoor patterns (CWE-506)
+references/aspnet_security_misconfig.md  — ASP.NET misconfiguration: debug binary, disabled request validation (CWE-011/016)
 ```
+
+**Sources / sinks / sanitizers:** Each reference documents the per-language sources and sinks for the class and the
+sanitizers/barriers that neutralize it. Prefer those recognized barriers when ruling a finding SAFE.
 
 **Loading strategy:**
 - For a targeted review (e.g., "check for SQL injection"), load only the relevant reference(s).

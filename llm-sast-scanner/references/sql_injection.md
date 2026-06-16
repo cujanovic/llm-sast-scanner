@@ -164,6 +164,12 @@ SQLi remains among the most durable and damaging vulnerability classes. Contempo
 - Static response sizes driven by server-side templating rather than predicate truth
 - Latency spikes attributable to network or CPU load rather than injected timing functions
 - Parameterized queries with no string concatenation, confirmed through code review
+- Parameterized queries where user data binds only via `setString`/`setInt` or driver tuple args
+- Spring Data derived query methods and static `@NamedQuery` literals
+- MongoDB queries using `$eq: userValue` or validated string type before query construction
+- Manually adding quotes around `%s` placeholders — still unsafe (double-quoting breaks parameterization), not a true false positive
+- Go/Ruby numeric-only fields flowing into SQL (simple-type sanitizer)
+- Numeric/boolean-typed nodes; constant-comparison guards (Python/Ruby); `createNamedQuery` with static query name (Java JPA)
 
 ## Business Risk
 
@@ -239,7 +245,7 @@ Login/authentication endpoints with raw SQL concatenation are almost always blin
 - `@Query("... WHERE u.id = :id")` with `@Param("id")` is safe from SQL injection unless the query string itself is dynamically built from untrusted input.
 - In benchmark mode for `JavaSecLab` and `VulnerableApp`, normalize confirmed JDBC/MyBatis/JPA SQL injection findings to project tag `sqli`; reserve `sql_injection` for projects whose ground truth uses the long-form label, such as `verademo` and `vulhub`.
 - `VulnerabilityType.*SQL_INJECTION` annotations or modules under `service/vulnerability/sqlInjection/` still map to benchmark tag `sqli` when the project taxonomy is short-form.
-- Stability rule: keep a confirmed SQL injection finding when untrusted HTTP input reaches a MyBatis XML `${...}` fragment or is first stored and later concatenated into SQL by a benchmark helper or controller; do not downgrade the tag only because the final query text is split across mapper XML, DAO helpers, or a later request path.
+- Tag retention rule: keep a confirmed SQL injection finding when untrusted HTTP input reaches a MyBatis XML `${...}` fragment or is first stored and later concatenated into SQL by a benchmark helper or controller; do not downgrade the tag only because the final query text is split across mapper XML, DAO helpers, or a later request path.
 ## Python/JS/PHP Source Detection Rules
 
 ### Python
@@ -289,7 +295,7 @@ ps.executeQuery();  // SAFE
 
 ## Related Injection Classes
 
-For LDAP injection (CWE-90) patterns, see `references/expression_language_injection.md`.
+For LDAP injection (CWE-90) patterns, see `references/ldap_injection.md`.
 For XPath injection (CWE-643) patterns, see SKILL.md xpath_injection gap coverage rules.
 
 **Benchmark edge cases**:
@@ -307,3 +313,28 @@ For XPath injection (CWE-643) patterns, see SKILL.md xpath_injection gap coverag
 | `blind_sql_injection` | SQL injection where output is not directly visible — boolean-based, time-based, or OOB only | Use when the extraction channel is exclusively blind |
 | `sql_injection` + `ldap_injection` | When both SQL and LDAP sinks are reachable from the same input | Tag each sink independently |
 | `sql_injection` + `xpath_injection` | When XPath concatenation is the sink | Prefer `xpath_injection` as the primary tag |
+
+## Source -> Sink Pattern
+
+**Sources**
+- Active threat-model sources — HTTP params, headers, cookies, path variables, request body (Java, JS, Python, Go, C#, Ruby)
+- Java: environment variables in concatenated SQL
+- Go: same threat-model sources via active threat-model sources
+
+**Sinks**
+- **Java**: `Statement.execute/executeQuery/executeUpdate`; `JdbcTemplate`; `EntityManager.createQuery/createNativeQuery` (not `createNamedQuery`); MyBatis `${...}` substitution in mapper XML and `@Select` annotations; `com.mongodb.BasicDBObject.parse`; cast to `DBObject`; `com.mongodb.util.JSON.parse`
+- **JavaScript**: SQL string APIs (`pg.query`, etc.); GraphQL string construction; MongoDB query objects; `ldapjs` DN/filter sinks
+- **Python**: SQL construction and execution APIs — includes `cursor.execute`, SQLAlchemy `text()`/`TextClause`
+- **Go**: SQL query strings; NoSQL query construction (MongoDB)
+- **C#**: ADO.NET, Dapper, NHibernate SQL expression sinks
+- **Ruby**: SQL execution and construction APIs
+
+**Sanitizers / barriers**
+- Prepared statements / bound parameters (`?`, `:name`) with `setString`/`setParameter` — not concatenated into query text
+- Java: simple-type sanitizers (primitives, boxed types, `UUID`, `Date`, enums)
+- JavaScript: SQL sanitizer output; `sqlstring` escape; MongoDB `$eq` wrapper or `typeof x === 'string'` check
+- Python: constant-comparison barriers; model `sql-injection` barriers
+- Go: simple-type sanitizers; model barriers for `sql-injection` and `nosql-injection`
+- C#: simple-type and GUID sanitizers; model barriers
+- Ruby: string constant compare/array inclusion barriers, SQL sanitization
+- **Anti-pattern**: manually quoting placeholders before binding — double-quoting breaks parameterization

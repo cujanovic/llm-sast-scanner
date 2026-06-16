@@ -35,7 +35,7 @@ llm-sast-scanner-full-scan-loop <dir>
 
 Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-scanner/SKILL.md). Load
 reference files from its `references/` directory ON DEMAND, per pass — only the subset relevant to the
-current pass's analysis lens (see LOOP CONTROL), rather than all 40 at once. As the lens rotates across
+current pass's analysis lens (see LOOP CONTROL), rather than all 59 at once. As the lens rotates across
 passes, every vulnerability class gets covered, without holding all references in context simultaneously.
 All step numbers (Step 1-6), the Judge protocol, the false-positive guardrails, the severity model, and the
 report structure are defined there and MUST be used.
@@ -91,8 +91,8 @@ cap of 10; NO adv inside the loop)
   path-traversal; pass 2: auth/IDOR/business-logic; pass 3: deserialization/DoS/race conditions; pass 4:
   crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
   passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
-  supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
-  pass's lens (not all 40 at once) to keep context cost bounded.
+supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
+pass's lens (not all 59 at once) to keep context cost bounded.
 COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-5 ceiling, or the pass-10 cap)
 - Before finalizing, confirm via the coverage map that EVERY line of EVERY in-scope file (per the GROUND
   RULES scope + exclusions) was actually read (not sampled). Produce a coverage checklist: each file with

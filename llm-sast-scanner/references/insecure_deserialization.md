@@ -180,7 +180,7 @@ For each finding, trace the complete data flow:
 - Fastjson/Jackson used only to serialize (write) data, never to parse untrusted external input.
 - Serialization filters (`ObjectInputFilter`) that restrict allowed classes to a known-safe allowlist.
 - Do NOT emit `insecure_deserialization` when the deserialization is part of a DIFFERENT vulnerability class already tagged (e.g., if Fastjson autoType is tagged as `component_vulnerability`, do not also tag `insecure_deserialization` for the same sink unless there is a SEPARATE deserialization path).
-- Do NOT emit for `ObjectInputStream.readObject()` when the serialized data comes from a trusted internal source (e.g., database BLOB stored by the same application, internal message queue with authenticated producers only).
+- Do NOT emit for `ObjectInputStream.readObject()` when the serialized data is exclusively app-generated/trusted with no attacker influence (e.g., internal message queue with authenticated producers only) — second-order DB blobs that were attacker-influenced remain a TRUE POSITIVE (see above).
 
 ## Common False Alarms
 
@@ -188,6 +188,11 @@ For each finding, trace the complete data flow:
 - `ObjectInputStream` used only for trusted IPC between same-trust-domain services
 - Jackson/Gson simple binding without polymorphic type handling (safe by default)
 - Fastjson used only for serialization (writing JSON), not parsing untrusted input
+- Schema-bound deserializers (Avro, protobuf with trusted schema) — excluded by design
+- Jackson without `enableDefaultTyping` and without `@JsonTypeInfo(CLASS)` — safe default
+- SnakeYAML 2.x default constructors or explicit `SafeConstructor`
+- `ObjectInputStream` subclassed by `ValidatingObjectInputStream` on same flow
+- Ruby/Python const-compare guards before decode
 
 ## .NET Deserialization Vulnerable Patterns
 
@@ -251,3 +256,33 @@ var obj = JsonConvert.DeserializeObject<MyDto>(userInput);
 4. For Jackson, grep for `enableDefaultTyping` and `@JsonTypeInfo` — these are the danger signals
 5. SnakeYAML is commonly used in Spring Boot for config parsing — check if it also parses user-provided YAML
 6. Chain deserialization with classpath analysis: having CommonsCollections/C3P0/Spring on classpath makes native Java deserialization instantly critical
+
+## Unsafe Deserialization Detection
+
+Commonly affected languages: Java, Python, JavaScript, Ruby, C#. Go lacks dedicated unsafe-deserialization detection.
+
+**Java sinks modeled**: `ObjectInputStream.readObject`/`readUnshared`; Kryo, XStream, SnakeYAML, JYaml, JsonIO, YAMLBeans, Hessian/Burlap, Castor, Jackson (`enableDefaultTyping`), Fastjson, Gson gadgets, JMS `ObjectMessage`, `XMLDecoder.readObject`, `SerializationUtils.deserialize`, Jabsorb, Jodd, Flexjson; RMI deserialization; Spring HTTP invoker exporter in XML/configuration.
+
+**Python sinks**: `pickle.load(s)`, `yaml.load`/`unsafe_load`/`full_load` without `SafeLoader`; `torch.load`; decoders where input may execute code.
+
+**JavaScript sinks**: `js-yaml` `load`/`loadAll` with unsafe schema (`DEFAULT_FULL_SCHEMA`, js-yaml-js-types).
+
+**Ruby sinks**: `Marshal.load`, `YAML.load` (Psych), Oj global options; YAML unsafe tags.
+
+**C# sinks**: `BinaryFormatter`, `LosFormatter`, `NetDataContractSerializer`, `JavaScriptSerializer` + type resolver; untrusted stream → unsafe deserializer.
+
+**Sources**: remote/network input on all platforms.
+
+**Sanitizers / barriers**:
+- Java: `ValidatingObjectInputStream`, `SerialKiller`; XStream/Kryo whitelist configuration flows to read call; Jackson `PolymorphicTypeValidator` / `activateDefaultTyping` with validator; SnakeYAML `SafeConstructor`; Fastjson `ParserConfig.setSafeMode(true)`.
+- Python: const-compare barriers; `yaml.load(..., Loader=SafeLoader|BaseLoader)`; model barriers on unsafe-deserialization paths.
+- JS: default `js-yaml` v4+ without unsafe schema; model barriers.
+- C#: no `TypeNameHandling` / no type resolver on `JavaScriptSerializer`.
+
+Remote input → deserialization API argument (unsafe-deserialization sink or decoder input where execution is possible).
+
+Java additional config: tracks user-controlled `Class`/`type` passed to polymorphic deserializers (Jackson, etc.).
+
+## Core Principle
+
+Flag any path from remote input to a deserializer that can instantiate arbitrary types; prefer typed DTO binding and explicit allowlists over blocklists.

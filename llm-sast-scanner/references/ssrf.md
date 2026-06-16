@@ -9,9 +9,9 @@ Identify cases where user-controlled URLs or hostnames are forwarded to server-s
 
 ## Source -> Sink Pattern
 
-**Sources**: `request.getParameter()`, `@RequestParam`, `@PathVariable`, `@RequestBody` fields carrying URLs, hostnames, or IP addresses
+**Sources (remote flow sources)**: HTTP request parameters, headers, path segments, cookies, JSON/form body fields — anything modeled as remote user input that can carry a URL, hostname, IP, or URL fragment used to build an outbound request. Java excludes taint from `URLConnection.getInputStream()` responses (following a remote redirect is not worse than the remote server choosing the target).
 
-**Sinks**:
+**Sinks (`request-forgery` kind)**:
 - `new URL(userInput).openConnection()`
 - `HttpURLConnection` with user-controlled URL
 - `RestTemplate.getForObject(userInput, ...)`
@@ -21,6 +21,20 @@ Identify cases where user-controlled URLs or hostnames are forwarded to server-s
 - `ImageIO.read(new URL(userInput))`
 - `DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(userInput)`
 - `URLClassLoader(new URL[]{new URL(userInput)})`
+- Python: any `Http::Client::Request` URL part (`requests.get`, `urllib`, `httpx`, `aiohttp`, etc.)
+- JavaScript: `ClientRequest` URL or host (`http.get`, `fetch`, `axios`, `new URL(userInput)`)
+- Go: `Http::ClientRequest` URL, WebSocket URL, framework-modeled sinks (`request-forgery`, `request-forgery[host]`)
+- Ruby: `Http::Client::Request` URL parts; C#: outbound HTTP client URL arguments
+
+**Additional taint steps**: assigning to `URI`/`URL` host arguments; `Properties.setProperty("jdbcUrl", tainted)` propagates to the Properties object (JDBC URL SSRF).
+
+**Sanitizers / barriers**:
+- Java: hostname-sanitizing string prefix (`?`, `#`, or `/` not in scheme position); `List.contains(url)` guard; `URI.getHost().equals("fixed")`; regexp host check; `HostnameSanitizingPrefix` append; external `request-forgery` barrier models
+- Python (full SSRF): string concat/format/f-string with fixed left side excluding bare `http://`/`https://`; `isalnum`/`isalpha`/digit/identifier checks; `re.match`/`re.fullmatch`; `AntiSSRF.URIValidator.in_domain()` and Azure domain validators (models-as-data)
+- Python partial SSRF: above plus constant-comparison barriers; string-restriction guards
+- JavaScript: `encodeURIComponent` (path separators); external barrier models; HTML sanitizer output (additional step)
+- Go: hostname-sanitizing prefix edge; `isLocalUrl`/`isValidRedirect`-style redirect checks; regexp match guards; URL/hostname equality against constant; simple-type sanitizers
+- Ruby: prefixed string interpolation (fixed prefix before user part)
 
 ## Vulnerable Conditions
 - User-supplied input reaches any HTTP or network client URL parameter with no prior validation
@@ -76,7 +90,7 @@ Identify cases where user-controlled URLs or hostnames are forwarded to server-s
 - **VULN**: `file_get_contents($_GET['url'])` — PHP wrappers support `file://`, `http://`, `php://`
 - **VULN**: `curl_setopt($ch, CURLOPT_URL, $_POST['url'])`
 - **VULN**: `$data = file_get_contents("http://" . $_GET['host'] . "/api")`
-- **SAFE**: Allowlist validation + `curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS)`
+- **PARTIAL HARDENING (not a complete SSRF fix)**: `curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTPS)` — restricts scheme only; does not block SSRF to attacker-chosen HTTPS hosts (external targets, internal HTTPS services, some metadata endpoints). Host/IP allowlisting (and blocking link-local/private ranges after DNS resolution) is still required.
 
 ## Cloud Metadata Endpoint Exposure
 
@@ -213,6 +227,17 @@ Servers sometimes build an *internal* request URL from request-context headers t
 **Concrete instance — Next.js Server Actions** (`"use server"` functions dispatched via the `Next-Action` header): older versions built the internal subrequest URL from the request `Host` header, so a spoofed `Host` turned action dispatch into blind→full-read SSRF (the `Next-Action` token selects the function; the request path is ignored). Generic lesson: any server-side request whose **authority** is derived from a request header is SSRF unless the host is validated against an allowlist.
 
 **SAFE**: derive the base URL from server config/environment (e.g. `process.env.PUBLIC_URL`), not from request headers; validate `Host`/`X-Forwarded-Host` against an allowlist before use.
+
+**Recognized sanitizers summary**: hostname-sanitizing prefixes, allowlist/`contains` guards, host equality checks, regexp barriers, fixed-prefix string construction (Python partial), `encodeURIComponent` (JS), redirect-check helpers (Go), `AntiSSRF` validators (Python), models-as-data `request-forgery` barriers.
+
+## Common False Alarms
+
+- Hardcoded or configuration-only outbound URLs with no path from remote input to the sink
+- Internal helper/sink methods with no reachable controller passing user-controlled URL data
+- Duplicate findings for the same external-input-to-sink path through a utility wrapper
+- Python string built as `"https://" + userHost + ".example.com/data/"` flagged as partial SSRF when user only picks subdomain label — verify whether authority is truly attacker-controlled
+- JavaScript client-side request forgery where the browser, not the server, performs the fetch — different risk class than SSRF
+- Taint originating from response bodies of outbound HTTP requests (Java explicitly excludes `getInputStream()` results)
 
 - FALSE POSITIVE guard: in `vulhub`, emit `ssrf` only when a selected representative directory is primarily an SSRF sample; do not infer SSRF from XXE, proxy, inclusion, or secondary fetch capability alone.
 - FALSE POSITIVE guard: do not emit a project-level `ssrf` tag merely because an SSRF helper or vulnerable class exists. Require a mapped vulnerable route plus the same demonstrated path from user-controlled URL input to the outbound fetch.
