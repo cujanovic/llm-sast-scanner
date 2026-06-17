@@ -305,3 +305,19 @@ Commonly affected languages: JavaScript, Ruby.
 **C#**: ASP.NET debug binary in production.
 
 **No automated query**: `.git`/source-map exposure (static artifact hunt). GraphQL introspection, Swagger UI exposure—not dedicated queries. Align with existing FALSE POSITIVE rules: config-file credentials → `default_credentials`, not info disclosure.
+
+### LLM/AI sensitive-data disclosure (OWASP LLM02)
+
+Generative-AI apps disclose sensitive data through model outputs: training-data memorization, secrets/PII placed in prompts or context, or over-permissive RAG retrieval that pulls documents the caller cannot read.
+
+**Sources**: PII/secrets in fine-tuning data; secrets templated into system prompts; RAG context assembled from documents without an access filter; user messages echoed back with sensitive fields.
+
+**Sinks**: the model response returned to the user; logs/telemetry capturing full prompts or completions.
+
+**Sanitizers / safe patterns**:
+- Sanitize/anonymize PII before training or fine-tuning; do not feed raw secrets into prompts (see `system_prompt_leakage.md`).
+- Apply an output filter that scans completions for secret/PII patterns (API keys `sk-…`/`AKIA…`, private keys, SSNs, card numbers) and redacts before returning.
+- Enforce permission- and tenant-scoped retrieval so context never includes unauthorized documents (see `rag_vector_security.md`).
+- Avoid logging full prompts/responses that may contain credentials or PII (see "Sensitive logging" above).
+
+**Triage**: secret/credential in model output or in a shared prompt → High; PII over-exposure via unfiltered RAG → High/Medium per data sensitivity. Cross-reference `system_prompt_leakage.md` (LLM07) for prompt-resident secrets and `rag_vector_security.md` (LLM08) for retrieval scoping.

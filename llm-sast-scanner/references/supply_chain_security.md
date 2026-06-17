@@ -245,3 +245,4 @@ registry=http://mirror.local/npm/
 - `cicd_container_security.md` — pipeline tokens, mutable CI actions, Dockerfile image pinning
 - `hardcoded_code_backdoor.md` — obfuscated payloads inside dependencies after compromise
 - `information_disclosure.md` — manifests/lockfiles exposed via public webroot leak dependency intelligence
+- `ml_supply_chain_poisoning.md` — AI/ML model & dataset supply chain: unsafe model deserialization (pickle/`torch.load`), `trust_remote_code=True`, unverified models/adapters, unpinned ML deps, training-data poisoning

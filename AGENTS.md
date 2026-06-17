@@ -4,7 +4,7 @@ Your goal is to identify security vulnerabilities in the codebase located in the
 
 All output is written to a `sast/` folder in the project root. Steps whose output file already exists are skipped, so this is safe to re-run after fixing issues.
 
-> **Skill resolution:** subagents invoke skills by name (`llm-sast-scanner`, `llm-sast-scanner-full-scan-loop`). Each tool loads them from its own skills directory — Claude Code from `.claude/skills/`, Cursor/Codex/agents from `.agents/skills/`. The two directories are kept as byte-identical copies.
+> **Skill resolution:** subagents invoke skills by name (`llm-sast-scanner`, `llm-sast-scanner-full-scan-loop`). Each tool loads them from its own skills directory — Claude Code from `.claude/skills/`, Cursor/Codex/agents from `.agents/skills/`. Both directories are symlinks to the single canonical skill source at the repo root, so the two runtimes always run identical skill content.
 
 ---
 
@@ -36,12 +36,12 @@ Give each subagent the same instruction pattern, substituting the lens name, cla
 
 | Lens | Results file | Vulnerability classes (reference lenses) |
 |------|--------------|------------------------------------------|
-| injection | `sast/injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection |
-| access-auth | `sast/access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, mass assignment |
-| crypto-data | `sast/crypto-data-results.md` | weak crypto/hash, information disclosure, insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation |
+| injection | `sast/injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05) |
+| access-auth | `sast/access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, mass assignment, excessive agency (LLM06), RAG / vector & embedding security (LLM08) |
+| crypto-data | `sast/crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07) |
 | server-side | `sast/server-side-results.md` | SSRF, path traversal/LFI/RFI, client-side path traversal, server-side prototype pollution, insecure deserialization, arbitrary file upload, JNDI injection, race conditions, insecure temp file, file permissions |
-| protocol-infra | `sast/protocol-infra-results.md` | CSRF, open redirect, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, clickjacking, web cache deception/poisoning, denial of service, regex injection/ReDoS, CVE patterns |
-| hardening-platform | `sast/hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, PHP security, mobile security |
+| protocol-infra | `sast/protocol-infra-results.md` | CSRF, open redirect, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), regex injection/ReDoS, CVE patterns |
+| hardening-platform | `sast/hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), PHP security, mobile security |
 
 **Wait for all subagents to finish before proceeding.**
 

@@ -256,3 +256,19 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 Commonly affected languages: JavaScript, Java, Python, Ruby, C#, Go, Rust, Swift.
 
 **Not modeled**: database calls in loops; Java hash-collision DoS (HashDoS). Generic "missing pagination" without tainted page size requires explicit unbounded tainted allocation for HIGH severity per existing analyst rules.
+
+## LLM/AI unbounded consumption (OWASP LLM10)
+
+LLM inference is expensive, so resource and *cost* exhaustion ("denial of wallet") is a real DoS vector for AI endpoints. The amplifier is attacker-controlled token volume, not just request count.
+
+**Sources**: user prompt length/complexity; uncapped `max_tokens`; recursive/agentic loops; high-volume or systematic querying (also a model-extraction signal).
+
+**Sinks**: `*.create`/`generate`/`invoke` calls with no input-size cap and no output `max_tokens`; chat endpoints with no per-user rate limit or token/cost budget; agent loops with no step/iteration cap.
+
+**Sanitizers / safe patterns**:
+- Enforce input size limits (chars/estimated tokens) and reject token-amplifying repetitive input before calling the model.
+- Always set an output `max_tokens` cap.
+- Apply multi-tier rate limits (per minute/day) and per-user **token/cost budgets**; return `429`/`503` rather than processing unbounded load.
+- Bound agent loops (max steps) and monitor for systematic high-volume querying (model-extraction pattern).
+
+**Triage**: uncapped input *and* output on a public, attacker-reachable LLM endpoint with no rate limit/budget → Medium/High (denial of wallet / service). A missing rate limit alone is a defense-in-depth gap (Info/Low) unless unbounded token amplification is demonstrable. Prefer `brute_force` for auth-endpoint flooding; use this section for inference cost/volume exhaustion.

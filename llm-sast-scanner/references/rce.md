@@ -238,7 +238,14 @@ Flag sinks where a non-constant variable appears in a dangerous position. Phase-
 
 **Unsafe deserialization** — flag all usages; confirm external data flow separately. See [insecure_deserialization.md](insecure_deserialization.md).
 
-**Skip (safe)** — list-form subprocess/spawn without shell; `json.loads`/`JSON.parse`; `yaml.safe_load`; `ast.literal_eval`.
+**Untrusted runtime / image execution** — a user-controlled value selecting *what* to execute is RCE-equivalent even without a shell metacharacter.
+
+| Language | Grep targets |
+|----------|--------------|
+| Python | `docker.from_env()` then `containers.run(`/`containers.create(` with a variable image; `subprocess`/`os.exec*` with a variable program name |
+| Any | container/orchestration SDK calls (`run`, `create`, `exec`) where the image, command, or entrypoint is built from external input |
+
+**Skip (safe)** — list-form subprocess/spawn without shell; `json.loads`/`JSON.parse`; `yaml.safe_load`; `ast.literal_eval`; container `run(...)` with a hardcoded image and arguments.
 
 ## Safe Patterns
 

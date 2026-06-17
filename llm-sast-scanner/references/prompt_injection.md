@@ -104,6 +104,18 @@ Taint into `instructions=` and OpenAI `content` nodes is the primary detection s
 
 Instructions and untrusted data must never share a prompt string. Use API-level role separation, treat all external text as hostile, and assume the model will obey the last plausible instruction in context. On Python repos using OpenAI Agents SDK, Guardrails, or MaD-tagged AI sinks, review any route where remote input reaches prompt assembly.
 
+## Related AI/LLM Classes (OWASP LLM Top 10)
+
+Prompt injection (LLM01) usually chains with one of these — load them when reviewing an LLM/agent app:
+
+- `insecure_output_handling.md` (LLM05) — the model's output reaching an HTML/SQL/shell/HTTP sink (the egress side of an injection chain)
+- `excessive_agency.md` (LLM06) — what makes a successful injection consequential (over-broad tools/permissions/autonomy)
+- `system_prompt_leakage.md` (LLM07) — secrets / authz logic in prompts, prompt-extraction attacks
+- `rag_vector_security.md` (LLM08) — indirect injection via poisoned/over-retrieved documents; cross-tenant context leakage
+- `ml_supply_chain_poisoning.md` (LLM03/04) — model/dataset supply-chain and training-data poisoning
+- `information_disclosure.md` (LLM02) and `denial_of_service.md` (LLM10) — sensitive-data egress and unbounded token/cost consumption
+- `mcp_security.md` — tool poisoning and injection via MCP tool metadata/output
+
 ## Analyst Notes
 
 1. RAG retrieval is a first-class source: web pages, tickets, and uploads become prompt content without hitting HTTP param sources directly.

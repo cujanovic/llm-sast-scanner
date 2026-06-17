@@ -230,6 +230,54 @@ terraform {
 }
 ```
 
+## Provider-Specific Misconfigurations
+
+Quick VULN→SAFE attribute references per cloud. Flag the VULN attribute; confirm the resource type and that no compensating control exists elsewhere in the stack.
+
+### AWS
+
+| Resource | VULN | SAFE |
+|----------|------|------|
+| `aws_ebs_volume` | `encrypted = false` | `encrypted = true` |
+| `aws_db_instance` | `backup_retention_period = 0` | `backup_retention_period = 35` |
+| `aws_dynamodb_table` | no `server_side_encryption` block | `server_side_encryption { enabled = true; kms_key_arn = ... }` |
+| `aws_sqs_queue` / `aws_sns_topic` | no SSE | `sqs_managed_sse_enabled = true` / `kms_master_key_id = ...` |
+| `aws_kms_key` | `enable_key_rotation = false` | `enable_key_rotation = true` |
+| `aws_cloudtrail` | no `kms_key_id` | `kms_key_id = aws_kms_key.key.arn` |
+| `aws_instance` | `associate_public_ip_address = true` | `associate_public_ip_address = false` |
+| `provider "aws"` | `access_key`/`secret_key` inline | `shared_credentials_file` / `profile` / env |
+| `aws_iam_role` | `Principal = {AWS = "*"}` on `sts:AssumeRole` | restricted account/role ARN principal |
+
+### Azure
+
+| Resource | VULN | SAFE |
+|----------|------|------|
+| `azurerm_storage_account` | `min_tls_version = "TLS1_0"`, `allow_nested_items_to_be_public = true` | `min_tls_version = "TLS1_2"`, `= false`, `network_rules { default_action = "Deny" }` |
+| `azurerm_storage_container` | `container_access_type = "blob"` | `container_access_type = "private"` |
+| `azurerm_linux_web_app` | `https_only = false`, `minimum_tls_version = "1.0"`, `cors { allowed_origins = ["*"] }` | `https_only = true`, `"1.2"`, explicit origins |
+| `azurerm_key_vault` | `purge_protection_enabled = false`, `network_acls { default_action = "Allow" }` | `purge_protection_enabled = true`, `default_action = "Deny"` |
+| `azurerm_mssql_server` | `minimum_tls_version = "1.0"`, `public_network_access_enabled = true` | `"1.2"`, `public_network_access_enabled = false` |
+| `azurerm_mysql_firewall_rule` | `0.0.0.0`–`255.255.255.255` | narrow start/end IP range |
+| `azurerm_kubernetes_cluster` | `private_cluster_enabled = false`, empty `api_server_authorized_ip_ranges` | `private_cluster_enabled = true`, `disk_encryption_set_id` set |
+| `azurerm_*_virtual_machine_scale_set` | `admin_password = "..."`, `encryption_at_host_enabled = false` | `admin_ssh_key`, `disable_password_authentication = true`, `encryption_at_host_enabled = true` |
+| `azurerm_role_definition` | `actions = ["*"]` | explicit scoped `actions` list |
+
+### GCP
+
+| Resource | VULN | SAFE |
+|----------|------|------|
+| `google_storage_bucket` | `uniform_bucket_level_access = false` | `= true`, `versioning { enabled = true }`, `logging {}` |
+| `google_storage_bucket_iam_member` | `member = "allUsers"` / `allAuthenticatedUsers` | specific `user:`/`serviceAccount:` member |
+| `google_compute_firewall` | `source_ranges = ["0.0.0.0/0"]` to `22`/`3389` | narrow `source_ranges` + `target_tags` |
+| `google_compute_instance` | `can_ip_forward = true`, `enable-oslogin = false`, public `access_config {}` | `can_ip_forward = false`, `enable-oslogin = true`, `shielded_instance_config`, KMS boot disk |
+| `google_container_cluster` | `enable_legacy_abac = true`, `master_auth { username/password }`, `logging_service = "none"` | `enable_legacy_abac = false`, `enable_shielded_nodes`, `private_cluster_config`, `network_policy { enabled = true }` |
+| `google_sql_database_instance` | `ipv4_enabled = true`, `authorized_networks { value = "0.0.0.0/0" }` | `ipv4_enabled = false`, `require_ssl = true`, `private_network` |
+| `google_redis_instance` | `auth_enabled = false` | `auth_enabled = true`, `transit_encryption_mode = "SERVER_AUTHENTICATION"` |
+| `google_bigquery_dataset` / `google_pubsub_topic` | no `kms_key_name` / `default_encryption_configuration` | CMEK encryption configured |
+| `google_*_iam_member` (Cloud Run, etc.) | `member = "allUsers"` | specific principal |
+| `google_compute_ssl_policy` | `min_tls_version = "TLS_1_0"` | `"TLS_1_2"`, `profile = "MODERN"` |
+| `google_project_iam_member` | `roles/iam.serviceAccountTokenCreator` to broad SA | least-privilege role to specific user |
+
 ## Common False Alarms
 
 - `0.0.0.0/0` on port 443/80 for a documented public load balancer or CDN origin — confirm target is LB tier, not admin/DB tier

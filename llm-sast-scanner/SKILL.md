@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 70 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, and logic layers.
+  code review of any language or framework. Covers 75 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.13.0"
+  version: "1.14.0"
   domain: application-security
-  references: 70 vulnerability knowledge bases
+  references: 75 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 70 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 75 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -34,6 +34,7 @@ documenting the sources, sinks, and sanitizers/barriers used to detect and triag
 | **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
 | **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / Cloud Orchestration, CI/CD & Container Security |
 | **API & AI/Agent Services** | API / REST / Web-Service Security, MCP (Model Context Protocol) Security |
+| **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
 | **Language/Platform** | PHP Security, Mobile Security (Android/iOS), C/C++ Memory Safety |
@@ -149,6 +150,11 @@ references/iac_security.md               — Infrastructure-as-Code misconfig (T
 references/kubernetes_cloud_security.md  — Kubernetes / cloud orchestration: privileged pods, RBAC, securityContext, secrets, NetworkPolicy
 references/cicd_container_security.md     — CI/CD pipeline + container/Docker security (PPE, untrusted inputs, root images, unpinned tags)
 references/memory_safety_c_cpp.md        — C/C++ memory safety: buffer overflow, UAF, unsafe string funcs, integer overflow, toolchain hardening
+references/insecure_output_handling.md   — Insecure handling of LLM/model output reaching HTML/SQL/shell/HTTP/eval sinks (OWASP LLM05)
+references/excessive_agency.md           — Excessive LLM/agent functionality, permissions, or autonomy without human approval (OWASP LLM06)
+references/system_prompt_leakage.md      — Secrets / authorization logic in system prompts; reliance on prompt secrecy (OWASP LLM07)
+references/rag_vector_security.md        — RAG / vector & embedding weaknesses: permission-blind retrieval, cross-tenant leak, indirect injection (OWASP LLM08)
+references/ml_supply_chain_poisoning.md  — AI/ML model & dataset supply chain and data/model poisoning: unsafe model load, trust_remote_code, unverified artifacts (OWASP LLM03/04)
 ```
 
 **Sources / sinks / sanitizers:** Each reference documents the per-language sources and sinks for the class and the
