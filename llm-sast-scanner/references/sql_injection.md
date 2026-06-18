@@ -423,6 +423,22 @@ var cmd = new SqlCommand("SELECT * FROM Users WHERE Username = @username", conn)
 cmd.Parameters.AddWithValue("@username", username);
 ```
 
+### C/C++
+
+```c
+// VULN — raw input passed straight to the engine, or query built with sprintf/strcat
+sqlite3_exec(db, user_input, 0, 0, &err);              // user_input from fgets/network
+char q[256]; sprintf(q, "SELECT * FROM users WHERE name='%s'", name);
+PQexec(conn, q);                                        // libpq
+mysql_query(conn, q);                                   // libmysqlclient
+
+// SAFE — prepared statement with bound parameters
+sqlite3_stmt *st;
+sqlite3_prepare_v2(db, "SELECT * FROM users WHERE name=?", -1, &st, 0);
+sqlite3_bind_text(st, 1, name, -1, SQLITE_TRANSIENT);
+// libpq: PQexecParams(conn, "... WHERE name=$1", 1, ...); MySQL: mysql_stmt_bind_param
+```
+
 ### Django / Flask (raw SQL)
 
 ```python

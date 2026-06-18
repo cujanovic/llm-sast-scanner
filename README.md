@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **75 vulnerability classes** (including the OWASP LLM Top 10 for AI/agent apps), with a Judge verification stage, an optional adversarial impact pass, and a parallel multi-agent orchestration mode for whole-repo audits.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **77 vulnerability classes** (including the OWASP LLM Top 10 for AI/agent apps), with a Judge verification stage, an optional adversarial impact pass, and a parallel multi-agent orchestration mode for whole-repo audits.
 
 ---
 
@@ -8,7 +8,7 @@ A general-purpose **Static Application Security Testing (SAST) skill** for LLM-b
 
 | Component | What it is |
 |-----------|-----------|
-| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow + Judge verification + adversarial validation, backed by 75 vulnerability reference knowledge bases. |
+| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow + Judge verification + adversarial validation, backed by 77 vulnerability reference knowledge bases. |
 | **`llm-sast-scanner-full-scan-loop/`** | A wrapper skill for an exhaustive, convergence-driven, line-by-line audit of an entire repository. Runs one subagent per vulnerability lens in parallel (or single-context), guarantees 100% line coverage, and writes a timestamped report. |
 | **`AGENTS.md` / `CLAUDE.md`** | The repo-level orchestrator playbook. Drives the parallel lens fan-out and report consolidation. `CLAUDE.md` is a symlink to `AGENTS.md`. |
 | **`.claude/skills/`, `.agents/skills/`** | Per-runtime skill discovery directories. Both are **symlinks to the single canonical skill source** at the repo root, so there is exactly one copy of every skill file and the two runtimes can never drift apart. |
@@ -30,6 +30,7 @@ The core skill gives an agent a structured, evidence-based workflow for finding 
 ### Languages & ecosystems
 
 - **Application languages:** Java, Python, JavaScript / TypeScript, PHP, C# / .NET, Go, Ruby, C / C++, Kotlin, Swift, Objective-C, Rust
+- **Smart contracts:** Solidity / EVM
 - **Infrastructure, config & markup:** Terraform / HCL, Kubernetes & CI/CD YAML, Dockerfile, XML, SQL, HTML
 
 Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest, dedicated source-detection rule sets; the remaining languages are covered with vulnerable-vs-secure detection patterns across the relevant vulnerability classes.
@@ -142,7 +143,7 @@ llm-sast-scanner/                      ← repo root
 ├── CLAUDE.md                          # → symlink to AGENTS.md
 ├── llm-sast-scanner/                  # core skill (canonical source)
 │   ├── SKILL.md                       # 7-step workflow + Judge + adversarial
-│   └── references/                    # 75 vulnerability knowledge bases
+│   └── references/                    # 77 vulnerability knowledge bases
 ├── llm-sast-scanner-full-scan-loop/   # exhaustive convergence-audit skill
 │   └── SKILL.md
 ├── .claude/skills/                    # → symlinks to the two skill dirs above
@@ -157,7 +158,7 @@ llm-sast-scanner/                      ← repo root
 
 ## Vulnerability coverage
 
-75 reference files across the following categories.
+77 reference files across the following categories.
 
 ### Injection
 | File | Vulnerability |
@@ -280,6 +281,8 @@ llm-sast-scanner/                      ← repo root
 | `php_security.md` | PHP-specific security issues |
 | `mobile_security.md` | Mobile security (Android / iOS) — insecure storage, IPC/exported components, WebView, transport |
 | `memory_safety_c_cpp.md` | C/C++ Memory Safety — buffer overflow, use-after-free, double-free, unsafe string functions, integer overflow, null deref, toolchain hardening (CWE-119 / 120 / 416 / 190 / 787) |
+| `smart_contract_security.md` | Smart Contract Security (Solidity / EVM) — reentrancy, access control, unsafe `delegatecall`/low-level calls, integer over/underflow, DoS, front-running/MEV, insecure randomness, oracle manipulation, proxy/upgrade hazards, ERC-20/721/1155 pitfalls (CWE-841 / 284 / 682) |
+| `batch_etl_pipeline_security.md` | Batch / ETL / Mainframe Data-Pipeline Security — job-param & record-field path traversal, landing-dir TOCTOU, fixed-width/COMP-3/EBCDIC parse bounds, trailer integrity, restart double-post (CWE-22 / 78 / 367 / 125 / 707) |
 
 ---
 
@@ -289,34 +292,6 @@ llm-sast-scanner/                      ← repo root
 - **Run 2+ scanning rounds** — increases recall and stabilizes findings via iterative refinement
 - **Enforce per-finding validation** — the Judge + adversarial passes significantly cut false positives
 - **Use the full-scan-loop for whole-repo audits** — it guarantees 100% line coverage against a deterministic scope manifest
-
----
-
-## Benchmark Results
-
-> Scores are for reference only and may vary slightly depending on model compute adjustments.
-
-### Multi-Agent + Skill — Claude Opus 4.6 (high), 2026-03-27
-
-4 Java benchmark projects scanned in parallel with 4 agents using the skill (full reference loading + Judge verification). Blind scan — no ground-truth access during analysis.
-
-| Project | Recall | Precision | F1 | TP | FN | FP |
-|---------|:------:|:---------:|:--:|:--:|:--:|:--:|
-| JavaSecLab | 1.000 | 0.958 | 0.979 | 23 | 0 | 1 |
-| SecExample | 1.000 | 1.000 | 1.000 | 9 | 0 | 0 |
-| VulnerableApp | 1.000 | 1.000 | 1.000 | 10 | 0 | 0 |
-| verademo | 1.000 | 1.000 | 1.000 | 14 | 0 | 0 |
-| **Global** | **1.000** | **0.982** | **0.991** | **56** | **0** | **1** |
-
-### Multi-Agent + Skill — GPT-5.4 (high), 2026-03-27
-
-| Project | Recall | Precision | F1 | TP | FN | FP |
-|---------|:------:|:---------:|:--:|:--:|:--:|:--:|
-| JavaSecLab | 0.957 | 1.000 | 0.978 | 22 | 1 | 0 |
-| SecExample | 0.889 | 1.000 | 0.941 | 8 | 1 | 0 |
-| VulnerableApp | 0.900 | 0.900 | 0.900 | 9 | 1 | 1 |
-| verademo | 0.929 | 1.000 | 0.963 | 13 | 1 | 0 |
-| **Global** | **0.929** | **0.981** | **0.954** | **52** | **4** | **1** |
 
 ---
 

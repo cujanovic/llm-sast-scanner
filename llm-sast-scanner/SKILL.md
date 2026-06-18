@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 75 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework. Covers 77 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.14.0"
+  version: "1.19.0"
   domain: application-security
-  references: 75 vulnerability knowledge bases
+  references: 77 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 75 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 77 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -37,7 +37,7 @@ documenting the sources, sinks, and sanitizers/barriers used to detect and triag
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
-| **Language/Platform** | PHP Security, Mobile Security (Android/iOS), C/C++ Memory Safety |
+| **Language/Platform** | PHP Security, Mobile Security (Android/iOS), C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
 
 ---
 
@@ -150,11 +150,13 @@ references/iac_security.md               — Infrastructure-as-Code misconfig (T
 references/kubernetes_cloud_security.md  — Kubernetes / cloud orchestration: privileged pods, RBAC, securityContext, secrets, NetworkPolicy
 references/cicd_container_security.md     — CI/CD pipeline + container/Docker security (PPE, untrusted inputs, root images, unpinned tags)
 references/memory_safety_c_cpp.md        — C/C++ memory safety: buffer overflow, UAF, unsafe string funcs, integer overflow, toolchain hardening
+references/smart_contract_security.md    — Solidity/EVM smart contracts: reentrancy, access control, unsafe delegatecall/low-level calls, integer over/underflow, oracle/MEV, proxy-upgrade, ERC-20/721/1155
 references/insecure_output_handling.md   — Insecure handling of LLM/model output reaching HTML/SQL/shell/HTTP/eval sinks (OWASP LLM05)
 references/excessive_agency.md           — Excessive LLM/agent functionality, permissions, or autonomy without human approval (OWASP LLM06)
 references/system_prompt_leakage.md      — Secrets / authorization logic in system prompts; reliance on prompt secrecy (OWASP LLM07)
 references/rag_vector_security.md        — RAG / vector & embedding weaknesses: permission-blind retrieval, cross-tenant leak, indirect injection (OWASP LLM08)
 references/ml_supply_chain_poisoning.md  — AI/ML model & dataset supply chain and data/model poisoning: unsafe model load, trust_remote_code, unverified artifacts (OWASP LLM03/04)
+references/batch_etl_pipeline_security.md — Batch / ETL / mainframe data-pipeline flaws: job-param & record-field path traversal, landing-dir TOCTOU, fixed-width/COMP-3/EBCDIC parse bounds, trailer integrity, restart double-post (CWE-22/78/367/125/707)
 ```
 
 **Sources / sinks / sanitizers:** Each reference documents the per-language sources and sinks for the class and the
@@ -190,6 +192,7 @@ For each loaded vulnerability class, perform taint analysis:
    - WebSocket messages
    - Environment variables
    - Database reads of user-supplied data, deserialized objects
+   - **Library/SDK mode** — when the target is a library, framework, or SDK with no HTTP layer, treat the parameters of public/exported API methods (those a downstream consumer can call with attacker-influenced input, e.g. parsers, deserializers, path/URL/command builders) as taint sources. Internal/private helpers and config-only setters are not sources.
 
 2. **Trace Data Flow** — Follow the data through:
    - Variable assignments, function arguments, return values
@@ -239,7 +242,7 @@ For each candidate finding, answer all of the following:
 
 #### Reachability Check
 - [ ] Is the source actually user-controlled, or is it internal/trusted data?
-- [ ] Is the vulnerable code path reachable from an HTTP endpoint / entry point, or is it dead code / internal-only?
+- [ ] Is the vulnerable code path reachable from an HTTP endpoint / entry point — or, for a library/SDK, from a public/exported API a downstream caller can reach — or is it dead code / private-internal-only?
 - [ ] Are there upstream guards (auth middleware, input filters) that block the path before it reaches the sink?
 
 #### Sanitization Re-Evaluation
@@ -252,6 +255,15 @@ For each candidate finding, answer all of the following:
 - [ ] Is exploitation conditional on a specific environment, config, or privilege level?
 - [ ] For logic bugs: is the business impact real, or hypothetical?
 - [ ] Is the chosen tag the most precise valid label for this finding?
+- [ ] **Victim other than the attacker**: does exploitation harm a *different* user, the system, or other tenants — not only the attacker themselves? A flow where the attacker can only affect their own account/session/data/cache entry (e.g. self-XSS pasted into one's own browser, poisoning only one's own row, DoSing only one's own request) is **not** a finding unless it can be delivered to or triggered against a victim (stored/reflected to others, CSRF-delivered, cache-key-shared). When uncertain whether a victim exists, try multiple delivery paths before concluding it is self-harm only.
+
+**Confidence signals** (use to set verdict and severity, not to silently drop):
+- *Raises confidence*: reachable from the Internet (vs local console/CLI only); exploitable by an anonymous vs an authenticated user; the input (source) and output (sink) nodes match what the class actually requires.
+- *Lowers confidence — cap at LIKELY / prefer NEEDS CONTEXT*:
+  - **Source/sink type mismatch**: the actual source or sink does not match the class (e.g., a "reflected XSS" whose sink is a log file rather than an HTTP response, or an "SQLi" sink that is not a query API) — usually a false positive.
+  - **Second-order / stored input**: the flow starts from stored data (file/DB/cache/config) rather than a direct request — exploitability depends on how that store was populated.
+  - **Non-production sink**: output goes only to a debug/trace log or dev-only path typically disabled in production.
+  - **Sanitizer present in the path** (even if imperfect), or the data-flow is very long/complex/hard to reproduce, or evidence is insufficient — do not report as CONFIRMED on weak evidence.
 
 #### Judge Verdict
 

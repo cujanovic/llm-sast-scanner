@@ -230,6 +230,37 @@ curl -s -H "Authorization: Bearer <USER_B_TOKEN>" \
 # Expect 403/404 if safe; 200 + foreign order data confirms IDOR
 ```
 
+**Sequential / encoded ID enumeration** — when IDs are integers or leaked UUIDs:
+
+```bash
+for id in $(seq 1 100); do
+  curl -s -o /dev/null -w "%{http_code} " \
+    -H "Authorization: Bearer <USER_B_TOKEN>" \
+    "https://app.example/api/orders/$id"
+done
+# 200 on foreign IDs, or distinct 403 vs 404 shapes, confirms missing binding
+```
+
+Try base64/hex-decoded variants of opaque IDs when the API accepts alternate encodings.
+
+**Vertical probe** — same low-privilege token against admin/internal routes (`/api/admin/users`, `/api/internal/reports`); `200` with privileged data is function-level IDOR/BOLA.
+
+**HTTP method / param swap** — if `GET` is blocked, retry `DELETE`, `PATCH`, or `PUT` on the same path; auth middleware often differs by verb.
+
+```bash
+curl -X PATCH -H "Authorization: Bearer <USER_B_TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"email":"attacker@example.com"}' \
+  https://app.example/api/users/<USER_A_RESOURCE_ID>
+```
+
+**Parameter pollution** — duplicate ID keys so gateway and backend disagree on precedence:
+
+```bash
+curl "https://app.example/api/profile?user_id=<USER_B_ID>&user_id=<USER_A_ID>" \
+  -H "Authorization: Bearer <USER_B_TOKEN>"
+```
+
 ## Common False Alarms
 
 - Resources that are public or anonymous by design

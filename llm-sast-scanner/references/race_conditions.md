@@ -149,6 +149,29 @@ Concurrency bugs enable duplicate state changes, quota bypass, financial abuse, 
 4. Evidence across channels (e.g., REST and GraphQL) if applicable
 5. Include before/after state and exact request set used
 
+### Dynamic Test / PoC
+
+Baseline: one request should succeed (or fail as expected). Then fire **N identical state-changing requests in parallel** (start N=10–20).
+
+```bash
+# Parallel POST — coupon redeem, transfer, vote, OTP consume, etc.
+for i in $(seq 1 20); do
+  curl -s -X POST https://app.example/api/redeem \
+    -H "Authorization: Bearer <TOKEN>" \
+    -H "Content-Type: application/json" \
+    -d '{"coupon":"DISCOUNT50"}' &
+done
+wait
+```
+
+**Vulnerable signals**: multiple `2xx` for a single-use action; balance/credit changes exceeding one deduction; duplicate rows or audit entries; mixed success/failure where sequential retries always fail.
+
+**Tighter timing** — warm TLS/session first, then release all requests together (background `&` as above, or HTTP/2 multiplexing on one connection) to shrink the check→use window.
+
+**Rate-limit / quota races** — same burst against login, OTP verify, or one-time-claim endpoints; count successes above the documented per-window cap.
+
+Compare durable state (DB, ledger, inventory) before and after — not response bodies alone.
+
 ## Common False Alarms
 
 - Truly idempotent operations with enforced ETag/version checks or unique constraints

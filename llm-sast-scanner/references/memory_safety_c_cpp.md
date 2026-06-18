@@ -240,6 +240,16 @@ raw->bar();
 }
 ```
 
+#### Interprocedural UAF (free and use in different functions)
+
+Many real UAFs span function boundaries — the pointer is freed in one function and dereferenced in another reachable through the call graph (or via a shared global/struct field). Trace these, not just same-function cases.
+
+- **Free operations (incl. custom wrappers)**: `free(`, `delete`/`operator delete`, kernel allocators `kfree(`/`kvfree(`, and **any project-specific wrapper** — treat a function whose name contains `free`/`release`/`destroy`/`put`/`cleanup` as a deallocator when it frees its argument. Flag the freed pointer (and aliases/copies) as tainted.
+- **Dangerous sinks for the freed pointer**: dereference (`*p`), array index (`p[i]`), member access (`p->field`), or passing it as an argument to another function that dereferences it.
+- **Propagation to follow**: copies/aliases (`q = p;`), struct field stores (`ctx->buf = p;`) and later `ctx->buf` reads, pass-through via function parameters and return values, and the same global/field touched by two functions sharing a caller.
+- **Barriers that clear the finding** (must occur on the path between free and use): reassignment to `NULL`/`0`, or **reallocation** of the same pointer (`malloc`/`calloc`/`realloc`/`new`, kernel `kmalloc`/`kzalloc`/`kvmalloc`).
+- **Triage before reporting**: (1) does the free provably execute *before* the use on some path? (2) is it the *same* object/alias (pointer-type-compatible)? (3) is the object still freed at the use (not nulled, reinitialized, or reallocated)? A double-free is the same pattern with a second deallocator as the sink.
+
 ### Unbounded input (`gets`, `scanf`)
 
 ```c

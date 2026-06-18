@@ -17,6 +17,26 @@ Even when the library is up to date, the pattern signals an architectural risk w
 
 ---
 
+## Variant Hunting / Fix-Pattern Lifting
+
+A single confirmed vulnerability is rarely unique — the same mistake usually recurs elsewhere. After confirming one finding (or learning of a CVE), **lift the abstract pattern and sweep the whole codebase for unfixed siblings**. This raises recall far beyond the seed location.
+
+**Two triggers**
+
+- **Post-finding sweep** — once any finding is confirmed, generalize it to a pattern (dangerous sink + source shape + the missing guard) and search for every other call site that matches the sink/source but lacks the guard.
+- **N-day fix-pattern lifting** — from a public CVE/patch diff, the *removed* code reveals the vulnerable shape and the *added* code reveals the correct guard/sanitizer. Hunt the target for call sites that still match the pre-fix shape (e.g. a dependency upgraded in one module but the same unsafe call open elsewhere, or a fix applied to one handler but not its copies).
+
+**Method**
+
+1. Express the seed as an invariant: *"every call to `SINK` reachable from `SOURCE` must be preceded by `GUARD`."*
+2. Enumerate all call sites of `SINK` (normalize across wrappers, aliases, and re-exports — the same function is often reached via a helper).
+3. Flag every site where the guard/sanitizer is absent or bypassable; confirm reachability from untrusted input per the usual source→sink rules.
+4. Emit each variant as its own finding that references the seed pattern, so triage can batch them.
+
+**Cross-reference**: combine with the per-class sink tables in the other references — those define the `SINK` set to sweep for each vulnerability class.
+
+---
+
 ## Python Source Detection Rules
 
 ### PyYAML — Arbitrary Code Execution

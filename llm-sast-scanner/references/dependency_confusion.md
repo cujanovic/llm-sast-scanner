@@ -80,6 +80,7 @@ Flag a dependency when ALL hold:
 ## Cross-Ecosystem Candidate Signals
 
 - **Typosquat candidate**: a dependency name within edit-distance 1 of a popular package (`reactt`, `lodahs`, `crossenv` vs `cross-env`, `python-dateutil` vs `python-dateutils`). Flag for manual confirm.
+- **Hallucinated-package candidate ("slopsquatting")**: an imported/declared package name that does not exist on any configured registry — frequently introduced by AI-generated or copy-pasted code that invents plausible-sounding module names. An attacker who registers the non-existent name on the public registry achieves code execution on the next install. Flag any dependency referenced in code/manifests that resolves nowhere (404 on all sources); confirm by registry lookup (claimable name = exploitable). Cross-ref `ml_supply_chain_poisoning.md` for the AI-codegen origin.
 - **Exposed manifest**: any manifest/lockfile/registry-config (`package.json`, `requirements.txt`, `pom.xml`, `composer.json`, `.npmrc`, `pip.conf`, `nuget.config`, etc.) checked into a public webroot or served by the app — leaks the internal names an attacker would claim. Amplifier signal that strengthens a candidate; cross-ref `information_disclosure.md`.
 
 ## FALSE POSITIVE Rules

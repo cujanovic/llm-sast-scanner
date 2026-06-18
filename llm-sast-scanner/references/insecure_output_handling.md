@@ -107,8 +107,23 @@ Additional barriers: parameterized DB access; URL allowlist + private-IP/redirec
 - Tool-calling where the SDK enforces a typed schema and the value is used as data, not code.
 - Internal batch jobs where the prompt and model are fully trusted and no external input reaches the prompt (verify there is truly no user/retrieved content upstream).
 
+## Related: Insecure Inference-Parameter Configuration (CWE-1434)
+
+Output trustworthiness also depends on *how the model is invoked*. Insecurely set generative inference parameters make responses less predictable and easier to steer, raising jailbreak/prompt-injection success and the chance that unsafe text reaches a sink.
+
+**Recon / signals**
+- High or unbounded sampling for security-sensitive flows (auth/eligibility decisions, content moderation, code/command generation): `temperature` near or above `1.0`, wide-open `top_p`/`top_k`, where deterministic output is required.
+- Disabled or downgraded safety/guardrails: `safety_settings=...BLOCK_NONE`, `moderation` off, content filters turned off.
+- Missing output caps that become unbounded consumption: no `max_tokens` / `max_output_tokens` (cost/DoS — see `denial_of_service.md`).
+- Non-reproducible security checks: no fixed `seed` where a deterministic verdict is expected.
+
+**Safe pattern** — for security-relevant decisions use low/zero `temperature`, constrained `top_p`/`top_k`, an explicit `max_tokens`, and keep provider safety filters enabled; still treat the result as data and validate it against an allowlist before any sink.
+
+Tag impact by the sink the unsafe output reaches; this chains with `prompt_injection.md` (weaker sampling → higher injection success) and `denial_of_service.md` (missing token caps).
+
 ## References
 
 - OWASP LLM05:2025 Improper Output Handling
 - CWE-79 (XSS), CWE-89 (SQLi), CWE-78 (Command Injection), CWE-918 (SSRF), CWE-94 (Code Injection)
-- Related: `prompt_injection.md`, `xss.md`, `sql_injection.md`, `rce.md`, `ssrf.md`, `content_security_policy.md`
+- CWE-1434 (Insecure Setting of Generative AI/ML Model Inference Parameters)
+- Related: `prompt_injection.md`, `xss.md`, `sql_injection.md`, `rce.md`, `ssrf.md`, `content_security_policy.md`, `denial_of_service.md`

