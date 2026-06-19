@@ -127,6 +127,19 @@ Commonly affected languages: Python, JavaScript, Go, Java.
 - JSON body parsed into object used directly as filter (`find(req.body)`)
 - `$where` clause contains interpolated user string (also code-injection class in JavaScript)
 
+### Query-string / form bracket-notation operator injection
+
+Operator injection does **not** require a JSON body. Body parsers that build nested objects from keys — Express `qs` (default), `body-parser` extended mode, and PHP's native `param[$ne]=` array parsing — let an attacker smuggle operators through ordinary URL/form parameters. This is a high-signal source pattern: a route reading `req.query`/`req.body`/`$_GET` and passing it straight into a filter is injectable even with no visible JSON.
+
+- **VULN (Express + qs)**: `GET /login?user=admin&pass[$ne]=` → `req.query.pass` becomes `{ $ne: "" }`
+- **VULN (PHP)**: `POST user=admin&pass[$ne]=` → `$_POST['pass']` becomes `['$ne' => '']`
+- **Confirmation forms** to test against a candidate parameter (URL-encode `[`/`]` as needed):
+  - `param[$ne]=` and `param[$ne]=null` — matches any value (auth bypass)
+  - `param[$gt]=` — greater-than empty, matches most values
+  - `param[$regex]=.*` — regex match
+  - `$where=1` / `$where=sleep(100)` — server-side JS execution / time-based blind signal (Mongo `$where`)
+- **SAFE**: cast the field to a primitive before use (`String(req.query.pass)`), reject non-string types, or disable nested parsing (`qs` with `{ depth: 0 }` / `parameterLimit`).
+
 ## Safe Patterns
 
 - Explicit string type check before query field assignment

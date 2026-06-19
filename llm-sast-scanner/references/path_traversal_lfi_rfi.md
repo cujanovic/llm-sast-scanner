@@ -388,16 +388,33 @@ end
 // VULNERABLE — query param joined directly
 http.ServeFile(w, r, filepath.Join("/var/www/files", r.URL.Query().Get("file")))
 
-// SECURE — Clean + prefix check
+// SECURE (Go 1.24+) — os.Root confines all operations to the directory and
+// rejects symlinks/paths that resolve outside it (stronger than a prefix check)
+root, err := os.OpenRoot("/var/www/files")
+if err != nil { http.Error(w, "error", 500); return }
+defer root.Close()
+f, err := root.Open(r.URL.Query().Get("file")) // cannot escape root
+if err != nil { http.Error(w, "Forbidden", http.StatusForbidden); return }
+defer f.Close()
+io.Copy(w, f)
+
+// SECURE (pre-1.24 fallback) — Clean + prefix check (LEXICAL ONLY: does not
+// resist symlinks; reject absolute/non-local input first via filepath.IsLocal)
 name := r.URL.Query().Get("file")
+if !filepath.IsLocal(name) { // false for absolute paths, "..", and escaping paths
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
 base := "/var/www/files"
-clean := filepath.Join(base, filepath.Clean("/"+name))
+clean := filepath.Join(base, name)
 if !strings.HasPrefix(clean, base+string(os.PathSeparator)) {
     http.Error(w, "Forbidden", http.StatusForbidden)
     return
 }
 http.ServeFile(w, r, clean)
 ```
+
+**Go sanitizer note**: prefer `os.Root`/`os.OpenRoot` (Go 1.24+) for any user-influenced file or archive-entry path — it enforces confinement at the OS level and rejects escaping symlinks, which a lexical `filepath.Clean` + prefix check does not. `filepath.IsLocal(name)` is a fast pre-filter (rejects absolute paths, `..`, and Windows reserved names) but is not symlink-resistant on its own.
 
 ## Java Servlet Patterns (CWE-22)
 

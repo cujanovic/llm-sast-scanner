@@ -152,6 +152,15 @@ query CrossAccountAccess {
 - Mix the org associated with a token with a resource belonging to a different org
 - Test cross-tenant report rollups, analytics aggregations, and admin views that span multiple tenants
 
+### Relational Filter / ORM Query Leakage (CWE-639 / CWE-200)
+
+Request-controlled filter/query DSLs that the backend forwards into an ORM let a low-privileged user traverse relations and read fields they should never reach — distinct from classic single-ID IDOR (the ID is not the attack; the *filter operator/relation path* is).
+
+- **Sinks**: `Model.objects.filter(**request.args)` / `filter_by(**request.GET)` (Django/SQLAlchemy); `prisma.x.findMany({ where: req.body })` (Prisma); `where(params[:filter])` (ActiveRecord); Query-by-Example from request body (Hibernate); PostgREST/Hasura-style `?filter[relation.field][op]=` traversal; GraphQL `where`/`filter` args without per-field auth.
+- **Smell**: the *entire* filter/where object (not a fixed allow-list of columns) comes from the request, so an attacker can pivot to relations (`author.email`, `owner.org_id`) or sensitive columns (`password_hash`, `reset_token`).
+- **Attacker input**: `GET /api/notes?filter[author.email][starts_with]=admin@` or `{"where":{"user":{"role":"admin"}}}` — leaks rows across the relation graph.
+- **Safe**: per-endpoint allow-list of filterable fields/operators; resolve relations against the authenticated principal; apply row-level auth middleware; GraphQL field-level `@auth`.
+
 ### WebSocket
 
 - Verify per-subscription authorization: channel and topic names must not be guessable (`user_{id}`, `org_{id}`)

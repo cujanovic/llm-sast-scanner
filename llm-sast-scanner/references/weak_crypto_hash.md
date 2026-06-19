@@ -91,6 +91,13 @@ Identify deprecated cryptographic algorithms, broken hash functions, and predict
 - **SAFE**: `password_hash($password, PASSWORD_BCRYPT)`, `password_verify()`
 - **SAFE**: `random_bytes(32)`, `bin2hex(random_bytes(16))`
 
+### Go
+- **VULN (random)**: `math/rand` (`rand.Int`, `rand.Read`, `rand.Intn`, including the global `math/rand/v2`) used for tokens, OTP, session IDs, nonces, salts, or password reset values — predictable PRNG
+- **VULN (hash)**: `crypto/md5` (`md5.Sum`), `crypto/sha1` (`sha1.Sum`) for security; `crypto/des`, `crypto/rc4`; `crypto/sha256` directly on a password (fast hash)
+- **SAFE (random)**: `crypto/rand` (`rand.Read`, `rand.Int`) for all security-sensitive values — never flag `crypto/rand`
+- **SAFE (password)**: `golang.org/x/crypto/argon2` (`argon2.IDKey`), `golang.org/x/crypto/bcrypt`, `golang.org/x/crypto/scrypt`, or stdlib `crypto/pbkdf2` (Go 1.24+) with ≥600k iterations
+- **Decision rule**: `math/rand*` in any security context → **VULN**; `crypto/rand` → **SAFE**. Import-path resolves the ambiguity (both expose `rand.Read`/`rand.Int`).
+
 ## Java Servlet Patterns
 
 ### Weak Random (CWE-330)
@@ -221,6 +228,24 @@ CWE-326 (insufficient key size), CWE-780 (RSA without OAEP), CWE-1204 (static IV
 
 **VULN (Java)**: `signature.equals(expectedSig)` on HMAC/signature bytes.
 **SAFE (Java)**: `MessageDigest.isEqual` or `Arrays.compareUnsigned` on fixed-length MAC bytes.
+
+**Non-constant-time comparison of secrets — per-language sinks → sanitizers**
+
+| Language | VULN sink (secret/MAC/token compared with) | SAFE constant-time API |
+|----------|--------------------------------------------|------------------------|
+| Python | `==`, `!=`, `hmac.compare(...)` via `digest()==` | `hmac.compare_digest(a, b)`, `secrets.compare_digest` |
+| PHP | `==`, `===`, `strcmp()` on MAC/token | `hash_equals(known, user)` |
+| Go | `==`, `bytes.Equal` on MAC/token | `crypto/subtle.ConstantTimeCompare(a, b) == 1` |
+| C# / .NET | `==`, `SequenceEqual`, `String.Equals` on MAC | `CryptographicOperations.FixedTimeEquals(a, b)` |
+| Node.js | `===`, `Buffer.compare`, `==` on digests | `crypto.timingSafeEqual(a, b)` (equal-length buffers) |
+| Ruby | `==` / `!=` on HMAC | `ActiveSupport::SecurityUtils.secure_compare`, `OpenSSL.fixed_length_secure_compare` |
+| Java | `String.equals` / `Arrays.equals` on MAC | `MessageDigest.isEqual`, `Arrays.compareUnsigned` |
+
+**Other timing leaks on secret-derived values (not just equality)** — flag when the operand is a key, nonce, or other secret:
+- **Division / modulo** (`/`, `%`) on secret-derived values — variable-time on many CPUs (KyberSlash-class leaks in crypto/KEM code). Prefer constant-time arithmetic or masking.
+- **Secret-dependent branches** — `if (secretByte == x)`, early-return on first mismatch in a compare loop, or differing work per secret bit.
+- **Secret-indexed table/array lookups** — `sbox[secretIndex]` leaks via cache timing; use constant-time selection.
+- **Early-terminating string operations** on a secret/MAC/token — `startswith`/`endsWith`/`find`/`index`/`indexOf`/`in`/substring search return as soon as they diverge, leaking a prefix-match length oracle. Treat these the same as `==` on a secret; use the per-language constant-time API above.
 
 ---
 
@@ -401,7 +426,7 @@ Use after presence match to avoid false positives:
 | Salt | Random per-user via KDF library output | Fixed/global salt string |
 | Symmetric mode | AES-GCM / ChaCha20-Poly1305 + random nonce | AES/ECB; CBC without MAC |
 | IV/nonce | New CSPRNG bytes each encrypt | Zero/constant IV reused |
-| RNG | `SecureRandom`, `crypto.randomBytes`, `secrets.*` | `Random`, `Math.random`, `rand()` for tokens |
+| RNG | `SecureRandom`, `crypto.randomBytes`, `secrets.*`, Go `crypto/rand` | `Random`, `Math.random`, `rand()`, Go `math/rand` for tokens |
 | Keys | KMS/HSM/vault reference; versioned alias | Literal key in repo; env-only DEK without wrap |
 | Storage | One-way slow hash | Reversible password encryption |
 

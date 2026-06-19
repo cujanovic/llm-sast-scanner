@@ -221,7 +221,7 @@ Flag sinks where a non-constant variable appears in a dangerous position. Phase-
 |----------|--------------|
 | Python | `os.system(`, `os.popen(`, `subprocess.*shell=True`, string-form `subprocess.run(` / `Popen(` with variables |
 | Node.js | `child_process.exec(`, `execSync(`, `spawn(.*shell:\s*true`, `shelljs.exec(` |
-| PHP | `exec(`, `system(`, `passthru(`, `shell_exec(`, `` ` `` backticks with `{$` or concatenation |
+| PHP | `exec(`, `system(`, `passthru(`, `shell_exec(`, `popen(`, `proc_open(`, `pcntl_exec(`, `` ` `` backticks with `{$` or concatenation |
 | Ruby | `system("` with `#{}`, backticks, `%x{`, `IO.popen(`, `Open3.popen3(` |
 | Java | `Runtime.getRuntime().exec(`, `ProcessBuilder(` with variable args or `"sh", "-c"` |
 | Go | `exec.Command(` where command name or args are built from external input |
@@ -369,7 +369,7 @@ The attacker's input reaches an **OS shell or process execution sink** and is in
 
 **Sinks that indicate command injection:**
 - Python: `os.system()`, `os.popen()`, `subprocess.Popen(shell=True)`, `subprocess.run(shell=True)`, `subprocess.call(shell=True)`
-- PHP: `exec()`, `system()`, `passthru()`, `shell_exec()`, `popen()`, backtick operator
+- PHP: `exec()`, `system()`, `passthru()`, `shell_exec()`, `popen()`, `proc_open()`, `pcntl_exec()`, backtick operator
 - Node.js: `child_process.exec()`, `child_process.execSync()`
 - Java: `Runtime.getRuntime().exec()`, `ProcessBuilder` with user args
 - Ruby: `system()`, backticks, `%x{}`, `IO.popen()`, `Open3.capture3()`

@@ -54,6 +54,19 @@ Also scan: OpenAPI/GraphQL/Proto field names, ORM models, DB migrations, form `n
 
 Trace PII variables into these sinks. For log *content* exposure mechanics, cross-check `information_disclosure.md`; for log *injection*, cross-check `log_injection.md`.
 
+### Sensitive data to AI/LLM providers, data warehouses & managed third parties
+
+A privacy-relevant data flow also exists when personal data reaches an external **component** — not just an analytics SDK. The risk is off-tenant disclosure of PII/PHI to a processor outside the data-controller boundary. Trace PII into these sinks even when the call looks like ordinary business logic:
+
+| Component class | Grep / structural targets |
+|-----------------|----------------------------|
+| AI / LLM provider APIs | `openai`, `OpenAI(`, `chat\.completions\.create`, `embeddings\.create`, `anthropic`, `messages\.create`, `cohere`, `replicate`, `huggingface`, `bedrock`, `vertexai`, `generativelanguage`, `azure.*openai` — PII placed in prompts, embeddings, or fine-tune/training payloads sent off-tenant |
+| Data warehouses / pipelines | `bigquery`, `snowflake`, `redshift`, `clickhouse`, `databricks`, `dataflow` — raw PII columns streamed/exported without minimization or tenant scoping |
+| Search / index clusters | `elasticsearch`, `opensearch`, `algolia`, `meilisearch`, `typesense` — personal fields indexed in plaintext, often with broad read access |
+| Managed DB / KV / queue / stream | `dynamodb`, `firestore`, `cosmosdb`, `mongodb.*atlas`, `redis`, `kafka`, `sqs`, `pubsub` — PII persisted/forwarded to a third-party-operated store |
+
+For each: confirm the personal data is necessary, minimized/pseudonymized, covered by a data-processing agreement, and scoped to the correct tenant. Placing raw PII in an LLM prompt or embedding is an off-tenant disclosure — cross-check `information_disclosure.md` (LLM02) and `rag_vector_security.md`.
+
 ### URL / query / redirect param patterns
 
 | Signal | Examples |
@@ -84,6 +97,7 @@ Trace PII variables into these sinks. For log *content* exposure mechanics, cros
 - Account "delete" sets `deleted=true` only; related tables, S3 objects, caches, search indexes, and vendor profiles untouched
 - Export/backup jobs copy full user records indefinitely with no redaction or rotation
 - Webhook or batch job forwards full user profile to marketing/CRM without purpose limitation or consent flag
+- Raw personal data placed in an LLM prompt/embedding/fine-tune payload, or streamed into a third-party data warehouse, search index, or managed datastore, without minimization, pseudonymization, or a data-processing agreement (off-tenant disclosure)
 - Child-directed or health/finance flows collect data without age/consent branch in code
 - Sensitive HTML input fields (password, SSN, card number, OTP) rendered without `autocomplete="off"` (or `new-password`/`one-time-code`), letting browsers cache the value in form history on shared devices (CWE-525)
 
@@ -179,6 +193,11 @@ logger.info(f"Signup failed for {request.json['email']} / {request.json['ssn']}"
 
 # VULN — Send full profile to third-party CRM unconditionally
 requests.post(CRM_URL, json=user.__dict__)
+
+# VULN — raw PII/PHI placed in an LLM prompt (off-tenant disclosure; see information_disclosure.md LLM02)
+openai.chat.completions.create(model="gpt-4", messages=[
+    {"role": "user", "content": f"Summarize patient {p.name}, SSN {p.ssn}, dx {p.diagnosis}"}
+])
 ```
 
 ### JavaScript / TypeScript (web & Node)
@@ -238,5 +257,6 @@ Analytics.setUserProperty(user.email, forName: "email")
 - Encrypted PII at rest using modern algorithms — no plaintext-storage finding (still verify key management separately)
 - Delete flow that soft-deletes then async hard-purges within documented SLA — not missing erasure if purge job exists in code
 - Internal admin-only export of PII with authZ — not third-party sharing; still check minimization/retention
+- Pseudonymized or aggregated data exported to a warehouse/search index/LLM under a documented data-processing agreement with tenant scoping — verify minimization, not mere presence of the sink
 - Age field required for legal compliance ( alcohol, gambling, COPPA gate) — not over-collection when code enforces jurisdictional rules
 - Hashing email for analytics *after* consent solely for attribution within same controller — lower risk than raw PII to ad networks; confirm consent branch exists

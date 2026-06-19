@@ -28,7 +28,7 @@ Third-party packages, lockfiles, install hooks, and externally loaded scripts ar
 - **CI workflow PPE, mutable action tags, Dockerfile root** — see `cicd_container_security.md` unless the finding is manifest/lockfile/install-hook specific
 - **Hardcoded malicious payloads in app source** — see `hardcoded_code_backdoor.md`
 - **Runtime fetching of packages from user input** — see `rce.md` / `ssrf.md`; here focus on build-time resolution and static HTML includes
-- **Confirmed CVE exploitability in application code paths** — flag outdated dep as supply-chain hygiene; trace reachability separately
+- **Confirmed CVE exploitability in application code paths** — flag outdated dep as supply-chain hygiene; triage reachability separately (see *Dependency CVE Exploitability Triage* below)
 
 ## Recon Indicators
 
@@ -224,6 +224,25 @@ registry=http://mirror.local/npm/
   }
 }
 ```
+
+## Dependency CVE Exploitability Triage (reachability)
+
+A dependency appearing in the tree with a known CVE/GHSA is **not** proof the project is exploitable. "The lib is present, therefore we are vulnerable" is the most common false positive in software-composition findings. Before raising a dependency CVE to a real bug, triage whether the *vulnerable code path* is actually reached in this project, with attacker-influenced input, under a configuration that enables it.
+
+**Triage questions (answer in order; stop at the first that resolves the verdict):**
+
+1. **Is the vulnerable symbol reachable?** Identify the specific vulnerable function/class/endpoint named in the advisory (not just the package). Grep the codebase for calls to it — directly and through wrappers, re-exports, framework auto-wiring, or reflection/DI. If nothing in the app (or its reachable transitive deps) ever calls it, the finding trends toward *not affected*.
+2. **Is it transitively pulled but pruned?** A vulnerable package can be a declared dep yet excluded from the shipped artifact (dev/test-only scope, tree-shaken, optional feature flag off, platform-specific dependency not built). Confirm it is in the production runtime, not just the lockfile.
+3. **Can attacker input reach it?** Apply the normal source→sink rules: is there a path from an untrusted source to the vulnerable API, or is it only ever called with constant/internal data?
+4. **Is the vulnerable configuration enabled?** Many CVEs require a non-default setting (e.g. a parser feature, a deserialization mode, a specific protocol). If the project disables it, the advisory may not apply to this build.
+
+**Record a verdict** for each triaged advisory so it is not re-investigated every scan:
+
+- `affected` — vulnerable path reachable from attacker-controlled input under the project's config. Treat as a real finding and remediate (upgrade/patch/mitigate).
+- `not_affected` — with a concrete justification class: *vulnerable code not present / not reachable*, *not in runtime artifact (dev-only or pruned)*, *requires config that is disabled*, or *input is never attacker-controlled*.
+- `under_investigation` — reachability could not be determined. In a read-only or sandboxed context without package-manager/grep execution you can usually only read the lockfile/SBOM, so most reachability questions default here — state that limitation explicitly rather than guessing `not_affected`.
+
+This triage reduces dependency-scan noise without ignoring it: a `not_affected` verdict still leaves the outdated pin as a hygiene signal (upgrade opportunistically), it just is not an exploitable-bug finding. Keep the SCA reachability verdict separate from first-party taint findings.
 
 ## Common False Alarms
 

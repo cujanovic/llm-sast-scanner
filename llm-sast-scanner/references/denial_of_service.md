@@ -291,6 +291,36 @@ Long-lived servers leak memory and scheduler capacity when goroutines (or other 
 
 **Triage**: per-request goroutine spawn reachable from a remote handler with no termination guarantee → Medium (resource exhaustion). Bounded/one-shot background goroutines with a clear exit are not findings.
 
+## Missing HTTP server timeouts — slow-client / Slowloris (Go)
+
+A Go HTTP server with no read/write/idle timeouts lets a single client hold a connection open indefinitely (dribbling headers or a slow body), so a small number of slow connections exhausts the accept queue and starves legitimate traffic — an availability DoS reachable on any public listener.
+
+**Recon — unhardened server patterns**:
+- **`http.ListenAndServe(addr, handler)`** / `http.ListenAndServeTLS(...)` — the package-level helpers use a default server with **no** `ReadTimeout`, `ReadHeaderTimeout`, `WriteTimeout`, or `IdleTimeout`.
+- **`&http.Server{Addr: ...}`** constructed without `ReadTimeout`/`ReadHeaderTimeout` and `WriteTimeout`/`IdleTimeout` set.
+- No `MaxHeaderBytes` cap (defaults to 1MB, but unbounded header *time* is the Slowloris vector — the timeout is what matters).
+
+```go
+// VULNERABLE: no timeouts → slow-client / Slowloris exhaustion
+http.ListenAndServe(":8080", handler)
+srv := &http.Server{Addr: ":8080", Handler: handler} // missing all timeouts
+
+// SAFE: bound how long any one connection can occupy a server slot
+srv := &http.Server{
+    Addr:              ":8080",
+    Handler:           handler,
+    ReadHeaderTimeout: 5 * time.Second,  // critical for Slowloris (slow header dribble)
+    ReadTimeout:       10 * time.Second,
+    WriteTimeout:      10 * time.Second,
+    IdleTimeout:       120 * time.Second,
+    MaxHeaderBytes:    1 << 20,
+}
+```
+
+**Sanitizers / safe patterns**: set `ReadHeaderTimeout` (and ideally `ReadTimeout`/`WriteTimeout`/`IdleTimeout`) on the `http.Server`; for long-lived/streaming handlers use per-request `http.ResponseController` deadlines instead of leaving the server-wide timeouts at zero; front the service with a timeout-enforcing reverse proxy.
+
+**Triage**: a public/attacker-reachable Go listener with no `ReadHeaderTimeout`/`ReadTimeout` → Medium (slow-client connection exhaustion). Internal-only listeners, or servers behind a proxy that enforces timeouts, are Low/Info. A server with read/idle timeouts configured is not a finding.
+
 ## Unreleased resource leaks (CWE-404 / CWE-772)
 
 Handles acquired per request but not released on **every** path (especially exception paths) accumulate until the process exhausts file descriptors, connection-pool slots, threads, or native memory — an availability DoS reachable from any handler that opens a resource under attacker-driven volume. This is the managed-language analogue of the Go leak above (Java/Kotlin, C#, Python, JS/Node, Go `io.Closer`).

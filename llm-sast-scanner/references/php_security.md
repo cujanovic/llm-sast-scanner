@@ -242,7 +242,7 @@ All of the following are attacker-controlled sources:
 - `unserialize(` + superglobal or decoded cookie → **CONFIRM** + check for magic method gadgets
 - `==` (loose) comparison in authentication/token validation → **CONFIRM** (type juggling bypass)
 - `in_array($input, $list)` without `true` third argument in access control → **CONFIRM** (type juggling)
-- `exec/system/passthru/shell_exec(` + user input → **CONFIRM** (OS command injection)
+- `exec/system/passthru/shell_exec/popen/proc_open/pcntl_exec(` + user input → **CONFIRM** (OS command injection)
 - `file_get_contents($_GET['url'])` or similar → **CONFIRM** (SSRF or LFI)
 - `DB::select("...'" . $request->x . "'...")` in Laravel → **CONFIRM** (SQL injection)
 

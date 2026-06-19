@@ -64,6 +64,7 @@ rg -n 'pull_request_target|uses:.*@(main|master|latest|v[0-9]+)' .github/workflo
 rg -n '\$\{\{.*(head_ref|pull_request\.(title|body))' .github/workflows/
 rg -n 'FROM .*(:latest|@sha256:)|ADD https?://|USER root' **/Dockerfile*
 rg -n 'echo.*secrets\.|printenv|CI_DEBUG_TRACE:\s*true' .github/workflows/ .gitlab-ci.yml
+rg -n '>> ?"?\$GITHUB_(ENV|OUTPUT)|eval .*steps\..*outputs|\$\(.*steps\..*outputs' .github/workflows/
 ```
 
 ## Vulnerable Conditions
@@ -154,6 +155,39 @@ jobs:
 # VULN — branch name in script
 - run: git checkout ${{ github.head_ref }} && ./deploy.sh
 ```
+
+### Env-var intermediary injection (`$GITHUB_ENV` / `$GITHUB_OUTPUT`)
+
+Attacker-controlled `github.event.*` reaching `$GITHUB_ENV`/`$GITHUB_OUTPUT`, or an `env:` value, that a later step (or an AI agent prompt) consumes by name — bypasses scanners that only flag `${{ }}` inside `run:`.
+
+```yaml
+# VULN — untrusted body written into the workflow environment, then used later
+- run: echo "TITLE=${{ github.event.issue.title }}" >> "$GITHUB_ENV"   # injection into env file
+- run: deploy --label "$TITLE"                                          # consumed unquoted later
+```
+
+```yaml
+# VULN — attacker text placed in env:, AI prompt reads it by name (no ${{ }} in prompt)
+- uses: some-org/ai-agent-action@v1
+  env:
+    ISSUE_BODY: '${{ github.event.issue.body }}'   # attacker-controlled
+  with:
+    prompt: 'Review the issue in "$ISSUE_BODY" and run the needed fixes.'
+```
+
+### Eval of AI / tool output in a later step
+
+LLM or tool output (`steps.<id>.outputs.*`) is attacker-influenced when prompt injection succeeds; a consuming step that runs it through `eval`/`$()`/unquoted expansion gets RCE in the token's security context. See also `insecure_output_handling.md`.
+
+```yaml
+# VULN — AI response flows into a shell execution sink
+- id: ai
+  uses: org/ai-inference@v1
+  with: { prompt: 'Summarize ${{ github.event.comment.body }}' }
+- run: eval "${{ steps.ai.outputs.response }}"        # arbitrary command execution
+```
+
+**SAFE**: pass untrusted values via quoted env vars consumed by argv (not shell), pin to least privilege, and never `eval`/interpolate AI or event data into a shell; validate/parse outputs before use.
 
 ### Mutable third-party action tag
 

@@ -95,6 +95,48 @@ Grep for route/handler definitions, then verify each sensitive endpoint has **bo
 
 Trace middleware order: middleware registered **after** the route does not protect it. Check **every HTTP method** on the same path.
 
+### Fail-Open Security Checks (CWE-636 / CWE-755)
+
+A security decision (authentication, authorization, signature/token verification, license/quota check) wrapped in error handling that **proceeds as allowed when the check throws** instead of denying. The exception path silently grants access — exactly the case attackers trigger by forcing the check to error (malformed token, unreachable auth service, null lookup).
+
+**Recon indicators**
+- A `try`/`catch` (or `except`) surrounding an auth/role/permission/verify call whose `catch` returns `true`, returns the resource, calls `next()`/`continue`, or logs-and-proceeds instead of returning 401/403.
+- Empty catch blocks (`catch (e) {}`, `except: pass`) around a verification call — the failure is swallowed and execution falls through to the protected action.
+- A boolean `isAuthorized`/`hasRole` initialized to `true` and only set to `false` inside a `try`, so an exception leaves it `true`.
+- Unhandled promise rejection on an async guard (`await checkAuth()` with no `.catch`/surrounding try) where the framework continues the request on rejection.
+
+**VULN** (exception → access granted):
+```javascript
+function isAdmin(req) {
+  try {
+    return verifyRole(req.user, 'admin');   // throws on malformed/expired token
+  } catch (e) {
+    return true;                            // fail-open: error treated as authorized
+  }
+}
+```
+```python
+try:
+    enforce_permission(user, "delete")
+except Exception:
+    pass            # swallowed — code falls through to the privileged action
+delete_record(id)
+```
+
+**SAFE** (default-deny on error): the exception path must deny.
+```javascript
+function isAdmin(req) {
+  try {
+    return verifyRole(req.user, 'admin');
+  } catch (e) {
+    logger.warn('role check failed', { reason: e.name });
+    return false;                           // fail-closed
+  }
+}
+```
+
+Distinguish from a non-security `try`/`catch`: only flag when the guarded call participates in a security decision and the error path widens access. The same fail-open shape in TLS/certificate verification is covered in `certificate_validation.md`; sensitive data leaked in the error response itself is `information_disclosure.md`.
+
 ### Vulnerable vs. Secure — Additional Frameworks
 
 Frameworks with dedicated detection rules below (Python, JavaScript, PHP, Java) are omitted here.

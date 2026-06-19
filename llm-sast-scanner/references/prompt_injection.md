@@ -90,6 +90,7 @@ Confirm a suspected injection sink at runtime by sending crafted input through t
 - **Encoding smuggling**: deliver the payload base64/ROT13/hex/leetspeak/Morse/quoted-printable so input filters miss the keywords but the model still decodes and acts on them.
 - **Jailbreak persona**: role-play/"developer mode"/grandma-style framing that coaxes the model past its guardrails.
 - **Adversarial suffix**: append an optimized gibberish token suffix to a benign request to flip refusal into compliance.
+- **Chat-template control tokens**: smuggle model/role delimiters into untrusted content to break out of the data channel into the instruction channel — e.g. `<<SYS>>`, `[INST]`, `<|im_start|>system`, `<|endoftext|>`, or a ` ```system ` fence. Treat these tokens appearing in user-supplied or retrieved/RAG text as a high-signal indirect-injection indicator.
 - **Invisible/Unicode smuggling**: hide instructions using zero-width characters, Unicode Tags block, homoglyphs, or bidi overrides — visually empty but tokenized by the model. Especially relevant for **indirect** injection in retrieved/rendered content.
 - **Indirect (stored) injection**: plant the payload in a document, web page, file name, email, or RAG record the agent will later read, then trigger the agent flow that ingests it.
 - **Exfiltration confirmation**: instruct the model to embed captured context (system prompt, secrets) into a Markdown image/link URL pointing at `YOUR-COLLABORATOR.oast.fun` — a render-time fetch confirms data egress. See [insecure_output_handling.md](insecure_output_handling.md).
@@ -130,9 +131,18 @@ Prompt injection (LLM01) usually chains with one of these — load them when rev
 - `information_disclosure.md` (LLM02) and `denial_of_service.md` (LLM10) — sensitive-data egress and unbounded token/cost consumption
 - `mcp_security.md` — tool poisoning and injection via MCP tool metadata/output
 
+## Multimodal / Image-Borne Injection (OWASP Gen AI LLM01)
+
+Vision-language models and OCR/document pipelines extract text from images/PDFs and concatenate it into the prompt — bypassing text-only injection filters. The static smell is **OCR/vision-extracted text reaching prompt assembly without being shown to or confirmed by the user, and without passing the same injection filtering applied to typed input**.
+
+- **Sources**: uploaded images, scanned PDFs, screenshots fed to a VLM (`gpt-4o`/`claude`/`gemini` vision calls), OCR output (`pytesseract`, `easyocr`, AWS Textract, Google Vision) concatenated into a prompt, UI-automation/computer-use/browser-use screen captures.
+- **Carriers**: low-contrast / off-frame text (white-on-white), text inside QR codes, invisible OCR layers in PDFs, steganographic payloads.
+- **Detect**: trace image/OCR/PDF-extracted text → prompt string; flag when (a) extracted text is not surfaced to the user for confirmation, or (b) the text-input injection guardrail is not applied to the OCR/vision path.
+- **Safe**: treat OCR/vision text as untrusted user input; show extracted text to the user before LLM consumption; apply the same delimiter/spotlight + classifier defenses used for typed input.
+
 ## Analyst Notes
 
 1. RAG retrieval is a first-class source: web pages, tickets, and uploads become prompt content without hitting HTTP param sources directly.
-2. Multi-modal inputs (image alt-text, PDF extract) are not yet modeled in most static rules — extend review manually.
+2. Multimodal inputs (image/PDF/OCR text) are a real source — see the Multimodal section above; most static rules miss them, so trace vision/OCR extraction into prompt assembly manually.
 3. Indirect injection: attacker poisons data another user's agent reads later (stored prompt injection).
 4. Guardrail SDK wrappers reduce risk but tainted `instructions=` still warrants review unless input is sanitized before concat — verify guardrail config does not re-embed raw user text.

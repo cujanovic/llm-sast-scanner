@@ -17,7 +17,7 @@ Most certificate checks are **configuration/presence checks** — no remote tain
 | HostnameVerifier always true | `verify(hostname, session)` returns `true` | Accepts cert for wrong host (CWE-297) |
 | Skip TLS verify | Go `InsecureSkipVerify: true`, Rust `danger_accept_invalid_certs` | No chain validation (CWE-295) |
 | Skip hostname verify | Rust `danger_accept_invalid_hostnames` | Wrong-host cert accepted (CWE-297) |
-| SSH host key policy | Paramiko `AutoAddPolicy` / `WarningPolicy` | Unknown host keys accepted (CWE-322) |
+| SSH host key policy | Paramiko `AutoAddPolicy` / `WarningPolicy`, Go `ssh.InsecureIgnoreHostKey()` | Unknown host keys accepted (CWE-322) |
 | Revocation disabled | `PKIXParameters.setRevocationEnabled(false)` without custom checker | Revoked certs trusted (CWE-299) |
 | Missing Android pinning | HTTPS client with no `network-security-config` / `CertificatePinner` | Relies only on system CAs (CWE-295) |
 
@@ -147,6 +147,7 @@ params.setRevocationEnabled(false); // no addCertPathChecker replacement
 | Python skip verify | `verify=False`, `ssl._create_unverified_context()` |
 | Node skip verify | `NODE_TLS_REJECT_UNAUTHORIZED=0`, `rejectUnauthorized: false` |
 | Go skip verify | `InsecureSkipVerify: true` |
+| Go SSH host key | `HostKeyCallback: ssh.InsecureIgnoreHostKey()` (golang.org/x/crypto/ssh) |
 | Rust skip verify | `danger_accept_invalid_certs(true)`, `danger_accept_invalid_hostnames(true)` |
 | Java trust-all | empty `checkServerTrusted`, `TrustAllStrategy`, `ALLOW_ALL_HOSTNAME_VERIFIER` |
 | OkHttp bypass | `hostnameVerifier((h,s) -> true)` |
@@ -164,6 +165,7 @@ Distinguish test-only usage (`_test.go`, `*Test.java`, mock servers) from produc
 - `HostnameVerifier` delegating to `HttpsURLConnection.getDefaultHostnameVerifier()` or equivalent strict check.
 - Go/Rust TLS clients with verification enabled; test-only skips isolated to `_test` files.
 - Paramiko `RejectPolicy` (default) — throws on unknown host keys.
+- Go SSH clients using `ssh.FixedHostKey(pub)` or a `knownhosts` callback instead of `ssh.InsecureIgnoreHostKey()`.
 - `PKIXParameters.setRevocationEnabled(true)` (default) or custom `PKIXRevocationChecker`.
 - Android `network-security-config` pin-set with backup pins, OkHttp `CertificatePinner`, or TrustManager backed by a KeyStore containing only expected certs.
 

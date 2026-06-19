@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 81 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.26.0"
+  version: "1.30.0"
   domain: application-security
   references: 81 vulnerability knowledge bases
 ---
@@ -259,6 +259,10 @@ For each candidate finding, answer all of the following:
 - [ ] Is the vulnerable code path reachable from an HTTP endpoint / entry point — or, for a library/SDK, from a public/exported API a downstream caller can reach — or is it dead code / private-internal-only?
 - [ ] Are there upstream guards (auth middleware, input filters) that block the path before it reaches the sink?
 
+**Map the sink to its entry point (route + parameter).** To confirm web reachability and record the concrete attack surface for each finding:
+- If the sink is in a request handler, derive the route by combining class-level and method-level route declarations, and note the HTTP method and the tainted parameter (e.g. Spring `@RequestMapping`/`@GetMapping`/`@PostMapping` + `@RequestParam`/`@PathVariable`/`@RequestBody`; Flask/Express/Rails/Gin equivalents — see route tables in `api_security.md`).
+- If the sink is in a service/repository/helper (no route annotations), trace callers up the call graph until you reach a handler; the finding is reachable only if such a path exists. Report the resolved `METHOD /route` + parameter (e.g. `POST /search` ← `search` param) so the finding is verifiable and maps cleanly to a dynamic test.
+
 #### Sanitization Re-Evaluation
 - [ ] Is there sanitization that was missed in Step 3? (Check parent functions, middleware, framework internals)
 - [ ] Is the sanitization method sufficient for this specific sink and context?
@@ -361,6 +365,16 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - [ ] Admin action within the admin's designed trust boundary?
 - [ ] Shared client/cache/dedup/pool/global: is identity in the key (or is it per-request scoped), and is the data actually identity-dependent?
 
+#### Variant Sweep (after each confirmation)
+
+A bug almost never exists in isolation: the same unsafe sink, helper, or pattern is usually copy-pasted elsewhere. Whenever the Judge CONFIRMS a finding, before moving on, sweep the rest of the codebase for siblings of that exact pattern:
+
+- **Same sink, other call sites** — grep the confirmed sink/API (e.g. the raw-query call, `exec`, the unsafe deserializer, the missing-auth decorator's absence) across all in-scope files; each unguarded call site is a candidate finding, not a duplicate.
+- **Same helper / wrapper** — if the bug is in a shared helper, every caller inherits it; if a caller re-implements the same logic inline, it shares the flaw.
+- **Same root cause, different shape** — the missing control (no ownership check, no sanitizer, wrong comparison) often recurs in other handlers; look for the *absence* of the fix, not just the literal string.
+
+Evaluate each variant through the full Source→Sink + Judge process (it may be a true positive, or guarded and safe). Report confirmed variants as their own findings at their own `file:line`. A confirmed systemic pattern (same root cause in 3+ places) is itself a signal — note it so remediation fixes the class, not just one instance.
+
 ---
 
 ### Step 6: Adversarial Impact Validation
@@ -454,6 +468,7 @@ Adversarial Verdict: STANDING / DOWNGRADED / DISPUTED / WITHDRAWN — <rationale
 
 ```
 [SEVERITY] VULN-NNN — <Vulnerability Class>  [CONFIRMED | LIKELY]
+CWE: <CWE-ID(s) for the class, taken from the matching reference file — e.g. CWE-89>
 File: <path>:<line_number>
 Description: <one sentence — what the vulnerability is>
 Impact: <what an attacker can achieve>
@@ -480,6 +495,20 @@ Blocked by: <what additional context is needed>
 - **Collapse equivalent sink chains.** When one tainted value flows through several equivalent sinks (e.g. a value rendered by multiple wrappers, or re-passed to the same API), report only the final externally-visible sink — unless an intermediate stage is independently reachable or exploitable.
 - Distinct sink lines remain separate findings only when independently reachable/exploitable.
 
+#### Chained / Compound Risk
+
+After individual findings are confirmed, check whether two or more **CONFIRMED** findings form an attack path where one enables or amplifies the next, reachable in sequence by the same actor. Report these together as a compound risk and escalate the combined severity one level above the highest individual link (cap at Critical).
+
+- This is the inverse of the Severity Downgrade Rule, not a contradiction: **downgrade** applies to a single finding that *depends on* an unconfirmed/hypothetical vulnerability; **escalation** applies only when every link is independently CONFIRMED and reachable in order by one actor. Never escalate using a speculative link.
+- Common attack chains to look for:
+  - SQLi / broken authentication → sensitive-data exposure → broken access control
+  - Path traversal → file inclusion → remote code execution
+  - Insecure deserialization → remote code execution → OS command / code injection
+  - XSS → CSRF / session theft → authentication compromise
+  - IDOR / broken authentication → privilege escalation → account or data takeover
+  - SSRF → cloud-metadata credential theft → lateral movement
+- Report each chain with the ordered links (their `VULN-NNN` ids), the combined severity, and a one- to two-sentence end-to-end attack path. Do not duplicate the individual findings — reference them.
+
 #### Report Structure
 
 When producing a full report, write to `sast_report.md` (or user-specified path):
@@ -487,7 +516,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.24.0
+Analyzer: llm-sast-scanner v1.29.0
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>
@@ -497,15 +526,13 @@ Analyzer: llm-sast-scanner v1.24.0
 ## Medium Findings
 ## Low Findings
 ## Informational
+## Chained / Compound Risks
+<confirmed multi-finding attack paths with escalated combined severity; omit if none>
 ## Unverifiable Findings
 
 ## Remediation Priority
 <ordered fix list>
 ```
-
----
-
-## Key Principles
 
 - **Evidence over assertion**: always show the vulnerable code path, not just the pattern name
 - **Context matters**: a finding is only valid if the sink is reachable with user-controlled data
