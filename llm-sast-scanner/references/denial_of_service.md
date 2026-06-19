@@ -272,3 +272,38 @@ LLM inference is expensive, so resource and *cost* exhaustion ("denial of wallet
 - Bound agent loops (max steps) and monitor for systematic high-volume querying (model-extraction pattern).
 
 **Triage**: uncapped input *and* output on a public, attacker-reachable LLM endpoint with no rate limit/budget → Medium/High (denial of wallet / service). A missing rate limit alone is a defense-in-depth gap (Info/Low) unless unbounded token amplification is demonstrable. Prefer `brute_force` for auth-endpoint flooding; use this section for inference cost/volume exhaustion.
+
+## Goroutine / async-task resource leaks (Go)
+
+Long-lived servers leak memory and scheduler capacity when goroutines (or other async tasks) are spawned per request but can never terminate. Under attacker-driven request volume each leaked goroutine pins its stack and any captured resources, degrading the service until OOM — an unbounded-consumption DoS reachable from any handler that spawns work.
+
+**Recon — leak-prone patterns**:
+- **Blocked send on an unbuffered/full channel** — `go func(){ ch <- v }()` with no guaranteed receiver; the sender parks forever.
+- **Blocked receive that never arrives** — `go func(){ <-done }()` where `done` is never closed/signalled on all paths.
+- **Forgotten sender in fan-out** — early `return` after reading the first result leaves remaining workers blocked on `results <-`.
+- **Context never cancelled** — `ctx, _ := context.WithCancel(...)` (cancel func discarded) so a `<-ctx.Done()` goroutine waits forever. Always keep and `defer cancel()`.
+- **`time.After` in a loop** — each iteration spawns a timer goroutine that lives until it fires; use a single reset `time.NewTimer`/`time.Ticker`.
+- **`time.NewTicker`/`NewTimer` never stopped** — missing `defer t.Stop()` leaks the timer goroutine.
+- **Missing `wg.Done()`** — a path that skips `wg.Done()` makes `wg.Wait()` (and its goroutines) hang.
+- **Infinite work loop with no exit/`ctx` check** — `for { ... }` goroutine with no cancellation path.
+
+**Sanitizers / safe patterns**: buffered channels sized to senders, or `select { case ch<-v: case <-ctx.Done(): }`; always `defer cancel()` / `defer t.Stop()` / `defer wg.Done()`; bound spawned goroutines with a worker pool or semaphore; give every goroutine a `ctx` exit path.
+
+**Triage**: per-request goroutine spawn reachable from a remote handler with no termination guarantee → Medium (resource exhaustion). Bounded/one-shot background goroutines with a clear exit are not findings.
+
+## Unreleased resource leaks (CWE-404 / CWE-772)
+
+Handles acquired per request but not released on **every** path (especially exception paths) accumulate until the process exhausts file descriptors, connection-pool slots, threads, or native memory — an availability DoS reachable from any handler that opens a resource under attacker-driven volume. This is the managed-language analogue of the Go leak above (Java/Kotlin, C#, Python, JS/Node, Go `io.Closer`).
+
+**Recon — leak-prone patterns**:
+- **`Closeable`/`AutoCloseable` opened without try-with-resources** — Java `new FileInputStream(...)`, `Socket`, `Connection`/`Statement`/`ResultSet` (JDBC), `InputStream`/`Reader` assigned to a local and closed only on the happy path (a throw before `close()` leaks).
+- **`close()` inside `try` instead of `finally`** — any exception between open and `close()` skips release; pre-Java-7 idiom without `finally`, or `finally` that closes only the outer resource and leaks inner ones.
+- **JDBC chains partially closed** — closing `Connection` but not `Statement`/`ResultSet`, or returning a pooled `Connection` only on success so errors drain the pool.
+- **C# `IDisposable` without `using`** — `new SqlConnection(...)`/`FileStream` not wrapped in `using`/`await using` and not disposed in `finally`.
+- **Python file/socket/cursor without `with`** — `open(...)`, `socket.socket()`, DB `cursor()` held in a variable and closed only on success; generators that `yield` an open handle never finalized.
+- **Node.js streams/handles** — `fs.open`/`createReadStream`/DB clients without `finally`-close or pipeline error handling; listeners added per request via `.on(...)` never removed.
+- **Native / pooled handles** — thread pools, `ExecutorService` never `shutdown()`, memory-mapped buffers, temp files opened but never deleted (cross-ref `insecure_temp_file.md`).
+
+**Sanitizers / safe patterns**: language-native scoped release — Java try-with-resources `try (var in = ...) { }`, C# `using`, Python `with`, Go `defer x.Close()`; close inner-then-outer resources in `finally`; return pooled connections in `finally`; bound pool sizes and set acquisition timeouts so a leak fails fast rather than hanging.
+
+**Triage**: a resource opened on a remote-reachable path with a release that is missing or skippable on exception → Low/Medium (resource exhaustion; raises to Medium when attacker-controlled request volume can drive exhaustion of a bounded pool/FD limit). A resource closed on all paths (try-with-resources/`using`/`with`/`defer`) is not a finding. Pure single-run scripts/CLIs where leak has no availability impact are Info at most.

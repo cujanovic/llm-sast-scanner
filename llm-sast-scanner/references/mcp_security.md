@@ -13,6 +13,9 @@ Model Context Protocol (MCP) connects LLM clients to tool and resource servers. 
 
 **What it IS**
 - **Tool poisoning**: hidden instructions embedded in tool names, descriptions, parameter docs, or resource templates that steer the model to exfiltrate secrets, call other tools, or skip safety checks
+- **Rug-pull / time-of-use mutation**: a tool presents a benign description at install/approval time, then changes its description or behavior on a later call (the model re-reads metadata each turn, so a mutated description re-poisons context after trust was granted)
+- **Cross-server shadowing / puppet**: one MCP server's tool description or JSON-RPC metadata redefines, overrides, or impersonates a tool exposed by another trusted server in the same client session
+- **Sampling injection**: a server abuses the MCP `sampling`/`createMessage` capability to push attacker-controlled prompts back into the client's model, turning the server into an injection source
 - **Prompt injection via MCP**: tool *outputs* or resource *contents* returned to the model contain attacker-controlled instructions (indirect injection into the next agent turn)
 - **Over-broad tools**: single tools that accept free-form commands, URLs, paths, or SQL — effectively delegating full host/network access to the model
 - **Exposed MCP servers**: HTTP/SSE endpoints reachable without authentication, bound to `0.0.0.0`, or published in client config without TLS/mTLS
@@ -62,6 +65,14 @@ properties: {
 ```
 
 Grep: `description:\s*['"].*(ignore\|IMPORTANT\|system prompt\|always call\|do not tell)`, Unicode homoglyphs/zero-width in description strings, HTML/Markdown comments inside tool docs.
+
+### Time-of-use & cross-server attacks
+
+| Signal | Grep / structural targets |
+|--------|----------------------------|
+| Rug-pull / mutable metadata | Tool `description`/`inputSchema` assigned from a variable, fetched at runtime, or reassigned after registration; version/`update` handlers that rewrite tool defs post-approval |
+| Cross-server shadowing | Tool name or description that references, redefines, or instructs the model about another server's tool; duplicate tool names across configured servers; JSON-RPC responses that spoof another server's `serverInfo`/tool list |
+| Sampling injection | Server-side `sampling/createMessage`, `client.createMessage`, or `CreateMessageRequestSchema` usage that embeds untrusted/tool-derived text into the requested prompt |
 
 ### Dangerous sinks inside tool handlers
 
@@ -114,6 +125,8 @@ Grep: `Authorization.*arguments`, `userToken`, `access_token.*params`, `forward.
 - MCP server replays tokens or cookies supplied via tool args against URLs/hosts not fixed at server build time
 - High-impact tools (delete, pay, send, exec) lack server-side confirmation/elicitation; model output alone triggers the action
 - Local stdio server runs as full user with no sandbox while exposing command/file/network tools
+- Tool description or input schema is non-constant (runtime-assigned or mutated after registration), enabling a benign-at-approval/malicious-at-call rug-pull
+- A server issues `sampling`/`createMessage` requests built from tool output or external content, or a tool's metadata references/overrides another server's tools (cross-server shadowing)
 
 ## Safe Patterns
 

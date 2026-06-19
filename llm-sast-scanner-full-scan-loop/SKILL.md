@@ -54,7 +54,7 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 
 Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-scanner/SKILL.md). Load
 reference files from its `references/` directory ON DEMAND, per pass — only the subset relevant to the
-current pass's analysis lens (see LOOP CONTROL), rather than all 77 at once. As the lens rotates across
+current pass's analysis lens (see LOOP CONTROL), rather than all 81 at once. As the lens rotates across
 passes, every vulnerability class gets covered, without holding all references in context simultaneously.
 Following the base skill's read-once discipline, keep the current pass's lens references loaded while you read
 each file so all of that pass's classes are evaluated in a single read. All step numbers (Step 1-6), the Judge
@@ -88,12 +88,12 @@ Give each subagent this instruction (substitute the lens, class list, and result
 
 | Lens | Deep results file | Vulnerability classes (reference lenses) |
 |------|-------------------|------------------------------------------|
-| injection | `sast/deep-injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05) |
+| injection | `sast/deep-injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, SSI injection, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05) |
 | access-auth | `sast/deep-access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, mass assignment, excessive agency (LLM06), RAG / vector & embedding security (LLM08) |
 | crypto-data | `sast/deep-crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07) |
 | server-side | `sast/deep-server-side-results.md` | SSRF, path traversal/LFI/RFI, client-side path traversal, server-side prototype pollution, insecure deserialization, arbitrary file upload, JNDI injection, race conditions, insecure temp file, file permissions, batch/ETL/mainframe data-pipeline security |
-| protocol-infra | `sast/deep-protocol-infra-results.md` | CSRF, open redirect, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), regex injection/ReDoS, CVE patterns |
-| hardening-platform | `sast/deep-hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), PHP security, mobile security, C/C++ memory safety, smart contract security (Solidity/EVM) |
+| protocol-infra | `sast/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, WebSocket security (CSWSH), clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), regex injection/ReDoS, CVE patterns |
+| hardening-platform | `sast/deep-hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security, mobile security, C/C++ memory safety, smart contract security (Solidity/EVM) |
 
 Each lens subagent independently reads every in-scope line for its own coverage proof, so total read cost
 scales with the number of lenses — this is the cost of per-lens parallelism. **Wait for all subagents to
@@ -189,7 +189,7 @@ cap of 10; NO adv inside the loop)
   crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
   passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
 supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
-pass's lens (not all 77 at once) to keep context cost bounded.
+pass's lens (not all 81 at once) to keep context cost bounded.
 COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-5 ceiling, or the pass-10 cap)
 - Before finalizing, reconcile the coverage map against the SCOPE MANIFEST built before pass 1 and confirm
   that EVERY line of EVERY in-scope file (per the GROUND RULES scope + exclusions) was actually read (not

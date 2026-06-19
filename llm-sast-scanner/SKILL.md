@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 77 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework.   Covers 81 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.19.0"
+  version: "1.26.0"
   domain: application-security
-  references: 77 vulnerability knowledge bases
+  references: 81 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,19 +22,19 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 77 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 81 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
 |----------|----------------|
-| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
+| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, Server-Side Include (SSI) Injection, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
 | **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Mass Assignment |
 | **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
-| **Protocol & Infrastructure** | CSRF, Open Redirect, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
+| **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, WebSocket Security (CSWSH), Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
 | **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / Cloud Orchestration, CI/CD & Container Security |
 | **API & AI/Agent Services** | API / REST / Web-Service Security, MCP (Model Context Protocol) Security |
-| **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04) |
+| **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
 | **Language/Platform** | PHP Security, Mobile Security (Android/iOS), C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
@@ -92,6 +92,7 @@ references/client_side_path_traversal.md — Client Side Path Traversal (CSPT) a
 references/server_side_prototype_pollution.md — Server-Side Prototype Pollution (Node.js / Deno / NPM gadget catalog)
 references/client_side_prototype_pollution.md — Client-Side Prototype Pollution (BlackFan PP/gadget catalog, browser-API gadgets, sanitizer bypasses)
 references/ssti.md                   — Server-side template injection
+references/ssi_injection.md          — Server-Side Include (SSI) injection: #exec RCE, #include/#printenv disclosure on SSI-parsed pages (CWE-97)
 references/xxe.md                    — XML external entity
 references/insecure_deserialization.md    — Insecure deserialization
 references/arbitrary_file_upload.md      — Arbitrary file upload
@@ -102,6 +103,8 @@ references/weak_crypto_hash.md           — Weak cryptography / hash
 references/information_disclosure.md     — Information disclosure
 references/insecure_cookie.md            — Insecure cookie attributes
 references/open_redirect.md              — Open redirect
+references/reverse_tabnabbing.md         — Reverse tabnabbing: target="_blank"/window.open without rel="noopener" exposing window.opener (CWE-1022)
+references/websocket_security.md         — WebSocket security: CSWSH (missing Origin check), missing connection/per-message auth, unsanitized broadcast (CWE-345/284/346)
 references/trust_boundary.md             — Trust boundary violations
 references/race_conditions.md            — Race conditions / TOCTOU
 references/brute_force.md                — Brute force / credential stuffing
@@ -156,6 +159,7 @@ references/excessive_agency.md           — Excessive LLM/agent functionality, 
 references/system_prompt_leakage.md      — Secrets / authorization logic in system prompts; reliance on prompt secrecy (OWASP LLM07)
 references/rag_vector_security.md        — RAG / vector & embedding weaknesses: permission-blind retrieval, cross-tenant leak, indirect injection (OWASP LLM08)
 references/ml_supply_chain_poisoning.md  — AI/ML model & dataset supply chain and data/model poisoning: unsafe model load, trust_remote_code, unverified artifacts (OWASP LLM03/04)
+references/ai_editor_config_poisoning.md — Repo poisoning of AI coding agents: weaponized editor/agent config & instruction files (.cursorrules/CLAUDE.md/AGENTS.md/SKILL.md/.mcp.json), hidden-unicode/HTML payloads, approval/YOLO-mode bypass
 references/batch_etl_pipeline_security.md — Batch / ETL / mainframe data-pipeline flaws: job-param & record-field path traversal, landing-dir TOCTOU, fixed-width/COMP-3/EBCDIC parse bounds, trailer integrity, restart double-post (CWE-22/78/367/125/707)
 ```
 
@@ -192,6 +196,7 @@ For each loaded vulnerability class, perform taint analysis:
    - WebSocket messages
    - Environment variables
    - Database reads of user-supplied data, deserialized objects
+   - **Event-driven / serverless / RPC entry points** — handlers invoked outside the HTTP request path still receive attacker-influenced data: serverless/cloud-function handlers (`event`/payload args), message-queue and stream consumers (Kafka, RabbitMQ, SQS/SNS, Pub/Sub, Kinesis), gRPC/RPC and GraphQL resolver methods, scheduled/cron jobs that read external state, and CLI argument/stdin parsers. Enumerate the full attack surface — including undocumented, deprecated, and debug handlers still registered — not just documented routes.
    - **Library/SDK mode** — when the target is a library, framework, or SDK with no HTTP layer, treat the parameters of public/exported API methods (those a downstream consumer can call with attacker-influenced input, e.g. parsers, deserializers, path/URL/command builders) as taint sources. Internal/private helpers and config-only setters are not sources.
 
 2. **Trace Data Flow** — Follow the data through:
@@ -213,6 +218,14 @@ For each loaded vulnerability class, perform taint analysis:
    - Parameterization (prepared statements)
    - Framework-native protections
 
+   Do **not** treat the mere presence of a sanitizer as proof of safety — confirm it is effective for this exact sink and context. Common *broken-sanitizer* failure modes that remain VULN:
+   - **Wrong-context escaping** — HTML-escaping a value used in a JS/URL/SQL/shell/attribute context (or vice versa)
+   - **Flawed regex** — unanchored (`^…$` missing), `.` matching too much, alternation gaps, or validating format but not dangerous characters
+   - **Insufficient transform** — truncation/length caps, single-pass replace that can be re-introduced (e.g. stripping `../` once), case-only or trim-only normalization
+   - **Order bug** — sanitize then mutate/decode/concatenate, so tainted data is reintroduced after the check
+   - **Encoding/normalization bypass** — value is URL/Unicode/base64-decoded or Unicode-normalized (NFKC) *after* validation; homoglyph or double-encoded input slips a denylist
+   - **Partial coverage** — only some paths/parameters validated, or the guard runs on a sibling branch the taint does not pass through
+
 5. **Determine Preliminary Verdict**:
    - **VULN**: Taint reaches sink with no effective sanitization
    - **LIKELY VULN**: Sanitization present but bypassable per reference heuristics
@@ -224,6 +237,7 @@ For each loaded vulnerability class, perform taint analysis:
 
 Beyond taint tracking, check for:
 - Missing authentication/authorization on sensitive endpoints
+- **Differential / consistency analysis** — compare peer code paths that should enforce the same control: sibling endpoints in the same controller/router, the verbs of one resource (GET/POST/PUT/DELETE), or handlers in the same directory. When most peers apply a control (authorization/ownership check, input validation/sanitization, rate limit, output encoding) and one omits it, flag the outlier. High-impact bugs like missing authorization on 1-of-N endpoints, IDOR, and inconsistent validation are the *absence* of a check rather than a matchable bad pattern — they surface only by comparing a code path against its peers, so load the related handlers together before judging.
 - Insecure state machine transitions
 - Race conditions in concurrent operations
 - Improper trust boundaries between components
@@ -459,6 +473,13 @@ File: <path>:<line_number>
 Blocked by: <what additional context is needed>
 ```
 
+#### Deduplication & Sink Location
+
+- **Point to the sink, not the source.** `File: <path>:<line_number>` must reference the line of the dangerous operation (query execution, command exec, render/output, deserialize) — not where the tainted value originates.
+- **One finding per distinct sink.** Same sink line + same tainted value + same dangerous operation = one finding; never emit identical duplicates.
+- **Collapse equivalent sink chains.** When one tainted value flows through several equivalent sinks (e.g. a value rendered by multiple wrappers, or re-passed to the same API), report only the final externally-visible sink — unless an intermediate stage is independently reachable or exploitable.
+- Distinct sink lines remain separate findings only when independently reachable/exploitable.
+
 #### Report Structure
 
 When producing a full report, write to `sast_report.md` (or user-specified path):
@@ -466,7 +487,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.10.0
+Analyzer: llm-sast-scanner v1.24.0
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>
@@ -490,6 +511,7 @@ Analyzer: llm-sast-scanner v1.10.0
 - **Context matters**: a finding is only valid if the sink is reachable with user-controlled data
 - **Avoid false positives**: if sanitization exists, verify it is bypassable before marking VULN
 - **Be precise**: include exact file paths and line numbers — never approximate
+- **No fabricated evidence**: every cited file path, line number, and code snippet must appear verbatim in the scanned source; never invent paths, lines, call chains, or snippets to support a finding. If you cannot locate the exact evidence, mark the finding NEEDS CONTEXT instead of approximating. Remediation prose must not contradict or exceed the verified data-flow.
 - **Fix > flag**: always provide a concrete remediation, not just a problem statement
 - **Language-aware**: adapt sink/source patterns to the specific language and framework in use
 - **Token discipline**: read each source file once and evaluate all loaded lenses in that pass; load only references that match the stack in use

@@ -342,6 +342,19 @@ def verify_otp():
         reset_password()
 ```
 
+### 8. Inverted / Mismatched Event Handler
+When a dispatch table routes an event to a handler whose action contradicts the event name (copy-paste bug), the intended state change silently inverts. A deprovision/revoke event that runs the provision/grant path leaves access in place — a real access-control failure that no input-validation rule catches.
+```javascript
+// VULN: handler action is the inverse of the event it serves
+switch (event.type) {
+  case "membership.removed":
+    return addMembership(event.payload);   // never revokes → stale access
+  case "user.deactivated":
+    return activateUser(event.payload);    // account stays live
+}
+```
+Recon: enumerate `switch`/dispatch maps over event/webhook/message types and verify each handler's verb matches its case (add↔remove, grant↔revoke, enable↔disable, create↔delete). High-value on auth/membership/billing/lifecycle events.
+
 ### When to Tag Business Logic
 - The vulnerability **cannot be described by a more specific injection or access control class**
 - The flaw is in the **application's domain rules**, not in generic input handling

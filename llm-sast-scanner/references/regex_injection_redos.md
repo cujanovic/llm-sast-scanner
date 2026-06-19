@@ -84,7 +84,8 @@ Commonly affected languages: JavaScript, Java, Python, Ruby, C#, Go, Rust, Swift
 
 ### C#
 - **VULN**: `new Regex(userInput).IsMatch(data)` on attacker-controlled pattern
-- **SAFE**: `Regex.Escape(userInput)`; strict host whitelist on `Uri.Host`
+- **VULN**: static backtracking-prone `Regex` (e.g. `new Regex(@"(?<x>[^\?]*)(?<q>\?.*)?")`, nested quantifiers, overlapping alternation) run on user input with **no `matchTimeout`** — `.NET` regex has no timeout by default, so a single request can pin a CPU core
+- **SAFE**: pass a timeout — `new Regex(pattern, RegexOptions.None, TimeSpan.FromSeconds(1))` or `Regex.IsMatch(input, pattern, options, TimeSpan.FromSeconds(1))` (or set `AppDomain` `REGEX_DEFAULT_MATCH_TIMEOUT`); `Regex.Escape(userInput)`; strict host whitelist on `Uri.Host`
 
 ### Rust
 - **VULN**: `Regex::new(&user_pattern)?` then match on request body — regex injection (logic bypass; large compiled programs / huge repetition counts), not classic catastrophic-backtracking ReDoS (Rust `regex` crate uses finite automata)

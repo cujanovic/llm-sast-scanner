@@ -124,6 +124,19 @@ Concurrency bugs enable duplicate state changes, quota bypass, financial abuse, 
 - Concurrent consumption of one-time tokens (reset codes, magic links) to mint multiple sessions
 - Verify consume is atomic
 
+### Missing await / floating promise (JS/TS async)
+
+An async call whose Promise is neither `await`ed nor `return`ed runs detached: the surrounding function continues (and may respond to the client) before the operation completes or its error surfaces. On critical operations this silently breaks atomicity, ordering, and error handling — and can let a request proceed before its guard has actually resolved.
+
+**Recon — unawaited critical calls** (no leading `await`/`return`):
+- **Locks / mutexes / transactions** — `withMutex(() => ...)`, `withLock(key, fn)`, `withDistributedLock(...)`, `withTransaction(async tx => ...)`. Without `await`, the "protected" section is not actually serialized → the lock/transaction provides no guarantee (TOCTOU, lost updates).
+- **DB / cache writes** — `prisma.session.delete(...)`, `db.users.update(...)`, `redis.set(...)` fired without `await` before a response: the response may be sent (or the next step run) before the write lands.
+- **Async authorization / validation** — an `isAuthorized(...)` / `checkQuota(...)` Promise not awaited; the guarded action runs regardless of the (later) result → auth/quota bypass.
+
+**Confirm**: the unawaited call returns a Promise (async function or thenable client), AND a subsequent statement (response send, dependent write, security decision) depends on its completion or result. Lost errors from a detached rejection also become unhandled.
+
+**Safe / FP**: fire-and-forget by design (telemetry, best-effort logging) where ordering and failure are irrelevant; calls explicitly handled via `.then()/.catch()` or `void`-marked with justification; synchronous (non-Promise) returns.
+
 ## Chaining Attacks
 
 - Race + Business logic: violate invariants (double-refund, limit slicing)
