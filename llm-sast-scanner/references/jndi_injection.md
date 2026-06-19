@@ -61,7 +61,9 @@ Object resource = jndiTemplate.lookup(request.getParameter("resource"));
 
 **VULN indicator**: Any `Context.lookup(...)` call where the lookup name is fully or partially controlled by external input.
 
-### Log4Shell (CVE-2021-44228) — Logging Framework Pattern
+### Logging-Framework Lookup Injection (Log4Shell class)
+
+**General pattern**: When a logging framework performs string interpolation / lookups on the log message itself, logging untrusted data turns an ordinary log call into a lookup/JNDI sink — the framework evaluates embedded expressions such as `${jndi:...}` contained in attacker input. Treat any logger that interpolates message *content* (not just format placeholders) as a candidate sink. Log4Shell (CVE-2021-44228) is the canonical instance of this class.
 
 ```java
 // VULNERABLE: Log4j2 logging of user-controlled data triggers JNDI lookup
@@ -80,12 +82,12 @@ logger.warn("Request path: {}", request.getRequestURI());
 // Log4j2 interpolates the ${jndi:...} expression → JNDI lookup → RCE
 ```
 
-**VULN condition for Log4Shell**:
-1. `log4j-core` version < 2.15.0 in `pom.xml` / `build.gradle`
+**VULN condition** (Log4j2 example of the class):
+1. A logging framework that interpolates message content is in use (e.g. `log4j-core` version < 2.15.0 in `pom.xml` / `build.gradle`)
 2. Logger logging user-controlled data (HTTP headers, params, body, path)
-3. `log4j2.formatMsgNoLookups=false` (default in vulnerable versions)
+3. Message-lookup interpolation enabled (e.g. `log4j2.formatMsgNoLookups=false`, the default in vulnerable versions)
 
-**SAFE indicators** (Log4Shell):
+**SAFE indicators**:
 - `log4j-core` version >= 2.16.0 closes the JNDI lookup RCE path (CVE-2021-44228/45046); >= 2.17.1 required for fully patched (CVE-2021-45105 DoS, CVE-2021-44832 RCE-via-config)
 - JVM arg `-Dlog4j2.formatMsgNoLookups=true`
 - `LOG4J_FORMAT_MSG_NO_LOOKUPS=true` env var

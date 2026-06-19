@@ -85,6 +85,7 @@ Trace PII variables into these sinks. For log *content* exposure mechanics, cros
 - Export/backup jobs copy full user records indefinitely with no redaction or rotation
 - Webhook or batch job forwards full user profile to marketing/CRM without purpose limitation or consent flag
 - Child-directed or health/finance flows collect data without age/consent branch in code
+- Sensitive HTML input fields (password, SSN, card number, OTP) rendered without `autocomplete="off"` (or `new-password`/`one-time-code`), letting browsers cache the value in form history on shared devices (CWE-525)
 
 ## Safe Patterns
 

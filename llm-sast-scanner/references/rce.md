@@ -227,6 +227,7 @@ Flag sinks where a non-constant variable appears in a dangerous position. Phase-
 | Go | `exec.Command(` where command name or args are built from external input |
 | C# | `Process.Start(`, `ProcessStartInfo` with variable `FileName`/`Arguments` |
 | C/C++ | `system(`, `popen(`, the `exec*` family (`execl`/`execlp`/`execle`/`execv`/`execvp`/`execvpe`), `posix_spawn(` where the command string/arg is built from input (e.g. `strcat`/`sprintf`/`snprintf` into a command buffer). Safe: fixed program path with separate, non-shell args |
+| Rust | `std::process::Command::new(prog)` / `.arg(`/`.args(` where the program name or an argument is built from input; especially `Command::new("sh").arg("-c").arg(tainted)`. Safe: fixed program path with separate, non-shell args |
 
 **Code evaluation**
 
