@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 81 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.30.0"
+  version: "1.31.0"
   domain: application-security
   references: 81 vulnerability knowledge bases
 ---
@@ -168,10 +168,13 @@ sanitizers/barriers that neutralize it. Prefer those recognized barriers when ru
 
 **Loading strategy:**
 - For a targeted review (e.g., "check for SQL injection"), load only the relevant reference(s).
-- For a full audit, load the references that match the stack actually present and skip classes that cannot
-  apply (e.g., do not load `php_security.md` or `mobile_security.md` for a pure Go service). Across the
-  detected languages/frameworks this still covers every applicable class — it just avoids spending context
-  on inapplicable ones.
+- For a full audit, gate references on the files actually present — by extension, or a quick content grep for
+  in-file signals (k8s `kind:`, CloudFormation, AI-SDK deps) — NOT a coarse stack
+  label: ALWAYS load the language-agnostic classes, and load a platform/language/infra-specific reference
+  (e.g. `php_security.md`, `mobile_security.md`, `memory_safety_c_cpp.md`, `smart_contract_security.md`,
+  `aspnet_security_misconfig.md`, `iac_security.md`, `kubernetes_cloud_security.md`) ONLY when its ecosystem
+  appears in the tree; when unsure, LOAD (coverage wins over tokens). This still covers every applicable
+  class while skipping only provably-absent stacks.
 - Keep the applicable references loaded together so each source file can be scanned against every lens in a
   single read (see Step 3 "Read-once discipline"). Only if the codebase plus its references exceed the
   context window, fall back to lens-grouped batches (injection → auth/access → crypto & data-exposure →
@@ -516,7 +519,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.30.0
+Analyzer: llm-sast-scanner v1.31.0
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>
@@ -541,4 +544,4 @@ Analyzer: llm-sast-scanner v1.30.0
 - **No fabricated evidence**: every cited file path, line number, and code snippet must appear verbatim in the scanned source; never invent paths, lines, call chains, or snippets to support a finding. If you cannot locate the exact evidence, mark the finding NEEDS CONTEXT instead of approximating. Remediation prose must not contradict or exceed the verified data-flow.
 - **Fix > flag**: always provide a concrete remediation, not just a problem statement
 - **Language-aware**: adapt sink/source patterns to the specific language and framework in use
-- **Token discipline**: read each source file once and evaluate all loaded lenses in that pass; load only references that match the stack in use
+- **Token discipline**: read each source file once and evaluate all loaded lenses in that pass; load each reference once, gated on the files actually present (always-load the language-agnostic classes; default to load when unsure — coverage wins over tokens)

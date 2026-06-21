@@ -20,7 +20,7 @@ This orchestrator forwards optional tagged arguments to the underlying skill.
 
 Check if `sast/architecture.md` already exists. If it does, skip this step.
 
-Otherwise, **in-session** (not as a subagent, since later steps read its output), run the `llm-sast-scanner` skill's **Step 1 (Understand Scope)** over the whole repo and write a short architecture/threat-model brief to `sast/architecture.md` covering: languages & frameworks, entry points (routes/handlers/CLI/jobs), trust boundaries, authN/authZ model, data stores, outbound calls, and the **detected stack** so later lenses can skip inapplicable reference files.
+Otherwise, **in-session** (not as a subagent, since later steps read its output), run the `llm-sast-scanner` skill's **Step 1 (Understand Scope)** over the whole repo and write a short architecture/threat-model brief to `sast/architecture.md` covering: languages & frameworks, entry points (routes/handlers/CLI/jobs), trust boundaries, authN/authZ model, data stores, outbound calls, and the **detected stack** so later lenses can skip inapplicable reference files. Also record the **per-lens stack-gated reference allowlist** derived from the files actually present (gateable platform/language/infra references whose signals appear, plus the always-loaded language-agnostic classes), so lenses share one definition of applicable classes and drop only provably-absent stacks.
 
 **Wait for this step to finish before proceeding.**
 
@@ -32,7 +32,7 @@ Start **one subagent per lens**, all **in parallel**. Skip any lens whose result
 
 Give each subagent the same instruction pattern, substituting the lens name, class list, and results path from the table below:
 
-> Read `sast/architecture.md` for context, then run the `llm-sast-scanner` skill focused on the **\<lens\>** vulnerability classes. From the skill's `references/` directory, load only the reference files for those classes that match the detected stack (skip inapplicable languages/platforms). Follow the skill's full workflow — Source→Sink taint tracking (Step 3), business-logic/auth analysis (Step 4), Judge re-verification (Step 5), and (only if `adv=` was provided) Adversarial Impact Validation (Step 6). Report only CONFIRMED / LIKELY findings using the skill's finding format. Write all findings to the results file below. Clean up any intermediate recon/threat/batch files for this lens when done.
+> Read `sast/architecture.md` for context, then run the `llm-sast-scanner` skill focused on the **\<lens\>** vulnerability classes. From the skill's `references/` directory, load only your lens's reference files that are on the stack-gated allowlist in `architecture.md` (always-load the language-agnostic classes; skip only stacks whose files are absent; when unsure, load). Follow the skill's full workflow — Source→Sink taint tracking (Step 3), business-logic/auth analysis (Step 4), Judge re-verification (Step 5), and (only if `adv=` was provided) Adversarial Impact Validation (Step 6). Report only CONFIRMED / LIKELY findings using the skill's finding format. Write all findings to the results file below. Clean up any intermediate recon/threat/batch files for this lens when done.
 
 | Lens | Results file | Vulnerability classes (reference lenses) |
 |------|--------------|------------------------------------------|

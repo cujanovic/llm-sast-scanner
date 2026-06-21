@@ -10,7 +10,7 @@ description: >
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.3.0"
+  version: "1.4.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -70,7 +70,11 @@ Skip this whole section if `mode=single` was requested; go straight to the **Con
 If `sast/architecture.md` already exists, reuse it. Otherwise run the base skill's **Step 1 (Understand
 Scope)** over `<dir>` **in this session** and write a short architecture/threat-model brief to
 `sast/architecture.md` (languages & frameworks, entry points, trust boundaries, authN/authZ, data stores,
-outbound calls, detected stack). Wait for this to finish.
+outbound calls, detected stack). Also run the SCOPE MANIFEST enumeration here and record in
+`sast/architecture.md` the **per-lens stack-gated reference allowlist** derived from it (see REFERENCE
+LOADING) — the gateable platform/language/infra references whose signals are present, plus the always-loaded
+language-agnostic classes — so each lens subagent loads its minimal set and all lenses share ONE definition
+of "applicable classes". Wait for this to finish.
 
 ### Step D2 — Parallel convergence loops (one subagent per lens)
 
@@ -79,7 +83,10 @@ Give each subagent this instruction (substitute the lens, class list, and result
 
 > Read `sast/architecture.md` for context, then run the base `llm-sast-scanner` skill following the
 > **Convergence Loop Procedure** (below) with `lens=<lens>` — i.e. restrict analysis to the **\<lens\>**
-> vulnerability classes and load only the matching references that fit the detected stack. Execute the loop's
+> vulnerability classes and load only your lens's references that are on the stack-gated allowlist in
+> `sast/architecture.md` — or derive it from the SCOPE MANIFEST per REFERENCE LOADING if a reused
+> architecture.md lacks it (always-load the language-agnostic classes, skip only stacks whose files are
+> absent, and load when unsure). Execute the loop's
 > convergence phase: multi-pass Steps 1–5 (taint tracking, business-logic/auth, Judge) until convergence,
 > applying the ledger + 100% line-coverage discipline to your lens. **Do NOT run the final Adversarial Impact
 > Validation pass, do NOT write a timestamped report, and do NOT re-invoke the full-scan-loop wrapper.** Write
@@ -158,6 +165,39 @@ GROUND RULES
   ```
   This file list is the coverage denominator; seed the LOOP CONTROL coverage map from it and tick each file off
   as its lines are read. (Enumerating once also avoids re-listing the tree on every pass.)
+- REFERENCE LOADING (stack-gated by the SCOPE MANIFEST — coverage-safe; DEFAULTS TO LOAD):
+  - Gate on the files actually present (NOT a coarse "detected stack" label), detected two cheap and
+    deterministic ways: (1) filename/extension over the SCOPE MANIFEST; and (2) a one-shot `rg -l` CONTENT
+    probe over the manifest files for signals that live INSIDE files rather than in their names — e.g. k8s
+    `kind:`/`apiVersion:`, CloudFormation `AWSTemplateFormatVersion`, Pulumi, and AI-SDK deps/imports
+    (`openai`/`anthropic`/`langchain`/`transformers`). The manifest alone is filenames + line counts, so the
+    content probe is REQUIRED for those. This gated set is the lens's APPLICABLE-CLASS set, and COVERAGE
+    VERIFICATION must use the SAME set (an excluded class is "not in stack", never a coverage gap).
+  - Only the PLATFORM/LANGUAGE/STACK-SPECIFIC references below are gateable — load each ONLY when its signal
+    is detected (filename match OR `rg` content probe, per above); otherwise SKIP it and record its class as
+    "excluded — not in stack":
+      * php_security ← *.php / composer.json
+      * memory_safety_c_cpp ← *.c / *.cc / *.cpp / *.h / *.hpp
+      * mobile_security ← AndroidManifest.xml / *.kt / *.swift / *.m / Info.plist / *.gradle / *.xcodeproj
+      * smart_contract_security ← *.sol / *.vy
+      * aspnet_security_misconfig ← *.cs / *.aspx / *.cshtml / *.csproj / web.config
+      * jndi_injection, expression_language_injection ← JVM sources *.java / *.kt / *.scala (+ pom.xml / build.gradle)
+      * server_side_prototype_pollution ← Node backend (*.js / *.ts + package.json)
+      * client_side_prototype_pollution, dom_clobbering, xs_leaks, client_side_path_traversal,
+        content_security_policy, clickjacking ← browser frontend / server-rendered HTML
+        (*.html / *.jsx / *.tsx / *.vue / *.svelte)
+      * iac_security ← *.tf / *.bicep / CloudFormation / ARM / Pulumi
+      * kubernetes_cloud_security ← k8s manifests (kind: …) / Helm Chart.yaml
+      * cicd_container_security ← Dockerfile / .github/workflows/* / .gitlab-ci.yml / Jenkinsfile / *compose*.y*ml
+      * prompt_injection, insecure_output_handling, excessive_agency, system_prompt_leakage,
+        rag_vector_security, ml_supply_chain_poisoning, mcp_security, ai_editor_config_poisoning ←
+        AI/LLM/agent markers (openai / anthropic / langchain / llama / transformers deps, *.ipynb,
+        .cursorrules, CLAUDE.md / AGENTS.md, *.mcp.json)
+  - ALL OTHER classes are language-agnostic — ALWAYS load them (never gated).
+  - DEFAULT TO LOAD: if a signal is ambiguous or you are unsure a class applies, LOAD the reference. Gating
+    may drop a reference ONLY when its ecosystem is provably absent — coverage wins over tokens.
+  - LOAD ONCE PER RUN: load each needed reference at most once; keep its key sources/sinks/sanitizers in
+    working notes and do NOT re-load full reference files on later passes when a lens recurs.
 - During the loop, run Steps 1–5 ONLY: Source→Sink taint tracking (Step 3), business-logic/auth analysis
   (Step 4), and Judge re-verification (Step 5). DO NOT run Adversarial Impact Validation (Step 6) inside the
   loop — no adv during passes.
@@ -192,10 +232,12 @@ cap of 10; NO adv inside the loop)
   crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
   passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
 supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
-pass's lens (not all 81 at once) to keep context cost bounded. Across all passes you MUST apply EVERY class
-in all six lens groups from the Step D2 table — including the cloud/infrastructure and web-platform classes
-(IaC, Kubernetes/cloud, CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-chain)
-— not only the example lenses named above. The D2 table is the authoritative class set for class coverage.
+pass's lens (not all 81 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
+applicable class — every class on the stack-gated allowlist (see REFERENCE LOADING) — in all six lens groups
+from the Step D2 table, including the cloud/infrastructure and web-platform classes (IaC, Kubernetes/cloud,
+CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-chain) whenever their files
+are present — not only the example lenses named above. The D2 table, gated by the allowlist, is the
+authoritative class set for class coverage.
 COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-5 ceiling, or the pass-10 cap)
 - Before finalizing, reconcile the coverage map against the SCOPE MANIFEST built before pass 1 and confirm
   that EVERY line of EVERY in-scope file (per the GROUND RULES scope + exclusions) was actually read (not
@@ -207,9 +249,10 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-
   10-pass cap, but any NEW bug it surfaces is added to the ledger.)
 - CLASS coverage (not just lines): confirm every applicable vulnerability class was actually APPLIED — not
   merely that every line was read. A parallel-mode lens subagent must evaluate every class in its D2 lens row
-  that fits the detected stack; single mode must cover every class in all six lens groups. 100% coverage =
-  every in-scope line read AND every applicable class evaluated. Reading 100% of lines under only some lenses
-  is NOT 100% coverage.
+  that is on the stack-gated allowlist; single mode must cover every on-allowlist class across all six lens
+  groups. Classes excluded as not-in-stack are recorded as "excluded — not in stack", which is NOT a gap.
+  100% coverage = every in-scope line read AND every applicable (on-allowlist) class evaluated. Reading 100%
+  of lines under only some lenses is NOT 100% coverage.
 - State the final coverage result explicitly (e.g., "100% of N in-scope files / M lines read; K paths
   excluded; all C applicable classes applied").
 FINAL ADVERSARIAL PASS (run ONCE, after the loop is fully done)
