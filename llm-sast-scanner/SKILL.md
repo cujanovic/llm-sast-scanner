@@ -516,7 +516,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.29.0
+Analyzer: llm-sast-scanner v1.30.0
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>

@@ -10,7 +10,7 @@ description: >
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.2.0"
+  version: "1.3.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -88,12 +88,12 @@ Give each subagent this instruction (substitute the lens, class list, and result
 
 | Lens | Deep results file | Vulnerability classes (reference lenses) |
 |------|-------------------|------------------------------------------|
-| injection | `sast/deep-injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, SSI injection, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05) |
-| access-auth | `sast/deep-access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, mass assignment, excessive agency (LLM06), RAG / vector & embedding security (LLM08) |
-| crypto-data | `sast/deep-crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07) |
+| injection | `sast/deep-injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, SSI injection, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05), DOM clobbering |
+| access-auth | `sast/deep-access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, mass assignment, excessive agency (LLM06), RAG / vector & embedding security (LLM08), API / REST / web-service security, MCP (Model Context Protocol) security |
+| crypto-data | `sast/deep-crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07), privacy / data protection (PII) |
 | server-side | `sast/deep-server-side-results.md` | SSRF, path traversal/LFI/RFI, client-side path traversal, server-side prototype pollution, insecure deserialization, arbitrary file upload, JNDI injection, race conditions, insecure temp file, file permissions, batch/ETL/mainframe data-pipeline security |
-| protocol-infra | `sast/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, WebSocket security (CSWSH), clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), regex injection/ReDoS, CVE patterns |
-| hardening-platform | `sast/deep-hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security, mobile security, C/C++ memory safety, smart contract security (Solidity/EVM) |
+| protocol-infra | `sast/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, WebSocket security (CSWSH), clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), regex injection/ReDoS, CVE patterns, Content Security Policy (CSP) weaknesses, XS-Leaks |
+| hardening-platform | `sast/deep-hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security, mobile security, C/C++ memory safety, smart contract security (Solidity/EVM), IaC security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / cloud orchestration, CI/CD & container security, supply chain security (SRI / provenance / lifecycle scripts) |
 
 Each lens subagent independently reads every in-scope line for its own coverage proof, so total read cost
 scales with the number of lenses — this is the cost of per-lens parallelism. **Wait for all subagents to
@@ -103,7 +103,10 @@ finish before proceeding.**
 
 Launch one subagent:
 
-> Read all `sast/deep-*-results.md` files and `sast/architecture.md`. Merge and de-duplicate findings across
+> First confirm all SIX `sast/deep-*-results.md` files exist (injection, access-auth, crypto-data,
+> server-side, protocol-infra, hardening-platform). If any is missing, that lens's whole class group was
+> skipped — re-run that lens before consolidating, otherwise class coverage is <100%. Then read all
+> `sast/deep-*-results.md` files and `sast/architecture.md`. Merge and de-duplicate findings across
 > lenses (same `file:line` + vuln class = one finding). Run the base `llm-sast-scanner` skill's **Step 6
 > (Adversarial Impact Validation)** ONCE over the full consolidated set with the `adv` value (default
 > `adv=critical,high,medium`), apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts, then write a
@@ -189,7 +192,10 @@ cap of 10; NO adv inside the loop)
   crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
   passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
 supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
-pass's lens (not all 81 at once) to keep context cost bounded.
+pass's lens (not all 81 at once) to keep context cost bounded. Across all passes you MUST apply EVERY class
+in all six lens groups from the Step D2 table — including the cloud/infrastructure and web-platform classes
+(IaC, Kubernetes/cloud, CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-chain)
+— not only the example lenses named above. The D2 table is the authoritative class set for class coverage.
 COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-5 ceiling, or the pass-10 cap)
 - Before finalizing, reconcile the coverage map against the SCOPE MANIFEST built before pass 1 and confirm
   that EVERY line of EVERY in-scope file (per the GROUND RULES scope + exclusions) was actually read (not
@@ -199,7 +205,13 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-
 - If any in-scope file or line range was NOT fully read, run one more targeted pass over only the
   unread lines until coverage is 100%. (This coverage-completion pass does not count toward the
   10-pass cap, but any NEW bug it surfaces is added to the ledger.)
-- State the final coverage result explicitly (e.g., "100% of N in-scope files / M lines read; K paths excluded").
+- CLASS coverage (not just lines): confirm every applicable vulnerability class was actually APPLIED — not
+  merely that every line was read. A parallel-mode lens subagent must evaluate every class in its D2 lens row
+  that fits the detected stack; single mode must cover every class in all six lens groups. 100% coverage =
+  every in-scope line read AND every applicable class evaluated. Reading 100% of lines under only some lenses
+  is NOT 100% coverage.
+- State the final coverage result explicitly (e.g., "100% of N in-scope files / M lines read; K paths
+  excluded; all C applicable classes applied").
 FINAL ADVERSARIAL PASS (run ONCE, after the loop is fully done)
 - SINGLE-AGENT MODE ONLY. If you are a parallel-mode lens subagent (`lens=<lens>` set), SKIP this section and
   the OUTPUT section — write your Judge-passed findings + coverage result to `sast/deep-<lens>-results.md` and
