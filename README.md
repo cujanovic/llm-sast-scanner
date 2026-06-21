@@ -89,11 +89,11 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 
 ### Parallel multi-agent orchestration (`AGENTS.md` / `CLAUDE.md`)
 
-The orchestrator playbook coordinates a full assessment and writes everything to a `sast/` folder (re-runnable — steps whose output already exists are skipped):
+The orchestrator playbook coordinates a full assessment and writes everything to a `llm-sast-scanner-dir/` folder (re-runnable — steps whose output already exists are skipped):
 
-1. **Codebase analysis & threat modeling** → `sast/architecture.md`
-2. **Vulnerability detection (parallel)** — one subagent per lens, each writing `sast/<lens>-results.md`
-3. **Report generation** — consolidates and de-duplicates into `sast/final-report.md`
+1. **Codebase analysis & threat modeling** → `llm-sast-scanner-dir/architecture.md`
+2. **Vulnerability detection (parallel)** — one subagent per lens, each writing `llm-sast-scanner-dir/<lens>-results.md`
+3. **Report generation** — consolidates and de-duplicates into `llm-sast-scanner-dir/final-report.md`
 
 The work is split across six vulnerability lenses, each running in an isolated context:
 
