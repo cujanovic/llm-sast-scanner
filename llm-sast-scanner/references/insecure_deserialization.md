@@ -430,7 +430,7 @@ Use to downgrade severity or suppress FP when config is co-located with sink (sa
 
 ## Unsafe Deserialization Detection
 
-Commonly affected languages: Java, Python, JavaScript, Ruby, C#. Go lacks dedicated unsafe-deserialization detection.
+Commonly affected languages: Java, Python, JavaScript, Ruby, C#, Go.
 
 **Java sinks modeled**: `ObjectInputStream.readObject`/`readUnshared`; Kryo, XStream, SnakeYAML, JYaml, JsonIO, YAMLBeans, Hessian/Burlap, Castor, Jackson (`enableDefaultTyping`), Fastjson, Gson gadgets, JMS `ObjectMessage`, `XMLDecoder.readObject`, `SerializationUtils.deserialize`, Jabsorb, Jodd, Flexjson; RMI deserialization; Spring HTTP invoker exporter in XML/configuration.
 
@@ -443,6 +443,8 @@ Commonly affected languages: Java, Python, JavaScript, Ruby, C#. Go lacks dedica
 **Ruby sinks**: `Marshal.load`, `YAML.load` (Psych), Oj global options; YAML unsafe tags.
 
 **C# sinks**: `BinaryFormatter`, `LosFormatter`, `NetDataContractSerializer`, `JavaScriptSerializer` + type resolver; untrusted stream → unsafe deserializer.
+
+**Go sinks**: `encoding/gob` `gob.NewDecoder(...).Decode(...)` on attacker-controlled streams; third-party decoders that resolve concrete types from input (e.g. registered `gob` interface types, `mapstructure`/YAML into `interface{}`). Risk is generally lower than Java native deserialization (no broad gadget chains in the stdlib) — primary impact is DoS/panic and type confusion — but untrusted `gob` input should still be treated as a sink. Safe: decoding into a fixed concrete struct from a trusted source; `json.Unmarshal` into typed structs.
 
 **Sources**: remote/network input on all platforms.
 

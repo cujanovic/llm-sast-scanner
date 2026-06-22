@@ -67,11 +67,11 @@ Skip this whole section if `mode=single` was requested; go straight to the **Con
 
 ### Step D1 — Analysis
 
-If `llm-sast-scanner-dir/architecture.md` already exists, reuse it. Otherwise run the base skill's **Step 1 (Understand
+If `.llm-sast-scanner-cache/architecture.md` already exists, reuse it. Otherwise run the base skill's **Step 1 (Understand
 Scope)** over `<dir>` **in this session** and write a short architecture/threat-model brief to
-`llm-sast-scanner-dir/architecture.md` (languages & frameworks, entry points, trust boundaries, authN/authZ, data stores,
+`.llm-sast-scanner-cache/architecture.md` (languages & frameworks, entry points, trust boundaries, authN/authZ, data stores,
 outbound calls, detected stack). Also run the SCOPE MANIFEST enumeration here and record in
-`llm-sast-scanner-dir/architecture.md` the **per-lens stack-gated reference allowlist** derived from it (see REFERENCE
+`.llm-sast-scanner-cache/architecture.md` the **per-lens stack-gated reference allowlist** derived from it (see REFERENCE
 LOADING) — the gateable platform/language/infra references whose signals are present, plus the always-loaded
 language-agnostic classes — so each lens subagent loads its minimal set and all lenses share ONE definition
 of "applicable classes". Wait for this to finish.
@@ -81,10 +81,10 @@ of "applicable classes". Wait for this to finish.
 Start **one subagent per lens**, all **in parallel**. Skip any lens whose deep results file already exists.
 Give each subagent this instruction (substitute the lens, class list, and results file from the table):
 
-> Read `llm-sast-scanner-dir/architecture.md` for context, then run the base `llm-sast-scanner` skill following the
+> Read `.llm-sast-scanner-cache/architecture.md` for context, then run the base `llm-sast-scanner` skill following the
 > **Convergence Loop Procedure** (below) with `lens=<lens>` — i.e. restrict analysis to the **\<lens\>**
 > vulnerability classes and load only your lens's references that are on the stack-gated allowlist in
-> `llm-sast-scanner-dir/architecture.md` — or derive it from the SCOPE MANIFEST per REFERENCE LOADING if a reused
+> `.llm-sast-scanner-cache/architecture.md` — or derive it from the SCOPE MANIFEST per REFERENCE LOADING if a reused
 > architecture.md lacks it (always-load the language-agnostic classes, skip only stacks whose files are
 > absent, and load when unsure). Execute the loop's
 > convergence phase: multi-pass Steps 1–5 (taint tracking, business-logic/auth, Judge) until convergence,
@@ -95,12 +95,12 @@ Give each subagent this instruction (substitute the lens, class list, and result
 
 | Lens | Deep results file | Vulnerability classes (reference lenses) |
 |------|-------------------|------------------------------------------|
-| injection | `llm-sast-scanner-dir/deep-injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, SSI injection, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05), DOM clobbering |
-| access-auth | `llm-sast-scanner-dir/deep-access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, mass assignment, excessive agency (LLM06), RAG / vector & embedding security (LLM08), API / REST / web-service security, MCP (Model Context Protocol) security |
-| crypto-data | `llm-sast-scanner-dir/deep-crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07), privacy / data protection (PII) |
-| server-side | `llm-sast-scanner-dir/deep-server-side-results.md` | SSRF, path traversal/LFI/RFI, client-side path traversal, server-side prototype pollution, insecure deserialization, arbitrary file upload, JNDI injection, race conditions, insecure temp file, file permissions, batch/ETL/mainframe data-pipeline security |
-| protocol-infra | `llm-sast-scanner-dir/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, WebSocket security (CSWSH), clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), regex injection/ReDoS, CVE patterns, Content Security Policy (CSP) weaknesses, XS-Leaks |
-| hardening-platform | `llm-sast-scanner-dir/deep-hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security, mobile security, C/C++ memory safety, smart contract security (Solidity/EVM), IaC security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / cloud orchestration, CI/CD & container security, supply chain security (SRI / provenance / lifecycle scripts) |
+| injection | `.llm-sast-scanner-cache/deep-injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, SSI injection, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05), DOM clobbering |
+| access-auth | `.llm-sast-scanner-cache/deep-access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, mass assignment, excessive agency (LLM06), RAG / vector & embedding security (LLM08), API / REST / web-service security, MCP (Model Context Protocol) security |
+| crypto-data | `.llm-sast-scanner-cache/deep-crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07), privacy / data protection (PII) |
+| server-side | `.llm-sast-scanner-cache/deep-server-side-results.md` | SSRF, path traversal/LFI/RFI, client-side path traversal, server-side prototype pollution, insecure deserialization, arbitrary file upload, JNDI injection, race conditions, insecure temp file, file permissions, batch/ETL/mainframe data-pipeline security |
+| protocol-infra | `.llm-sast-scanner-cache/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, CORS misconfiguration, WebSocket security (CSWSH), clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), regex injection/ReDoS, CVE patterns, Content Security Policy (CSP) weaknesses, XS-Leaks |
+| hardening-platform | `.llm-sast-scanner-cache/deep-hardening-platform-results.md` | output encoding, format string injection, ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security, mobile security, C/C++ memory safety, smart contract security (Solidity/EVM), IaC security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / cloud orchestration, CI/CD & container security, supply chain security (SRI / provenance / lifecycle scripts) |
 
 Each lens subagent independently reads every in-scope line for its own coverage proof, so total read cost
 scales with the number of lenses — this is the cost of per-lens parallelism. **Wait for all subagents to
@@ -110,10 +110,10 @@ finish before proceeding.**
 
 Launch one subagent:
 
-> First confirm all SIX `llm-sast-scanner-dir/deep-*-results.md` files exist (injection, access-auth, crypto-data,
+> First confirm all SIX `.llm-sast-scanner-cache/deep-*-results.md` files exist (injection, access-auth, crypto-data,
 > server-side, protocol-infra, hardening-platform). If any is missing, that lens's whole class group was
 > skipped — re-run that lens before consolidating, otherwise class coverage is <100%. Then read all
-> `llm-sast-scanner-dir/deep-*-results.md` files and `llm-sast-scanner-dir/architecture.md`. Merge and de-duplicate findings across
+> `.llm-sast-scanner-cache/deep-*-results.md` files and `.llm-sast-scanner-cache/architecture.md`. Merge and de-duplicate findings across
 > lenses (same `file:line` + vuln class = one finding). Run the base `llm-sast-scanner` skill's **Step 6
 > (Adversarial Impact Validation)** ONCE over the full consolidated set with the `adv` value (default
 > `adv=critical,high,medium`), apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts, then write a
@@ -132,7 +132,7 @@ This is the loop body. It runs in ONE context — either the whole `mode=single`
 pass), or a single parallel-mode lens subagent (when invoked with `lens=<lens>`, restrict every pass to that
 lens's classes and treat "convergence" as "a pass surfaced no new bug **in that lens**"). When run as a
 parallel-mode lens subagent, STOP after COVERAGE VERIFICATION, write findings to the lens's
-`llm-sast-scanner-dir/deep-<lens>-results.md`, and SKIP the FINAL ADVERSARIAL PASS + OUTPUT (Step D3 owns those).
+`.llm-sast-scanner-cache/deep-<lens>-results.md`, and SKIP the FINAL ADVERSARIAL PASS + OUTPUT (Step D3 owns those).
 
 Execute the following prompt against the target `<dir>`. Treat `"dir as argument"` as the `<dir>` value
 provided to this command.
@@ -257,7 +257,7 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-
   excluded; all C applicable classes applied").
 FINAL ADVERSARIAL PASS (run ONCE, after the loop is fully done)
 - SINGLE-AGENT MODE ONLY. If you are a parallel-mode lens subagent (`lens=<lens>` set), SKIP this section and
-  the OUTPUT section — write your Judge-passed findings + coverage result to `llm-sast-scanner-dir/deep-<lens>-results.md` and
+  the OUTPUT section — write your Judge-passed findings + coverage result to `.llm-sast-scanner-cache/deep-<lens>-results.md` and
   stop; Step D3 runs the adversarial pass once over the merged set.
 - After the loop terminates (converged, reached the pass-5 ceiling, or hit the 10-pass cap) AND coverage is verified at
   100%, take the FULL consolidated set of Judge-passed findings and run Adversarial Impact Validation (Step 6)

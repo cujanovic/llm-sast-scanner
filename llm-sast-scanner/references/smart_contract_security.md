@@ -36,13 +36,15 @@ Flag where an external call, value transfer, or privileged write occurs without 
 |---|---|
 | External call before state update | `.call{value:`, `.call(`, `.delegatecall(`, `.transfer(`, `.send(` preceding `balances[...] =`, `-=`, state writes |
 | `tx.origin` auth | `tx.origin ==`, `require(tx.origin` |
-| Unchecked low-level return | `.call(`/`.send(` whose `bool` return is not checked or `require`d |
+| Unchecked low-level return | `.call(`/`.send(`/`.staticcall(` whose `bool` return is not checked or `require`d |
 | Dangerous delegatecall | `delegatecall(`, especially with non-constant target or in constructor |
 | Self-destruct / ownership loss | `selfdestruct(`, `suicide(`, `renounceOwnership(` |
 | Unsafe arithmetic | `unchecked {`, `+`/`-`/`*` on token amounts in `pragma <0.8.0` without SafeMath |
 | Weak randomness | `block.timestamp`, `block.number`, `blockhash(`, `block.prevrandao`/`difficulty` used for entropy/selection |
 | Price/oracle trust | `getReserves(`, `balanceOf(` used as price, single-source `latestAnswer(` without staleness/round checks |
 | Proxy/upgrade | `delegatecall` in proxy, missing `initializer`/`_disableInitializers()`, storage layout edits |
+| Uninitialized storage pointer / data location | local `struct`/array declared without explicit `memory`/`storage` (esp. `pragma <0.5.0`); data-location mismatch aliasing low storage slots |
+| Incorrect visibility / mutability | state-changing fn left `public`/unspecified where `external`/`internal` intended; missing `view`/`pure`; unnecessary `payable` |
 | Missing access control | `external`/`public` state-changing fns with no `onlyOwner`/role modifier |
 
 **Skip (lower risk)** — `view`/`pure` functions with no state change or value flow; constant-target `delegatecall` to a trusted library; arithmetic under Solidity ≥0.8 default checked math (unless inside `unchecked {}`).
@@ -96,6 +98,14 @@ Flag where an external call, value transfer, or privileged write occurs without 
 ### Self-destruct / privileged teardown
 - **VULN**: reachable `selfdestruct(attacker)`; `renounceOwnership()` leaving no admin; force-fed ether assumptions.
 - **SAFE**: remove/guard `selfdestruct`; deliberate, access-controlled lifecycle.
+
+### Uninitialized storage pointer / data location
+- **VULN**: `pragma solidity ^0.4.24;` with a local `struct`/array declared without an explicit data location, defaulting to `storage` and aliasing low slots (e.g. `owner`); a write through it silently corrupts critical state.
+- **SAFE**: explicit `memory`/`storage` locations; Solidity ≥0.5 (mandatory data location); never write through an unvalidated storage reference.
+
+### Incorrect visibility / mutability
+- **VULN**: a sensitive setter left `public`/unspecified with no access modifier, or a helper that should be `internal`/`external` exposed broadly; missing `view`/`pure` masking unintended state writes; unnecessary `payable` trapping ether.
+- **SAFE**: least-permissive visibility; `external` for external-only callers, `internal`/`private` for helpers; `view`/`pure` where no state changes; drop unneeded `payable`.
 
 ## Source → Sink
 

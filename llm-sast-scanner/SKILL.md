@@ -4,10 +4,10 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework.   Covers 81 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework. Covers 81 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.31.0"
+  version: "1.32.0"
   domain: application-security
   references: 81 vulnerability knowledge bases
 ---
@@ -206,6 +206,7 @@ For each loaded vulnerability class, perform taint analysis:
    - Variable assignments, function arguments, return values
    - Framework helpers, ORM calls, template rendering
    - Cross-module/service boundaries
+   - **Interprocedural taint summaries** — for cross-function flows, summarize each helper once instead of re-reading it at every call site: does it propagate taint from parameter *N* to its return value (propagator), neutralize it (sanitizer), or pass it into an internal sink? Reuse that summary at all callers. This keeps deep call chains tractable and prevents both missed multi-hop flows and redundant re-analysis.
 
 3. **Check Sinks** — Dangerous operations receiving tainted data:
    - Query execution (SQL, NoSQL, LDAP, XPath)
@@ -475,6 +476,7 @@ CWE: <CWE-ID(s) for the class, taken from the matching reference file — e.g. C
 File: <path>:<line_number>
 Description: <one sentence — what the vulnerability is>
 Impact: <what an attacker can achieve>
+Flow: <source file:line> → <intermediate hop file:line> → … → <sink file:line>
 Evidence:
   <relevant code snippet>
 Judge: <one sentence — why this passed re-verification>
@@ -482,6 +484,8 @@ Adversarial: <one sentence — why this survived the stress test> [STANDING | DO
 Remediation: <specific fix — not generic advice>
 Reference: references/<vuln>.md
 ```
+
+**`Flow:` — surface the taint path you already traced.** List the ordered source→sink hops as `file:line` steps (the entry point where attacker input enters → each propagating assignment/call → the dangerous sink), so a reviewer can re-walk the path without re-deriving it. Mark any sanitizer that was present-but-bypassed inline (e.g. `→ escape() file:line (bypassed: wrong context)`). For a single-line source-at-sink flow, one hop is fine. Reuse the interprocedural taint summaries from Step 3 — do not re-read files to build this.
 
 For NEEDS CONTEXT findings:
 
