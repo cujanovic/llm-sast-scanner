@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 81 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework. Covers 82 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
   version: "1.34.0"
   domain: application-security
-  references: 81 vulnerability knowledge bases
+  references: 82 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 81 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 82 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -32,7 +32,7 @@ documenting the sources, sinks, and sanitizers/barriers used to detect and triag
 | **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
 | **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, WebSocket Security (CSWSH), Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
-| **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / Cloud Orchestration, CI/CD & Container Security |
+| **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / Cloud Orchestration, CI/CD & Container Security, nginx / Web-Server Configuration |
 | **API & AI/Agent Services** | API / REST / Web-Service Security, MCP (Model Context Protocol) Security |
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
@@ -223,6 +223,7 @@ references/mcp_security.md               — MCP (Model Context Protocol): tool 
 references/iac_security.md               — Infrastructure-as-Code misconfig (Terraform/CloudFormation/ARM/Bicep/Pulumi)
 references/kubernetes_cloud_security.md  — Kubernetes / cloud orchestration: privileged pods, RBAC, securityContext, secrets, NetworkPolicy
 references/cicd_container_security.md     — CI/CD pipeline + container/Docker security (PPE, untrusted inputs, root images, unpinned tags)
+references/nginx_security.md              — nginx/OpenResty config: alias traversal, CRLF/response splitting, proxy_pass SSRF, header redefinition, access-control bypass, regex ReDoS, info disclosure
 references/memory_safety_c_cpp.md        — C/C++ memory safety: buffer overflow, UAF, unsafe string funcs, integer overflow, toolchain hardening
 references/smart_contract_security.md    — Solidity/EVM smart contracts: reentrancy, access control, unsafe delegatecall/low-level calls, integer over/underflow, oracle/MEV, proxy-upgrade, ERC-20/721/1155
 references/insecure_output_handling.md   — Insecure handling of LLM/model output reaching HTML/SQL/shell/HTTP/eval sinks (OWASP LLM05)
