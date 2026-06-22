@@ -43,6 +43,20 @@ A few principles keep results trustworthy:
 
 ---
 
+## Cross-scan memory
+
+Each scan writes its working artifacts to a `.llm-sast-scanner-cache/` folder in the target repo. Alongside the architecture/threat-model brief, the orchestrator maintains a **`project-memory.md`** — a per-repository knowledge file that persists and grows across scans, recording confirmed findings, confirmed false-positive patterns (with rationale), project-specific security primitives (sanitizers/validators/auth wrappers), and hotspots. Repeat scans reuse it to prioritize effort and avoid re-deriving the same context.
+
+It is deliberately treated as **hints, never authority**, with guardrails that keep it from degrading detection:
+
+- Memory may prioritize or explain a known-safe pattern, but it can **never** make an agent skip a line or auto-dismiss a vulnerability class — 100% coverage discipline is unchanged.
+- A "false positive" entry only suppresses a re-report after the agent **re-confirms the safe rationale in the current code**; stale entries (the file changed since the recorded git SHA) are re-verified.
+- The file's content is consumed as untrusted **data, not instructions**, so a poisoned cache can't redirect a scan.
+- Secrets and PII are never persisted — entries record class + `file:line` + a neutral description, with sensitive values redacted.
+- A **single writer** (the consolidation/report step) updates it; detection agents are read-only, so parallel lenses never corrupt it.
+
+---
+
 ## Languages & ecosystems
 
 - **Application languages:** Java, Python, JavaScript / TypeScript, PHP, C# / .NET, Go, Ruby, C / C++, Kotlin, Swift, Objective-C, Rust
@@ -126,7 +140,7 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 
 `mode=parallel` (default) dispatches one subagent per vulnerability lens and consolidates the results; `mode=single` runs everything in one context for the strongest convergence guarantee. Output is a timestamped `sast_report-<timestamp>.md`.
 
-**Parallel multi-agent orchestration** — point your agent at `AGENTS.md` / `CLAUDE.md` to run a full assessment (codebase analysis → parallel detection across six vulnerability lenses → consolidated report) written to a `.llm-sast-scanner-cache/` folder. It is re-runnable: steps whose output already exists are skipped.
+**Parallel multi-agent orchestration** — point your agent at `AGENTS.md` / `CLAUDE.md` to run a full assessment (codebase analysis → parallel detection across six vulnerability lenses → consolidated report) written to a `.llm-sast-scanner-cache/` folder. It is re-runnable: steps whose output already exists are skipped, and the run updates `project-memory.md` (see [Cross-scan memory](#cross-scan-memory)) so later scans build on earlier ones. Add `.llm-sast-scanner-cache/` to the scanned repo's `.gitignore`.
 
 ---
 
@@ -138,7 +152,7 @@ llm-sast-scanner/                      ← repo root
 ├── AGENTS.md                          # parallel orchestrator playbook
 ├── CLAUDE.md                          # → symlink to AGENTS.md
 ├── llm-sast-scanner/                  # core skill (canonical source)
-│   ├── SKILL.md                       # 7-step workflow + Judge + adversarial
+│   ├── SKILL.md                       # 7-step workflow + Judge + adversarial + project-memory protocol
 │   └── references/                    # 81 vulnerability knowledge bases
 ├── llm-sast-scanner-full-scan-loop/   # exhaustive convergence-audit skill
 │   └── SKILL.md

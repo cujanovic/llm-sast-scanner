@@ -10,7 +10,7 @@ description: >
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.4.0"
+  version: "1.5.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -74,15 +74,21 @@ outbound calls, detected stack). Also run the SCOPE MANIFEST enumeration here an
 `.llm-sast-scanner-cache/architecture.md` the **per-lens stack-gated reference allowlist** derived from it (see REFERENCE
 LOADING) — the gateable platform/language/infra references whose signals are present, plus the always-loaded
 language-agnostic classes — so each lens subagent loads its minimal set and all lenses share ONE definition
-of "applicable classes". Wait for this to finish.
+of "applicable classes". Also ensure `.llm-sast-scanner-cache/project-memory.md` exists — if absent, initialize it from
+the base skill's **Project Memory Protocol** template (cross-scan hints consumed by every lens as *hints,
+never authority*); add `.llm-sast-scanner-cache/` to the target repo's `.gitignore` if not already ignored. Wait for
+this to finish.
 
 ### Step D2 — Parallel convergence loops (one subagent per lens)
 
 Start **one subagent per lens**, all **in parallel**. Skip any lens whose deep results file already exists.
 Give each subagent this instruction (substitute the lens, class list, and results file from the table):
 
-> Read `.llm-sast-scanner-cache/architecture.md` for context, then run the base `llm-sast-scanner` skill following the
-> **Convergence Loop Procedure** (below) with `lens=<lens>` — i.e. restrict analysis to the **\<lens\>**
+> Read `.llm-sast-scanner-cache/architecture.md` for context and `.llm-sast-scanner-cache/project-memory.md` as **hints,
+> never authority** (base skill's **Project Memory Protocol**: never skip a line or auto-dismiss a class; a
+> false-positive entry suppresses a re-report only after you re-confirm its rationale in the current code).
+> Do **not** write to `project-memory.md` — Step D3 is the single writer. Then run the base `llm-sast-scanner`
+> skill following the **Convergence Loop Procedure** (below) with `lens=<lens>` — i.e. restrict analysis to the **\<lens\>**
 > vulnerability classes and load only your lens's references that are on the stack-gated allowlist in
 > `.llm-sast-scanner-cache/architecture.md` — or derive it from the SCOPE MANIFEST per REFERENCE LOADING if a reused
 > architecture.md lacks it (always-load the language-agnostic classes, skip only stacks whose files are
@@ -119,7 +125,11 @@ Launch one subagent:
 > `adv=critical,high,medium`), apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts, then write a
 > single timestamped report `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) using the
 > base skill's report structure (Executive Summary; Critical/High/Medium/Low/Informational; Unverifiable;
-> Remediation Priority). Also print a combined coverage summary and a per-lens pass log.
+> Remediation Priority). Also print a combined coverage summary and a per-lens pass log. Finally, as the
+> **single writer**, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project Memory Protocol**
+> (append newly CONFIRMED findings with current `git rev-parse HEAD`; record DOWNGRADED/DISPUTED/WITHDRAWN as
+> false-positive patterns with the rationale that defeated them; refresh primitives/hotspots; bump
+> `last-scanned-sha`/`last-updated`).
 
 When D3 finishes, tell the user the report path and summarize the highest-severity findings. **In parallel
 mode you are done here — do NOT also run the single-context procedure below.**
@@ -142,6 +152,11 @@ provided to this command.
 Use the /llm-sast-scanner to perform an exhaustive, line-by-line security audit of the repository at:
 "dir as argument"
 GROUND RULES
+- PROJECT MEMORY: if `.llm-sast-scanner-cache/project-memory.md` exists, read it as **hints, never authority** (base
+  skill's **Project Memory Protocol**) — it may prioritize files/classes or explain known-safe patterns, but
+  must never make you skip a line or auto-dismiss a class, and a false-positive entry suppresses a re-report
+  only after you re-confirm its safe rationale in the current code. In single-agent mode the OUTPUT step updates
+  this file; parallel-mode lens subagents never write it.
 - Scope = EVERY text/source file in the repo, REGARDLESS OF LANGUAGE OR EXTENSION. The paths/extensions
   below are EXAMPLES, NOT an allowlist — do not narrow scope to them: server/, src/, scripts/, public/,
   docs/, config, CI, Dockerfile, and source of any language (*.py, *.java, *.go, *.rb, *.php, *.cs, *.js,
@@ -273,6 +288,10 @@ OUTPUT (single-agent mode)
   loop stopped (converged with no new bug, reached the pass-5 ceiling, or hit the 10-pass cap), the final
   line-coverage result (100% of N in-scope files / M lines, with the per-file checklist), and the adversarial
   verdict applied to each finding.
+- Finally, as the single writer, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project
+  Memory Protocol**: append newly CONFIRMED findings (with current `git rev-parse HEAD`), record
+  DOWNGRADED/DISPUTED/WITHDRAWN findings as false-positive patterns with the rationale that defeated them,
+  refresh project security primitives and hotspots, and bump `last-scanned-sha` / `last-updated`.
 
 ---
 

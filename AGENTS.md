@@ -18,9 +18,11 @@ This orchestrator forwards optional tagged arguments to the underlying skill.
 
 ## Step 1: Codebase Analysis & Threat Modeling
 
-Check if `.llm-sast-scanner-cache/architecture.md` already exists. If it does, skip this step.
+Check if `.llm-sast-scanner-cache/architecture.md` already exists. If it does, skip the analysis below (but still run the project-memory step at the end of this section).
 
 Otherwise, **in-session** (not as a subagent, since later steps read its output), run the `llm-sast-scanner` skill's **Step 1 (Understand Scope)** over the whole repo and write a short architecture/threat-model brief to `.llm-sast-scanner-cache/architecture.md` covering: languages & frameworks, entry points (routes/handlers/CLI/jobs), trust boundaries, authN/authZ model, data stores, outbound calls, and the **detected stack** so later lenses can skip inapplicable reference files. Also record the **per-lens stack-gated reference allowlist** derived from the files actually present (gateable platform/language/infra references whose signals appear, plus the always-loaded language-agnostic classes), so lenses share one definition of applicable classes and drop only provably-absent stacks.
+
+**Project memory (always, even when `architecture.md` already existed):** ensure `.llm-sast-scanner-cache/project-memory.md` exists; if absent, initialize it from the template in the base skill's **Project Memory Protocol**. This file carries cross-scan hints (confirmed findings, confirmed false-positive patterns, project security primitives, hotspots) and is consumed by every detection subagent as *hints, never authority*. Also add `.llm-sast-scanner-cache/` to the repo's `.gitignore` if not already ignored.
 
 **Wait for this step to finish before proceeding.**
 
@@ -32,7 +34,7 @@ Start **one subagent per lens**, all **in parallel**. Skip any lens whose result
 
 Give each subagent the same instruction pattern, substituting the lens name, class list, and results path from the table below:
 
-> Read `.llm-sast-scanner-cache/architecture.md` for context, then run the `llm-sast-scanner` skill focused on the **\<lens\>** vulnerability classes. From the skill's `references/` directory, load only your lens's reference files that are on the stack-gated allowlist in `architecture.md` (always-load the language-agnostic classes; skip only stacks whose files are absent; when unsure, load). Follow the skill's full workflow — Source→Sink taint tracking (Step 3), business-logic/auth analysis (Step 4), Judge re-verification (Step 5), and (only if `adv=` was provided) Adversarial Impact Validation (Step 6). Report only CONFIRMED / LIKELY findings using the skill's finding format. Write all findings to the results file below. Clean up any intermediate recon/threat/batch files for this lens when done.
+> Read `.llm-sast-scanner-cache/architecture.md` for context and `.llm-sast-scanner-cache/project-memory.md` as **hints, never authority** (follow the base skill's **Project Memory Protocol**: memory may prioritize or explain known-safe patterns but must never make you skip a line or auto-dismiss a class; a false-positive entry may suppress a re-report only after you re-confirm its safe rationale in the current code). Then run the `llm-sast-scanner` skill focused on the **\<lens\>** vulnerability classes. From the skill's `references/` directory, load only your lens's reference files that are on the stack-gated allowlist in `architecture.md` (always-load the language-agnostic classes; skip only stacks whose files are absent; when unsure, load). Follow the skill's full workflow — Source→Sink taint tracking (Step 3), business-logic/auth analysis (Step 4), Judge re-verification (Step 5), and (only if `adv=` was provided) Adversarial Impact Validation (Step 6). Report only CONFIRMED / LIKELY findings using the skill's finding format. Write all findings to the results file below. Do **not** write to `project-memory.md` (the report step is the single writer). Clean up any intermediate recon/threat/batch files for this lens when done.
 
 | Lens | Results file | Vulnerability classes (reference lenses) |
 |------|--------------|------------------------------------------|
@@ -53,7 +55,7 @@ After all Step 2 subagents finish, skip this step if `.llm-sast-scanner-cache/fi
 
 Otherwise launch a single subagent:
 
-> Read all available `.llm-sast-scanner-cache/*-results.md` files and `.llm-sast-scanner-cache/architecture.md` for context, then apply the `llm-sast-scanner` skill's **Step 7 (Report Findings)** — severity model, severity-downgrade rule, finding format, and report structure — to consolidate every finding into `.llm-sast-scanner-cache/final-report.md`, ranked by severity (Critical → Info) with exact file paths, line numbers, and concrete remediations. De-duplicate findings reported by more than one lens.
+> Read all available `.llm-sast-scanner-cache/*-results.md` files and `.llm-sast-scanner-cache/architecture.md` for context, then apply the `llm-sast-scanner` skill's **Step 7 (Report Findings)** — severity model, severity-downgrade rule, finding format, and report structure — to consolidate every finding into `.llm-sast-scanner-cache/final-report.md`, ranked by severity (Critical → Info) with exact file paths, line numbers, and concrete remediations. De-duplicate findings reported by more than one lens. Finally, as the **single writer**, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project Memory Protocol**: append newly CONFIRMED findings (with current `git rev-parse HEAD`), record any downgraded/disputed findings as false-positive patterns with the rationale that defeated them, refresh project security primitives and hotspots, and bump `last-scanned-sha` / `last-updated`.
 
 ---
 
@@ -71,11 +73,11 @@ Use when asked for a *"deep parallel scan"*, *"full scan loop with all agents"*,
 
 > **Shortcut:** the `llm-sast-scanner-full-scan-loop` skill now performs this exact fan-out natively in its default `mode=parallel`. You can simply run `llm-sast-scanner-full-scan-loop <dir>` and it will execute Steps D1–D3 below itself. The steps are spelled out here so the orchestrator can drive them directly when preferred.
 
-**Step D1 — Analysis.** Reuse `.llm-sast-scanner-cache/architecture.md` from Step 1 (run that step first if it does not exist).
+**Step D1 — Analysis.** Reuse `.llm-sast-scanner-cache/architecture.md` from Step 1 (run that step first if it does not exist). Ensure `.llm-sast-scanner-cache/project-memory.md` exists too (Step 1 initializes it; create it from the base skill's **Project Memory Protocol** template if missing).
 
 **Step D2 — Parallel convergence loops.** Start **one subagent per lens** (same six lenses and class lists as the Step 2 table), all **in parallel**. Skip any lens whose deep results file already exists. Give each subagent this instruction:
 
-> Read `.llm-sast-scanner-cache/architecture.md` for context, then run the `llm-sast-scanner-full-scan-loop` skill in **`mode=single lens=<lens>`** over this repository (single-context so it does NOT fan out again), **constrained to the \<lens\> vulnerability classes** (load only the matching references from the base skill). Perform the loop's convergence phase: multi-pass Steps 1–5 (taint tracking, business-logic/auth, Judge) until convergence, with the loop's ledger + 100% line-coverage discipline applied to your lens. **Do NOT run the final Adversarial Impact Validation pass and do NOT write a timestamped report** — those are deferred to consolidation. Write only Judge-passed CONFIRMED / LIKELY findings, plus your final coverage result and pass log, to `.llm-sast-scanner-cache/deep-<lens>-results.md`.
+> Read `.llm-sast-scanner-cache/architecture.md` for context and `.llm-sast-scanner-cache/project-memory.md` as **hints, never authority** (base skill's **Project Memory Protocol** — never skip a line or auto-dismiss a class; a false-positive entry suppresses a re-report only after you re-confirm its rationale in current code). Then run the `llm-sast-scanner-full-scan-loop` skill in **`mode=single lens=<lens>`** over this repository (single-context so it does NOT fan out again), **constrained to the \<lens\> vulnerability classes** (load only the matching references from the base skill). Perform the loop's convergence phase: multi-pass Steps 1–5 (taint tracking, business-logic/auth, Judge) until convergence, with the loop's ledger + 100% line-coverage discipline applied to your lens. **Do NOT run the final Adversarial Impact Validation pass and do NOT write a timestamped report** — those are deferred to consolidation. Do **not** write to `project-memory.md` (consolidation is the single writer). Write only Judge-passed CONFIRMED / LIKELY findings, plus your final coverage result and pass log, to `.llm-sast-scanner-cache/deep-<lens>-results.md`.
 
 | Lens | Deep results file |
 |------|-------------------|
@@ -90,7 +92,7 @@ Use when asked for a *"deep parallel scan"*, *"full scan loop with all agents"*,
 
 **Step D3 — Consolidation + single adversarial pass.** Launch one subagent:
 
-> Read all `.llm-sast-scanner-cache/deep-*-results.md` files and `.llm-sast-scanner-cache/architecture.md`. Merge and de-duplicate findings across lenses (same `file:line` + class = one finding). Run the `llm-sast-scanner` skill's **Step 6 (Adversarial Impact Validation)** ONCE over the full consolidated set with `adv=critical,high,medium`, apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts, then write a timestamped consolidated report `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) using the skill's report structure. Also print a combined coverage summary and per-lens pass log.
+> Read all `.llm-sast-scanner-cache/deep-*-results.md` files and `.llm-sast-scanner-cache/architecture.md`. Merge and de-duplicate findings across lenses (same `file:line` + class = one finding). Run the `llm-sast-scanner` skill's **Step 6 (Adversarial Impact Validation)** ONCE over the full consolidated set with `adv=critical,high,medium`, apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts, then write a timestamped consolidated report `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) using the skill's report structure. Also print a combined coverage summary and per-lens pass log. Finally, as the **single writer**, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project Memory Protocol** (append newly CONFIRMED findings with current `git rev-parse HEAD`; record DOWNGRADED/DISPUTED/WITHDRAWN as false-positive patterns with their defeating rationale; refresh primitives/hotspots; bump `last-scanned-sha`/`last-updated`).
 
 ---
 
