@@ -105,18 +105,22 @@ Exploitation that requires authentication, non-default config, chaining, or admi
 
 ## Installation
 
-Clone the repo, then copy **both** skill directories into the skills folder for your agent runtime (copy the real top-level directories, not the `.claude`/`.agents` symlinks):
+Clone the repo, then **symlink** both skill directories into the skills folder for your agent runtime. Symlinks are preferred over `cp` — a single `git pull` updates every runtime at once, with no stale copies to re-sync. Link the real top-level directories (not the `.claude`/`.agents` symlinks), using absolute paths so the links resolve from anywhere:
 
 ```bash
 git clone https://github.com/anthropic-lab/llm-sast-scanner.git
 cd llm-sast-scanner
 
 # Claude Code
-cp -R llm-sast-scanner llm-sast-scanner-full-scan-loop ~/.claude/skills/
+mkdir -p ~/.claude/skills
+ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.claude/skills/
 
 # OpenAI Codex / Cursor / other agent runtimes
-cp -R llm-sast-scanner llm-sast-scanner-full-scan-loop ~/.agents/skills/
+mkdir -p ~/.agents/skills
+ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.agents/skills/
 ```
+
+To update later, just `git pull` in the cloned repo — the symlinks always point at the latest version. (Prefer a self-contained copy instead? Swap `ln -s` for `cp -R`.)
 
 To use the parallel orchestrator, also place `AGENTS.md` (and/or `CLAUDE.md`) at the root of the project you want to scan.
 
