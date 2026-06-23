@@ -231,6 +231,125 @@ Compare HTTP methods on the same path — a protected GET with unprotected DELET
 
 ---
 
+## Authorization Bypass via Path, Header & Workflow Gaps
+
+Function-level guards that key on one request representation while routing, proxying, or workflow state uses another. Path-normalization desync, rewrite-header routing, and proxy `location` mismatches are covered in `reverse_proxy_access_bypass.md` — use that reference for full proxy/normalization analysis; this section focuses on **handler-layer missing or alternate guards**.
+
+### URL-Rewrite Header ACL Bypass
+
+**VULN**: auth middleware checks `req.path` / `request.uri` while the router or upstream honors `X-Original-URL`, `X-Rewrite-URL`, or `X-Forwarded-Prefix` to select the handler — client sends a rewrite header pointing at a protected path while the guard evaluates an unprotected path.
+
+```bash
+rg -ni 'x-original-url|x-rewrite-url|x-forwarded-prefix' --glob '*.{js,ts,py,java,cs,go,php}'
+# Verify auth gate reads a different path field than routing/upstream selection
+```
+
+```javascript
+// VULN: auth on req.path; router uses x-original-url
+if (req.path.startsWith('/admin')) return res.sendStatus(403);
+const target = req.headers['x-original-url'] || req.path;
+app.handle(target, req, res);   // attacker: X-Original-URL: /admin/users
+```
+
+**SAFE**: single canonical path computed before both auth and routing; rewrite headers stripped at the trust boundary or ignored for external routing. See `reverse_proxy_access_bypass.md`.
+
+### Referer / Origin-Based Access Control
+
+**VULN**: sensitive action gated on `Referer` or `Origin` matching an expected prefix — both headers are client-controlled and often omitted.
+
+```bash
+rg -ni 'referer|origin' --glob '*.{js,ts,py,java,cs,go,php}' | rg -i 'admin|allow|deny|guard|protect|internal'
+```
+
+```python
+# VULN
+if request.headers.get('Referer', '').startswith('https://app.example/admin'):
+    return admin_action()
+```
+
+**SAFE**: server-side session/token role check independent of Referer/Origin.
+
+### Case-Variant Route Bypass
+
+**VULN**: guard checks literal `/admin` (case-sensitive) while the framework router matches `/Admin` case-insensitively, or a duplicate route is registered without `[Authorize]` / `requireRole`.
+
+```bash
+rg -n '["'"'"']/admin|startsWith\(["'"'"']/admin' --glob '*.{js,ts,py,java,cs,go,php}'
+# Cross-check router caseSensitivity settings and duplicate route mounts
+```
+
+```csharp
+// VULN: middleware checks lowercase only; ASP.NET routing is case-insensitive by default
+if (!context.Request.Path.StartsWithSegments("/admin")) return;
+// /Admin/users still reaches handler registered without [Authorize(Roles = "Admin")]
+```
+
+### Extension / Format Bypass
+
+**VULN**: auth on `/user/1` but `/user/1.json`, `/user/1.html`, or a content-negotiation variant hits an unguarded static or API handler.
+
+```javascript
+// VULN: guard on exact path only
+router.use('/user/:id', requireAuth);
+app.get('/user/:id.json', exportUser);   // unguarded parallel mount
+```
+
+### Stale API Version Routes
+
+**VULN**: `/api/v3/admin/*` has role guard; `/api/v1/admin/*` still mounted with identical handlers but no guard.
+
+```bash
+rg -n '(/v[0-9]+|api/v[0-9]+|router\.use|@(Get|Post|Request)Mapping)' --glob '*.{js,ts,py,java,cs,go,php}'
+```
+
+```java
+// VULN: v3 protected, v1 legacy mount forgotten
+@PreAuthorize("hasRole('ADMIN')")
+@GetMapping("/api/v3/admin/users")
+public List<User> listV3() { ... }
+
+@GetMapping("/api/v1/admin/users")   // no @PreAuthorize
+public List<User> listV1() { ... }
+```
+
+### Internal-IP Header Trust (Expanded)
+
+Allow/deny or admin bypass keyed on client-spoofable IP headers beyond `X-Forwarded-For`.
+
+**Headers**: `X-Real-IP`, `X-Client-IP`, `X-Custom-IP-Authorization`, `X-Originating-IP`, `Client-IP`, `True-Client-IP`, `Proxy-Client-IP`.
+
+```bash
+rg -ni 'x-real-ip|x-client-ip|x-custom-ip|x-originating-ip|client-ip|true-client-ip' --glob '*.{js,ts,py,java,cs,go,php}'
+```
+
+```python
+# VULN: first matching header grants localhost admin
+for hdr in ('True-Client-IP', 'X-Real-IP', 'X-Custom-IP-Authorization'):
+    if request.headers.get(hdr) == '127.0.0.1':
+        return admin_panel()
+```
+
+Cross-ref `trust_boundary.md` when spoofed IP crosses into session state; prefer `xff_spoofing` when the sole issue is IP derivation.
+
+### Multi-Step Workflow State Skip
+
+**VULN**: final execute/confirm endpoint performs the side effect without server-side proof that prior steps completed — no signed workflow token, server-side state machine, or nonce binding steps together. (Detailed step-up requirements: **Transaction Authorization (Step-Up)** above.)
+
+```bash
+rg -n '/execute|/confirm|finalize|complete' --glob '*.{py,js,java,php,cs}' | rg -v 'verify|step_up|workflow|pending|nonce'
+```
+
+```python
+# VULN: direct POST to execute — no pending workflow record checked
+@app.post('/transfer/execute')
+def execute():
+    transfer_repo.execute(request.json['amount'])
+```
+
+**SAFE**: server stores workflow state keyed to session/user; execute validates `workflow_id`, current step, and a server-signed nonce before side effect.
+
+---
+
 ## Secure Authorization Design
 
 Architectural controls that reduce BFLA and escalation risk. Distinct from endpoint-level missing checks above — focus on policy shape and enforcement topology.
@@ -594,6 +713,12 @@ if ($_POST['is_admin'] == '1') {
 - Same principal can initiate and approve sensitive workflow with no SoD split → **CONFIRM**
 - Integration tests cover privileged route success but omit deny case for lower-privilege actor → **LIKELY** (test gap — pair with BFLA finding on same route)
 - Frontend role gate present; backing API handler lacks matching server authorization → **CONFIRM**
+- Auth guard on `req.path` while routing honors `X-Original-URL` / `X-Rewrite-URL` / `X-Forwarded-Prefix` → **CONFIRM** (pair with `reverse_proxy_access_bypass.md`)
+- Referer/Origin header used as access gate for privileged actions → **CONFIRM**
+- Case-sensitive `/admin` guard with case-insensitive router or duplicate unguarded route → **CONFIRM**
+- Format suffix (`.json`, `.html`) or stale `/v1` mount reaches privileged handler without guard on canonical path → **CONFIRM**
+- Privileged access gated on spoofable IP headers (`X-Real-IP`, `True-Client-IP`, `X-Custom-IP-Authorization`, etc.) → **CONFIRM**
+- Execute/confirm endpoint reachable without server-side proof prior workflow steps completed → **CONFIRM**
 
 ### FALSE POSITIVE: Not Privilege Escalation
 

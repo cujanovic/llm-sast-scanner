@@ -117,6 +117,62 @@ Red flags at verification sites: no `algorithms` allowlist on asymmetric endpoin
 - exp/nbf/iat not enforced or excessively broad clock skew tolerance; long-expired or not-yet-valid tokens are accepted
 - typ/cty not enforced: ID tokens accepted where access tokens are required (token confusion)
 
+### Token Binding, Claim Trust, and Replay Controls
+
+JWT verification that validates signature and `exp` but omits binding or replay checks still accepts cross-context tokens and stale replays. OAuth/OIDC **flow** misconfiguration (redirect URI, state, PKCE, code reuse) is covered in `references/oauth_oidc_misconfiguration.md` — this section covers **token-validation** gaps only.
+
+- **Cross-service / cross-app token acceptance**: token passes signature and `exp` but `aud`, `azp`, or `client_id` is not compared to this app's registered client/API identifier — a token minted for another client, microservice, or tenant is accepted
+- **Unverified identity claims (nOAuth-style)**: account lookup, creation, or linking keyed on `email`, `preferred_username`, or `upn` from the token without requiring `email_verified === true` (or equivalent) — attacker-controlled IdP issues a token with victim email and unverified flag
+- **JTI replay window**: `jti` absent, predictable (numeric `0001`–`9999`), or not stored/checked in a replay cache — same token redeems multiple times within TTL
+- **`nbf` not enforced alongside `exp`**: `exp` validated but `nbf` skipped or `verify_nbf: false` — not-yet-valid tokens accepted when clock skew or staged issuance is abused
+- **Refresh-token identity swap**: refresh handler trusts `username`, `user_id`, or `sub` from the request body instead of deriving identity solely from the refresh token's validated subject
+
+```bash
+# Cross-app binding gaps
+rg -n "verify_aud.*False|audience.*optional|skip.*aud|client_id|azp" .
+rg -n "jwt\.decode|jwt\.verify|parseClaimsJws" . | rg -v "audience|requireAudience|aud|azp|client_id"
+
+# Unverified email / username claim trust
+rg -n "preferred_username|email_verified|emailVerified|findOrCreate.*email|link.*email" .
+
+# JTI / nbf gaps
+rg -n '"jti"|verify_nbf.*False|require.*nbf|jti.*store|replay.*cache' .
+
+# Refresh identity from body
+rg -n "refresh.*token|grant_type.*refresh" . -A5 | rg -n "req\.body\.(user|username|user_id|sub)"
+```
+
+```python
+# VULN: signature + exp only — token for another API client accepted
+payload = jwt.decode(token, key, algorithms=["RS256"], options={"verify_aud": False})
+
+# SECURE: bind to this app's client/API identifier
+payload = jwt.decode(
+    token, key, algorithms=["RS256"],
+    audience="myapp-api", issuer=IDP_ISSUER,
+    options={"require": ["exp", "nbf", "jti", "aud"]},
+)
+assert payload.get("azp") == REGISTERED_CLIENT_ID or payload.get("aud") == REGISTERED_CLIENT_ID
+
+# VULN: link account from unverified email claim
+user = User.find_or_create(email=claims["email"])
+
+# SECURE
+if claims.get("email_verified") is not True:
+    raise AuthError("email_not_verified")
+user = User.find_or_create(email=claims["email"])
+
+# VULN: refresh trusts body username over token subject
+user = User.get(request.json["username"])
+if valid_refresh(request.json["refresh_token"]):
+    return issue_tokens(user)
+
+# SECURE: identity from validated refresh token only
+claims = validate_refresh_token(request.json["refresh_token"])
+user = User.get(claims["sub"])
+return issue_tokens(user)
+```
+
 ### Token Confusion and OIDC
 
 - Access vs ID token swap: use an ID token against APIs that verify the signature but not the audience or typ
@@ -492,6 +548,12 @@ jwt.verify(token, loadKeyFromConfig(), { algorithms: ['RS256'] });
 
 - **Auth0NoVerifier (Java)**: `JWT.decode(token)` or `JWT.require(...).build().verify(token)` missing — reading claims from unverified Auth0 tokens.
 - **EmptyJWTSecret (Ruby)**: JWT encoded with empty secret or `alg: "none"`.
+
+## Related References
+
+- `references/oauth_oidc_misconfiguration.md` — OAuth/OIDC **flow** misconfiguration (redirect URI, state, PKCE, authorization-code reuse, cross-client token acceptance at callback, unverified email linking); use alongside this file for full OAuth/OIDC coverage
+- `references/session_fixation.md` — CWE-384 session ID rotation on authentication state change
+- `references/brute_force.md` — login/OTP/reset rate limiting and lockout
 
 ## Session Fixation Detection
 

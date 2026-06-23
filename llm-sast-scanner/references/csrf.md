@@ -106,8 +106,95 @@ Automated checks flag **framework CSRF protection disabled or weakened**, not pe
 
 ### GraphQL CSRF
 
-- If queries or mutations are accepted via GET or persisted queries, exploit top-level navigation with URL-encoded payloads
-- Batched requests may obscure mutations inside an ostensibly safe combined operation
+GraphQL on cookie sessions shares the same CSRF model as REST: ambient credentials on **simple**, **preflightless** requests can execute state-changing operations when the server accepts mutations outside a protected JSON POST path. See also `graphql_injection.md` (GET mutations / CSRF section).
+
+**Vulnerable conditions**:
+- Mutations or state-changing operations accepted over **GET** — `?query=mutation{...}` or **`variables` in the query string** (`?query=...&variables={"id":1}`)
+- **Simple POST** bodies accepted: `application/x-www-form-urlencoded`, `multipart/form-data`, or **`text/plain`** parsed as GraphQL (no CORS preflight)
+- Apollo Server / Gateway with **`csrfPrevention: false`** (or equivalent CSRF middleware disabled) on a cookie-authenticated endpoint
+- CSRF token validated on **POST** only while **GET** (or form-encoded POST) still executes mutations
+- Batched JSON arrays where a mutation hides beside ostensibly read-only operations
+
+**Grep seeds**:
+```bash
+rg -n "methods.*GET|app\.get\s*\(.*graphql|router\.get.*graphql" --glob '*.{js,ts,py,go,java}'
+rg -n "req\.query\.(query|variables)|request\.args\.get\(['\"]query|URLSearchParams.*variables" --glob '*.{js,ts,py}'
+rg -n "csrfPrevention:\s*false|csrf.*false|disableCsrf" --glob '*.{js,ts}'
+rg -n "text/plain|application/x-www-form-urlencoded" --glob '*.{js,ts,py}' -B2 -A2 | rg -n "graphql|mutation"
+```
+
+**VULN**:
+```html
+<!-- GET mutation with variables — victim cookies sent on navigation -->
+<img src="https://target/graphql?query=mutation{deleteUser(id:1)}">
+<img src="https://target/graphql?query=mutation($id:ID!){deleteUser(id:$id)}&variables=%7B%22id%22%3A1%7D">
+```
+```js
+// VULN — CSRF token on JSON POST only; GET still runs mutations
+app.post('/graphql', csrfProtection, graphqlHandler);
+app.get('/graphql', graphqlHandler);  // no token, no Content-Type gate
+```
+
+**SAFE**: disallow GET (and HEAD) for mutations and other state-changing operations; require **`Content-Type: application/json`** plus synchronizer token or non-simple custom header (`X-CSRF-Token`, `X-Requested-With`) on cookie-authenticated routes; enable framework CSRF prevention (e.g. Apollo `csrfPrevention: true`); enforce the same policy on batch and persisted-query paths. Cross-ref `graphql_injection.md`.
+
+**CSRF-or-session OR-gate**: mutation gate `if (hasSession || hasCsrfToken) allow` where **both** the session and the CSRF token are freely obtainable by an anonymous client — CSRF token minted without login (public `csrfToken` query/mutation), or anonymous session from a bootstrap operation — so satisfying **either** branch is not real authentication. Also: CSRF token **not bound** to an authenticated session (cross-session reuse accepted). Cross-ref `graphql_injection.md` (Request Forgery / CSRF section).
+
+**Vulnerable conditions**:
+- `||` OR-logic combining session and CSRF checks on mutation authorization
+- Public resolver issues CSRF token without requiring verified login
+- Bootstrap/init operation mints a session cookie usable for privileged mutations
+- CSRF accepted as **sole** gate when token is public and unbound
+
+**Grep seeds**:
+```bash
+rg -n '\|\|' --glob '*.{js,ts,py}' -C2 | rg -i 'csrf|session|token'
+rg -n 'csrfToken|getCsrfToken|issueCsrf' --glob '*.{graphql,graphqls,js,ts,py}'
+rg -n 'hasSession|hasCsrf|csrfValid|sessionValid' --glob '*.{js,ts,py}' -C3
+```
+
+**VULN**:
+```js
+// VULN — either anonymous session OR pre-login CSRF satisfies gate
+function allowMutation(ctx, req) {
+  const hasSession = !!req.cookies.session || !!ctx.session;
+  const hasCsrf = req.headers['x-csrf-token'] || ctx.csrfToken;
+  if (hasSession || hasCsrf) return true;
+  return false;
+}
+// VULN — CSRF issued without authenticated session binding
+csrfToken: async (_, __, ctx) => {
+  const token = randomBytes(32).toString('hex');
+  ctx.csrfToken = token;  // not tied to session id or user
+  return { csrfToken: token };
+},
+```
+
+**SAFE**: require **both** verified identity **and** CSRF for sensitive mutations; bind CSRF token to the authenticated session (store keyed by session id; rotate on login); bootstrap endpoints must not mint a session usable for privileged operations.
+
+### JSONP / XSSI (CSRF-adjacent data theft)
+
+JSONP callback endpoints and sensitive responses served as **executable JavaScript** (`application/javascript`, `text/javascript`) are CSRF/XSSI-adjacent: a victim's browser sends ambient cookies on `<script src="...">` or cross-origin GET, and the response runs in the victim's origin context. This is not classic CSRF (no state change required) but shares the same cookie-backed trust model. See `xssi_jsonp.md` for callback reflection, Flash-based XSSI, and Angular JSONP gadget patterns.
+
+**VULN conditions**:
+- GET endpoint reflects `callback`/`jsonp`/`_callback` into `callbackName({...sensitive...})` body
+- Authenticated JSON API returns `Content-Type: application/javascript` or wraps JSON in a user-supplied function call
+- `Access-Control-Allow-Origin: *` or reflected origin on cookie-authenticated JSON read endpoints (pairs with CORS misconfig)
+
+```javascript
+// VULN — JSONP wraps private data; any site can load with victim cookies
+app.get('/api/user', (req, res) => {
+  const cb = req.query.callback;
+  res.type('application/javascript').send(`${cb}(${JSON.stringify(req.user)})`);
+});
+
+// SAFE — JSON only, no ambient-auth JSONP, CSRF token on state-changing routes
+app.get('/api/user', (req, res) => {
+  res.type('application/json').json(req.user);
+});
+res.setHeader('X-Content-Type-Options', 'nosniff');
+```
+
+**Defense checklist**: serve `application/json` (not JS), disable JSONP on authenticated routes, require synchronizer tokens on unsafe methods, set `X-Content-Type-Options: nosniff` on JSON responses.
 
 ### WebSocket CSRF
 

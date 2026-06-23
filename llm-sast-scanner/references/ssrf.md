@@ -107,11 +107,28 @@ if any(ipaddress.ip_address(a[4][0]).is_private for a in addrs):
     raise ValueError("Internal destination blocked")
 ```
 
+**DNS rebinding / TOCTOU — SAFE pattern** — validate **on every resolution**, pin the resolved IP for the actual socket connect, and re-validate after each redirect hop; never allowlist an attacker-controlled domain without pinning:
+
+```python
+# VULN: validate once, fetch later — TTL swap or second lookup hits internal IP
+if not is_private(resolve(host)):
+    requests.get(url)  # DNS may rebind before connect
+
+# SAFE: resolve → block private/metadata → connect to pinned IP with Host header
+addrs = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+ip = addrs[0][4][0]
+if ipaddress.ip_address(ip).is_private or ip.startswith("169.254."):
+    raise ValueError("blocked")
+# use custom adapter/connector binding to `ip`, set Host: {host}; disable blind redirect follow
+# on manual redirect: re-parse Location, re-resolve, re-validate (no reuse of first IP)
+```
+
 **Other safe shapes**
 - User input used exclusively as a query parameter on a hardcoded host, never as authority
 - URL assembled from a hardcoded base with user input confined to an encoded path segment
 - Redirect following disabled on the HTTP client; handle redirects manually with re-validation
 - Do not forward cookies, `Authorization`, or other auth headers to user-chosen destinations
+- Normalize (IDNA/punycode, Unicode NFC) **before** allowlist comparison; reject URLs whose normalized host differs from raw parse
 
 > IP blocklists alone (`169.254.0.0/16`, `10.0.0.0/8`, …) are **not** sufficient — bypass via DNS rebinding, URL encoding, IPv6/decimal notation, or redirect chains. Treat blocklist-only code as Likely Vulnerable.
 
@@ -120,6 +137,10 @@ if any(ipaddress.ip_address(a[4][0]).is_private for a in addrs):
 - DNS rebinding: domain resolves to an internal IP address after the initial check completes
 - URL parser differentials: `http://evil.com@127.0.0.1`
 - Redirect chains: an allowlisted URL responds with a redirect to an internal target
+- WHATWG vs RFC3986 parser split: backslash treated as path separator in some fetch stacks — `http://allowed.com\@169.254.169.254/` may pass allowlist on one parser while the HTTP client requests the host after `@`
+- Normalize-before-allowlist: blocklist/allowlist applied to raw string before Unicode NFC/NFKC collapse, percent-decoding, or IDNA punycode conversion — attacker smuggles forbidden host through alternate representation
+- Metadata path/fragment: `http://169.254.169.254#@allowed.com` or `http://metadata/expected#@attacker` — validator reads fragment/host differently than fetch client
+- Unicode / IDN / enclosed alphanumerics: fullwidth digits (`１２７.０.０.１`), homoglyphs, `xn--` punycode, or enclosed alphanumeric Unicode (`ⓛⓞⓒⓐⓛⓗⓞⓢⓣ`) bypass ASCII-only blocklists until IDNA normalization
 
 ## Business Risk
 - Unauthorized access to internal services such as metadata endpoints and admin panels
@@ -263,6 +284,44 @@ URL parsed = new URL(url);
 // http://169.254.169.254#allowed.com — fragment ignored by some validators
 ```
 
+### WHATWG vs RFC3986 — Backslash and Userinfo Split
+
+Some HTTP clients (WHATWG URL algorithm) treat `\` as `/` and normalize `http://allowed\@attacker/` differently from RFC3986 parsers used in validators:
+
+```text
+http://allowed.com\@169.254.169.254/latest/meta-data/
+http://allowed.com\169.254.169.254/
+```
+
+**VULN condition**: allowlist/blocklist runs on `java.net.URL`, `urlparse`, or regex over raw string; outbound `fetch`/`HttpClient`/`requests` uses a different parser — host seen by validator ≠ host connected.
+
+**Grep seeds**: dual parse paths (`new URL` + `HttpClient`), `normalize.*url` after allowlist check, `allowedHosts.includes(host)` on pre-decode string.
+
+**SAFE**: single canonical parser library for validate and fetch; compare normalized punycode host; connect to pinned resolved IP; reject URLs containing `\`, unescaped `@` in authority, or userinfo components unless explicitly required.
+
+### Normalize-Before-Allowlist (Recollapse)
+
+**VULN condition**: security check on raw or once-decoded input; HTTP client applies additional decoding, Unicode normalization, or scheme-default port folding before connect:
+
+```python
+# VULN: check raw, fetch after client normalizes
+if '169.254.' not in user_url:  # bypass via percent-encoding, IDNA, fullwidth chars
+    requests.get(user_url)
+```
+
+**SAFE**: `urllib.parse` / WHATWG parse → IDNA encode hostname → resolve → IP range check → pin IP → fetch with redirect re-validation at each hop.
+
+### Metadata Path / Fragment Tricks
+
+```text
+http://169.254.169.254/latest/meta-data/#@allowed.com
+http://metadata.google.internal/#@cdn.example.com
+```
+
+Validators that strip fragments or compare only the pre-`#` portion may approve a metadata URL while error messages/logging show the allowlisted fragment host. Fetch clients ignore fragment for HTTP — full request hits metadata.
+
+**SAFE**: parse with one library; validate `hostname` from authority only (never fragment); block link-local/metadata IPs after DNS resolution regardless of fragment/userinfo.
+
 ## SSRF via Redirect Chain
 
 ```java
@@ -354,17 +413,71 @@ images: { remotePatterns: [{ protocol: 'https', hostname: 'cdn.example.com' }] }
 
 **FALSE POSITIVE**: destination restricted to an explicit non-wildcard host allowlist; user value confined to a path segment under a hardcoded base; `url=` only ever resolves to a fixed first-party asset host with validation.
 
+### Webhook Test / Verify URL Features
+
+Integration UIs often expose **test**, **ping**, **verify**, or **validate** actions that POST/GET a user-supplied callback URL server-side — same SSRF class as `url=` proxies with higher trust (may run from job workers with cloud credentials). See `webhook_integration_security.md` for CRUD IDOR, inbound signature gaps, and naming patterns (`testWebhook`, `pingWebhook`, `verifyUrl`, `sendTest`, `validateWebhook`).
+
+**Grep seeds**: `testWebhook`, `pingWebhook`, `verifyUrl`, `sendTest`, `validateWebhook`, `checkEndpoint`, `webhook.*test`, `callback.*verify`.
+
 ## SSRF via Host / Forwarded Headers (request-context-derived URLs)
 
 Servers sometimes build an *internal* request URL from request-context headers the client controls — `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Server`, `Referer`, `Origin`. Because these are attacker-controllable, the "internal" fetch (or generated absolute link/callback) can be redirected to an arbitrary host. Framework-agnostic class; also drives password-reset link poisoning and cache poisoning.
 
 **VULN shape**: `fetch(`${req.headers['x-forwarded-host']}/internal/path`)`; `new URL(path, `https://${req.headers.host}`)` then fetched; building absolute callback/reset URLs from `Host`.
 
+### Referer (and Other Headers) as Outbound Fetch Source
+
+**VULN condition**: background jobs, analytics, link preview, or "fetch URL from header" helpers pass `Referer`, `Origin`, `X-Forwarded-For`-derived URLs, or stored header values directly to outbound HTTP clients — not just Host-derived absolute URL construction.
+
+```javascript
+// VULN: Referer header becomes SSRF sink
+const ref = req.headers.referer || req.headers.referrer;
+await axios.get(ref);  // attacker sets Referer: http://169.254.169.254/
+```
+
+```python
+# VULN: webhook/ping uses Referer or callback header without allowlist
+requests.get(request.headers.get('Referer'))
+```
+
+**Grep seeds**: `referer`, `referrer`, `headers\[.Referer`, `getHeader\(.Referer`, `req\.headers\.referer` adjacent to `fetch|requests\.|HttpClient|axios|curl`.
+
+**SAFE**: never fetch raw header URLs; if required, parse and allowlist hostname same as explicit `url=` parameters.
+
 **Concrete instance — Next.js Server Actions** (`"use server"` functions dispatched via the `Next-Action` header): older versions built the internal subrequest URL from the request `Host` header, so a spoofed `Host` turned action dispatch into blind→full-read SSRF (the `Next-Action` token selects the function; the request path is ignored). Generic lesson: any server-side request whose **authority** is derived from a request header is SSRF unless the host is validated against an allowlist.
 
 **SAFE**: derive the base URL from server config/environment (e.g. `process.env.PUBLIC_URL`), not from request headers; validate `Host`/`X-Forwarded-Host` against an allowlist before use.
 
 **Recognized sanitizers summary**: hostname-sanitizing prefixes, allowlist/`contains` guards, host equality checks, regexp barriers, fixed-prefix string construction (Python partial), `encodeURIComponent` (JS), redirect-check helpers (Go), `AntiSSRF` validators (Python), models-as-data `request-forgery` barriers.
+
+## GraphQL Resolver SSRF
+
+GraphQL **resolver arguments** are remote user input. Resolvers that fetch remote resources — webhooks, import-from-URL, avatar/image proxy, link preview — pass `args` fields directly into outbound HTTP clients. The same SSRF class applies when the destination is a **single URL string** or **decomposed components** (`scheme`, `host`, `port`, `path` / `baseUrl` + `path`) assembled server-side.
+
+**Field/arg name heuristics** (when value reaches a fetch sink): `url`, `importUrl`, `fetchUrl`, `download`, `remote_url`, `target_url`, `webhook`, `callback`, `imageUrl`, `source`, `link`, `endpoint`.
+
+**Vulnerable conditions**:
+- Resolver builds `fetch(args.url)` / `requests.get(args.importUrl)` with no host allowlist
+- Decomposed args: `f"{args.scheme}://{args.host}:{args.port}{args.path}"` then `axios.get(...)` — attacker sets `host` to `169.254.169.254` or `metadata.google.internal`
+- Stored URL on a GraphQL type resolved later without write-time or read-time allowlist validation
+
+**Grep seeds** — resolver signature → outbound client:
+```bash
+rg -n "async\s+\w+\(|def\s+\w+\(|func\s+\(.*\)\s*\(|resolve\s*\(" --glob '*.{js,ts,py,go,java,rb,cs}' -A12 | rg -n "importUrl|fetchUrl|remote_url|target_url|download|webhook|callback|imageUrl"
+rg -n "(importUrl|fetchUrl|remote_url|target_url|args\.(url|host|scheme|port|path))" --glob '*.{js,ts,py,go,java}' -A3 | rg -n "fetch\(|requests\.(get|post)|axios\.|http\.Get|HttpClient|urllib|httpx|aiohttp"
+rg -n "scheme.*host|host.*port.*path|baseUrl.*path" --glob '*.{js,ts,py,go}' -B2 -A4 | rg -n "fetch|requests|axios|http\.Get"
+```
+
+**VULN**:
+```python
+def resolve_import_url(parent, info, url):
+    return requests.get(url).text  # args.url fully attacker-controlled
+
+def resolve_fetch(parent, info, scheme, host, port, path):
+    return httpx.get(f"{scheme}://{host}:{port}{path}").json()  # decomposed SSRF
+```
+
+**SAFE**: same as general SSRF — strict hostname allowlist, resolve-then-validate IP with pinning, scheme restricted to `https`, user input never as authority; apply at resolver boundary before any outbound call. Cross-ref `graphql_injection.md` (resolver-layer injection vs document injection).
 
 ## Dynamic Test / PoC
 

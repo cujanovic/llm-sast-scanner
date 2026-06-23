@@ -498,16 +498,54 @@ include($_GET['page']);
 
 ### PHP Session File Inclusion
 
+Session files live at `{session.save_path}/sess_{PHPSESSID}` (default often `/var/lib/php/sessions/` or `/var/lib/php*/sessions/` in container images). PHP serializes `$_SESSION` values into the file; if attacker-controlled bytes reach session storage and the file is later `include`d, the payload executes.
+
 ```php
+// VULNERABLE: include session file keyed to victim or attacker PHPSESSID
+$sessionFile = ini_get('session.save_path') . '/sess_' . $_COOKIE['PHPSESSID'];
+include($sessionFile);
+
 // VULNERABLE: include session file with user-controlled session ID
 $sessionFile = '/var/lib/php/sessions/sess_' . $_GET['sessid'];
 include($sessionFile);
-// If attacker controls session data AND a session file exists with PHP code
 
-// VULNERABLE: user-controlled data written to session, then session file included
-$_SESSION['template'] = $_POST['template'];  // write user input to session
+// VULNERABLE: reflected/stored field written to session, then session file included
+$_SESSION['theme'] = $_GET['color'];  // or $_POST, reflected in response elsewhere
 include('/var/lib/php/sessions/sess_' . session_id());  // include own session file
+// Attacker sets PHPSESSID cookie, submits <?php ... ?> in color=, triggers include
 ```
+
+**Grep seeds**: `sess_`, `session.save_path`, `PHPSESSID`, `$_SESSION[` adjacent to `include(`/`require(`
+
+### LFI → RCE via pearcmd.php (Docker PHP images)
+
+Official PHP Docker images often ship `/usr/local/lib/php/pearcmd.php`. When user input reaches `include`/`require`/`file_get_contents`/`fopen` as a path (params such as `file`, `page`, `include`) and extra query arguments propagate, `pearcmd.php` may interpret the query string as CLI argv when `register_argc_argv=On` (common in dev images).
+
+**Chain**: include `/usr/local/lib/php/pearcmd.php` with `+config-create` argv → writes attacker-controlled PHP to a web-readable path → follow-up include or direct HTTP fetch of dropped file → RCE.
+
+```php
+// VULNERABLE — path param reaches include; query args become pearcmd argv
+include('/' . ltrim($_GET['file'], '/'));
+// Attacker: file=usr/local/lib/php/pearcmd.php&+config-create+/&/<?=system($_GET['c']);?>+/var/www/html/s.php
+```
+
+**Grep seeds**: `pearcmd`, `/usr/local/lib/php/pearcmd`, `+config-create`, `register_argc_argv`
+
+### Common Include Targets (Analyst Enumeration)
+
+When dynamic `include($_GET[...])` / `require` exists without allowlist, enumerate beyond `/etc/passwd`:
+
+```text
+/var/lib/php/sessions/sess_<PHPSESSID>   # session.save_path default
+/var/lib/php*/sess_*                     # version-specific session dirs
+/var/mail/<user>                         # local mail spool
+/var/spool/mail/<user>                   # alternate mail spool layout
+/proc/self/environ
+/tmp/php*                                # upload temp names
+/usr/local/lib/php/pearcmd.php           # Docker PHP + register_argc_argv
+```
+
+Mail spool paths are relevant when cron, `mail()`, or MTA output lands in mbox files that later become inclusion targets.
 
 ## IIS-Specific Path Traversal Patterns
 

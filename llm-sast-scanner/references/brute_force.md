@@ -96,6 +96,51 @@ Layer controls; absence of any single layer is a SAST signal when the handler ac
 - **VULN**: distinct errors (`user_not_found` vs `wrong_password`) or reset endpoint returning 404 for unknown email.
 - Reset/password-recovery rate limits must apply per IP **and** per submitted identifier — see `references/authentication_jwt.md`.
 
+### Rate-limit scope gaps and bypass
+
+Brute-force resistance fails when throttles cover verify/submit but not issuance, or when counters key only on naive client identity.
+
+- **Verify throttled, send/resend unrestricted**: `/verify-otp` or `/verify-code` has attempt caps but `/send-otp`, `/resend`, `/forgot-password`, or email/SMS dispatch does not — attacker triggers unlimited outbound messages (cost/DoS) or floods victim inbox while probing codes slowly on the throttled endpoint
+- **GraphQL batched / aliased login**: single HTTP request carries many credential checks via aliases or batch array — per-request rate limit counts as one attempt while `login1: login(...)`, `login2: login(...)` each run authentication
+- **Limiter bypass via Host / subdomain / forwarded IP**: rate key is `req.hostname`, first `X-Forwarded-For` hop, or path-only — attacker rotates `Host: api-N.example.com`, tenant subdomains, or spoofed `X-Forwarded-For` / `X-Real-IP` to reset counters (especially when the app trusts client-supplied headers without a trusted proxy allowlist)
+- **Unlimited account creation / token-endpoint credential checks**: registration, signup, invite-accept, or OAuth `/token` (ROPC, client-credentials with user context) validates credentials with no per-IP/per-identifier throttle — password spraying and user enumeration at scale
+
+```bash
+# Send vs verify rate-limit asymmetry
+rg -n "verify[_-]?otp|verify[_-]?code|check[_-]?otp" . | rg -i "limit|lockout|429"
+rg -n "send[_-]?otp|resend|send[_-]?code|forgot[_-]?password" . | rg -v "limit|rate|throttle|429"
+
+# GraphQL batch / alias login
+rg -n "login|authenticate|signIn" --glob "*.{js,ts,graphql,gql}" | rg -i "alias|batch|@batch"
+
+# Host / forwarded-IP keyed limits
+rg -n "rateLimit|rate_limit|throttle" . | rg -i "x-forwarded-for|x-real-ip|req\.hostname|subdomain"
+
+# Registration / token endpoint gaps
+rg -n "register|signup|create[_-]?account|/token|grant_type" . | rg -v "limit|lockout|429|ratelimit"
+```
+
+```js
+// VULN: verify capped, resend unlimited
+app.post('/verify-otp', otpLimiter, verifyHandler);
+app.post('/resend-otp', resendHandler);  // no limiter — SMS/email flood
+
+// VULN: GraphQL — one request, many login attempts
+// query { a: login(u:"victim", p:"1") { token } b: login(u:"victim", p:"2") { token } ... }
+
+// SECURE: per-field rate budget + per-IP on send and verify
+const loginFieldLimiter = rateLimit({ keyGenerator: (req) => `${req.ip}:${req.body?.query?.slice(0,64)}`, max: 5 });
+app.post('/resend-otp', resendLimiter, resendHandler);
+```
+
+```python
+# VULN: limiter keys on untrusted X-Forwarded-For
+ip = request.headers.get("X-Forwarded-For", request.remote_addr).split(",")[0]
+
+# SECURE: trust proxy list; key on connection IP or authenticated principal
+ip = request.remote_addr if request.remote_addr in TRUSTED_PROXIES else get_client_ip(request)
+```
+
 ---
 
 ## Python Source Detection Rules

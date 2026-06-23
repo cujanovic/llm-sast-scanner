@@ -43,6 +43,39 @@ These are **configuration and flag queries**, not taint-flow analyses. The insec
 **Broad cookie path** (CWE-287)
 - `HttpCookie.Path = "/"` — only worth flagging when a narrower path scope is required; as a standalone signal `Path="/"` is the normal app-wide default and will cause false positives
 
+### ViewState integrity and encryption (CWE-502 enabler)
+
+- `<pages enableViewStateMac="false" />` — disables ViewState MAC; enables forgery when combined with `LosFormatter`/`ObjectStateFormatter` deserialization (see `insecure_deserialization.md`)
+- `<pages ViewStateEncryptionMode="Never" />` — ViewState sent cleartext; weakens tamper resistance
+- Default is MAC on and encryption `Auto`; any explicit weakening on production pages is a misconfiguration
+
+**Grep seeds**: `enableViewStateMac="false"`, `enableViewStateMac='false'`, `ViewStateEncryptionMode="Never"`, `ViewStateEncryptionMode='Never'`
+
+### Hardcoded machineKey (CWE-798 / deserialization enabler)
+
+- `<machineKey validationKey="..." decryptionKey="..." />` in committed `Web.config`, transforms, or environment-specific configs checked into source
+- Static keys let an attacker forge valid ViewState MACs and decrypt/encrypt ViewState blobs → enables `__VIEWSTATE` gadget chains (cross-ref `insecure_deserialization.md`, `weak_crypto_hash.md`)
+- Production keys must be unique per deployment, rotated, and loaded from a secret store — not literals in repo
+
+**Grep seeds**: `<machineKey`, `validationKey=`, `decryptionKey=`, `compatibilityMode=`
+
+### Cookieless session URL rewriting (CWE-384 / session fixation)
+
+- `<sessionState cookieless="UseUri" />` or `cookieless="AutoDetect"` — embeds session id in URL path segment `(S(...))` instead of HttpOnly cookie
+- Example path shape: `/admin/(S(abc123...))/page.aspx` — session id leaks via Referer, logs, browser history, shared links
+- Enables session fixation and hijacking when combined with open redirects or XSS
+
+**Grep seeds**: `cookieless="UseUri"`, `cookieless='UseUri'`, `cookieless="AutoDetect"`, `cookieless='AutoDetect'`, `<sessionState`
+
+### Auth cookie confusion anti-patterns
+
+- Treating **presence** of `.ASPXAUTH` (Forms Authentication ticket cookie) as proof of authorization without validating ticket / role claims server-side
+- Treating **absence** of `.ASPXAUTH` as "unauthenticated" while `ASP.NET_SessionId` alone grants access to `<deny users="?" />` protected resources — session id is not an auth ticket
+- Relying on `Session["UserId"]` or similar session keys set before login completes — fixation-friendly when cookieless or session not regenerated on auth
+- Code that branches on `Request.Cookies[".ASPXAUTH"] != null` or `Request.Cookies["ASP.NET_SessionId"]` instead of `User.Identity.IsAuthenticated` / role checks
+
+**Grep seeds**: `.ASPXAUTH`, `ASP.NET_SessionId`, `Request\.Cookies\[`, `User\.Identity\.IsAuthenticated`, `<deny users="\?">`, `<authorization>`
+
 ## Vulnerable Conditions
 
 - Production deployment with `debug="true"` — stack traces, source hints, performance/memory impact (CWE-011 / CWE-532 in query tags)
@@ -51,6 +84,10 @@ These are **configuration and flag queries**, not taint-flow analyses. The insec
 - Multi-megabyte `maxRequestLength` on public-facing upload endpoints
 - Header checking disabled — CRLF/header injection risk increases
 - Session cookies scoped to parent domain or `/` path unnecessarily
+- ViewState MAC off or encryption `Never` on pages that accept posted `__VIEWSTATE`
+- Committed `machineKey` literals enabling ViewState forgery
+- Cookieless session state embedding `(S(...))` in URLs on authenticated areas
+- Authorization logic keyed on cookie presence instead of validated identity
 
 ## Safe Patterns
 
@@ -63,6 +100,10 @@ These are **configuration and flag queries**, not taint-flow analyses. The insec
 - Size uploads intentionally: keep `maxRequestLength` aligned with business max (≤ 4096 KB unless justified)
 - Leave `enableHeaderChecking` enabled (default); set `X-Frame-Options`, secure cookie flags per `insecure_cookie.md`
 - Narrow cookie `Domain` and `Path` to the application scope
+- ViewState: omit `enableViewStateMac="false"`; use default MAC or `ViewStateEncryptionMode="Auto"`/`Always`
+- `machineKey` from deployment secret store; never hardcode keys in source-controlled config
+- `<sessionState cookieless="UseCookies" />` (default) — session id in HttpOnly cookie only
+- Authorization via `User.Identity.IsAuthenticated`, role/membership checks, and `[Authorize]` — not cookie name presence
 
 ## Sanitizers / Barriers
 
@@ -137,6 +178,9 @@ ASP.NET defaults exist for a reason. Production configs must disable debug outpu
 
 ## Cross-References
 
+- `insecure_deserialization.md` — ViewState `LosFormatter`/`ObjectStateFormatter` RCE when MAC/keys weak
+- `weak_crypto_hash.md` — hardcoded `machineKey` and weak validation/decryption key material
+- `session_fixation.md` — cookieless session URLs and missing session regeneration on login
 - `xss.md` — XSS when validation is off or bypassed
 - `output_encoding.md` — wrong-context encoding on ASP.NET writers
 - `insecure_cookie.md` — Secure/HttpOnly/SameSite flags

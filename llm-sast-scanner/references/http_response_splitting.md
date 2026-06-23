@@ -35,7 +35,21 @@ Writing user-controlled data into HTTP headers without neutralizing CR (`\r`) an
 
 - URL-encoded `%0d%0a` decoded before header write
 - Unicode line separators (NEL, LS, PS) if not filtered
+- **UTF-8 overlong / multibyte CRLF bypass**: sequences such as `%E5%98%8A` (overlong `\n`) and `%E5%98%8D` (overlong `\r`) — and other multibyte encodings some frameworks, reverse proxies, or legacy decoders normalize to CR/LF after a naive `%0d`/`%0a`/`[\r\n]` strip. Bypasses string filters that only reject literal `\r`/`\n` or single-byte percent-encoding.
 - Header **name** injection when attacker controls the header key (Python query covers name and value)
+
+```python
+# VULN — strips literal CR/LF only; overlong UTF-8 survives and may collapse downstream
+safe = user_input.replace("\r", "").replace("\n", "")
+response.headers["X-User"] = safe
+# Attacker: %E5%98%8A%E5%98%8DSet-Cookie:%20session=evil
+
+# SAFE — reject all control characters; prefer framework header APIs that disallow them
+import re
+if re.search(r"[\x00-\x1f\x7f]", user_input):
+    abort(400)
+response.headers["X-User"] = user_input
+```
 
 ## Sanitizers / Barriers
 

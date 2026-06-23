@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 82 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework. Covers 91 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.34.0"
+  version: "1.36.0"
   domain: application-security
-  references: 82 vulnerability knowledge bases
+  references: 91 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,18 +22,18 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 82 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 91 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
 |----------|----------------|
 | **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, Server-Side Include (SSI) Injection, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
-| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Mass Assignment |
+| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, OAuth 2.0 / OIDC Misconfiguration, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Session Puzzling, Reverse-Proxy Access Bypass, Email Parser Differential, Mass Assignment |
 | **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
-| **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, CORS Misconfiguration, WebSocket Security (CSWSH), Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, Regex Injection/ReDoS, CVE Patterns |
+| **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, Correlation/Tracing Header Injection, CORS Misconfiguration, WebSocket Security (CSWSH), postMessage Security, XSSI / JSONP, Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, GraphQL Denial of Service, Regex Injection/ReDoS, CVE Patterns |
 | **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Kubernetes / Cloud Orchestration, CI/CD & Container Security, nginx / Web-Server Configuration |
-| **API & AI/Agent Services** | API / REST / Web-Service Security, MCP (Model Context Protocol) Security |
+| **API & AI/Agent Services** | API / REST / Web-Service Security, Webhook / Integration Security, MCP (Model Context Protocol) Security |
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
@@ -157,11 +157,15 @@ references/ssrf.md                   — Server-side request forgery
 references/rce.md                    — Remote code execution
 references/idor.md                   — Insecure direct object reference
 references/authentication_jwt.md     — Auth flaws, JWT weaknesses
+references/oauth_oidc_misconfiguration.md — OAuth 2.0 / OIDC flow misconfig: weak redirect_uri match, missing state/PKCE, code reuse/race, cross-client token acceptance, unverified-email linking, implicit/ROPC, dynamic-registration SSRF (CWE-287/346/601)
+references/reverse_proxy_access_bypass.md — Reverse-proxy access bypass: authz applied to a different path representation than routing (rewrite headers X-Original-URL/X-Rewrite-URL, normalization mismatch, stale API versions, Referer/Origin gates) (CWE-863/289/436)
+references/session_puzzling.md       — Session puzzling / session-variable overloading: unauthenticated or mid-flow session keys reused as proof of full authentication (CWE-841/384)
+references/email_parser_differential.md — Email validation-vs-parsing differential: regex/split('@') accepted but mail library parses differently (encoded-words, comments, multiple @, IDN) → takeover; identity-key collisions (CWE-20/697)
 references/csrf.md                   — Cross-site request forgery
 references/path_traversal_lfi_rfi.md — Path traversal, LFI/RFI
 references/client_side_path_traversal.md — Client Side Path Traversal (CSPT) across React/Next/Vue/Angular/SvelteKit/Nuxt/Ember/SolidStart
 references/server_side_prototype_pollution.md — Server-Side Prototype Pollution (Node.js / Deno / NPM gadget catalog)
-references/client_side_prototype_pollution.md — Client-Side Prototype Pollution (BlackFan PP/gadget catalog, browser-API gadgets, sanitizer bypasses)
+references/client_side_prototype_pollution.md — Client-Side Prototype Pollution (PP/gadget catalog, browser-API gadgets, sanitizer bypasses)
 references/ssti.md                   — Server-side template injection
 references/ssi_injection.md          — Server-Side Include (SSI) injection: #exec RCE, #include/#printenv disclosure on SSI-parsed pages (CWE-97)
 references/xxe.md                    — XML external entity
@@ -170,12 +174,15 @@ references/arbitrary_file_upload.md      — Arbitrary file upload
 references/privilege_escalation.md       — Privilege escalation
 references/nosql_injection.md            — NoSQL injection
 references/graphql_injection.md          — GraphQL injection
+references/graphql_dos.md                — GraphQL denial of service (depth/complexity/cost, alias/batch/directive/field overloading, circular types/fragments, pagination caps, execution timeouts, N+1 amplification)
 references/weak_crypto_hash.md           — Weak cryptography / hash
 references/information_disclosure.md     — Information disclosure
 references/insecure_cookie.md            — Insecure cookie attributes
 references/open_redirect.md              — Open redirect
 references/reverse_tabnabbing.md         — Reverse tabnabbing: target="_blank"/window.open without rel="noopener" exposing window.opener (CWE-1022)
 references/websocket_security.md         — WebSocket security: CSWSH (missing Origin check), missing connection/per-message auth, unsanitized broadcast (CWE-345/284/346)
+references/postmessage_security.md       — postMessage security: missing event.origin checks, wildcard targetOrigin, weak substring/regex origin allowlists, event.data taint to DOM/JS sinks (CWE-345/346)
+references/xssi_jsonp.md                  — Cross-Site Script Inclusion / JSONP: callback-wrapped sensitive data, sensitive data served as executable JS, dynamic .js endpoints stealable via cross-origin script include (CWE-345/200)
 references/trust_boundary.md             — Trust boundary violations
 references/race_conditions.md            — Race conditions / TOCTOU
 references/brute_force.md                — Brute force / credential stuffing
@@ -201,6 +208,7 @@ references/http_response_splitting.md    — HTTP response splitting / header in
 references/host_header_poisoning.md      — Host header poisoning / email-link injection (CWE-640)
 references/clickjacking.md               — Clickjacking / missing X-Frame-Options / CSP frame-ancestors (CWE-451)
 references/log_injection.md              — Log injection / log forging (CWE-117)
+references/correlation_header_injection.md — Correlation/tracing headers (X-Request-ID/X-Correlation-ID/X-Trace-ID) taken from the request into log/path/shell/SQL/JSON/downstream sinks unsanitized (CWE-117/93/74)
 references/certificate_validation.md     — TLS certificate / hostname / pinning / revocation failures (CWE-295/297/299/322)
 references/cleartext_transmission.md     — Cleartext transmission, missing TLS (CWE-319/311)
 references/mass_assignment.md            — Mass assignment / autobinding of privileged fields (CWE-915)
@@ -219,6 +227,7 @@ references/xs_leaks.md                    — Cross-site leaks (timing/frame/sta
 references/privacy_data_protection.md    — Privacy / PII handling: over-collection, retention, PII in logs/URLs/third parties
 references/supply_chain_security.md      — Supply chain: unpinned deps, missing integrity/SRI, lifecycle scripts, untrusted registries
 references/api_security.md               — API / REST / web-service layer: excessive data exposure, rate limits, endpoint inventory, misconfig
+references/webhook_integration_security.md — Webhook/integration surface: outbound test/ping SSRF, webhook CRUD IDOR/BFLA, unallowlisted delivery + redirects, inbound signature/replay failures, signing-secret disclosure (CWE-918/639/352)
 references/mcp_security.md               — MCP (Model Context Protocol): tool poisoning, injection via tool output, over-broad/unauth servers
 references/iac_security.md               — Infrastructure-as-Code misconfig (Terraform/CloudFormation/ARM/Bicep/Pulumi)
 references/kubernetes_cloud_security.md  — Kubernetes / cloud orchestration: privileged pods, RBAC, securityContext, secrets, NetworkPolicy

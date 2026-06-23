@@ -203,7 +203,12 @@ end
 - **SAFE**: `basename($_FILES['file']['name'])` — strips directory components
 
 ### Dangerous extensions to flag
-`.php`, `.php3`, `.php4`, `.php5`, `.phtml`, `.phar`, `.py`, `.rb`, `.pl`, `.sh`, `.cgi`, `.asp`, `.aspx`, `.jsp`
+
+**Server-side scripts**: `.php`, `.php3`, `.php4`, `.php5`, `.phtml`, `.phar`, `.py`, `.rb`, `.pl`, `.sh`, `.cgi`, `.asp`, `.aspx`, `.jsp`, `.jspx`, `.jspf`
+
+**Apache config override**: `.htaccess` (AddHandler/AddType), `.user.ini` (`auto_prepend_file` / `auto_append_file` on PHP-FPM/CGI)
+
+**IIS handler/config**: `.asa`, `.asax`, `.cer`, `.cdx`, `.config` (`web.config`), `.ashx`, `.asmx`
 
 ## Java / Spring Source Detection Rules
 
@@ -292,7 +297,7 @@ $ext = strtolower(pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION));
 if (!in_array($ext, $allowed, true)) { die('Rejected'); }
 ```
 
-### .htaccess Upload → RCE
+### .htaccess / .user.ini Upload → RCE
 
 ```php
 // VULNERABLE: allows .htaccess file upload in Apache environments
@@ -300,8 +305,13 @@ if (!in_array($ext, $allowed, true)) { die('Rejected'); }
 //   AddType application/x-httpd-php .jpg
 // Then any .jpg file in that directory is executed as PHP
 
-// VULN indicator: .htaccess not in the blocked extensions list
-$blocked = ['php', 'exe', 'sh'];  // Missing .htaccess → bypass
+// VULNERABLE: .user.ini upload on PHP-FPM/CGI (per-directory INI override)
+// Attacker uploads .user.ini containing:
+//   auto_prepend_file=evil.jpg
+// Then any request in that directory prepends/executes evil.jpg as PHP
+
+// VULN indicator: .htaccess / .user.ini not in the blocked extensions list
+$blocked = ['php', 'exe', 'sh'];  // Missing .htaccess, .user.ini → bypass
 ```
 
 ## ASP.NET / IIS Source Detection Rules
@@ -357,6 +367,92 @@ A blacklist missing any of these allows IIS handler execution.
 - Do NOT emit `arbitrary_file_upload` for profile image/avatar upload endpoints that restrict to image types (jpg/png/gif) AND store files outside the webroot or in object storage — the risk is minimal and better categorized as a defense-in-depth gap.
 - Do NOT emit when file type validation (extension whitelist + content-type check + magic byte validation) is present, even if not perfect — flag as LIKELY only if a specific bypass is demonstrable.
 - Do NOT emit for file write operations that are not uploads (e.g., logging, temp files, cache writes) — these should be tagged as `path_traversal` if applicable.
+
+## Polyglot / Magic-Byte-Only Validation
+
+**VULN condition**: extension allowlist passes, but validation stops at Content-Type header or magic-byte sniff (`magic.from_buffer`, `filetype.guess`, `getimagesize`) with no decode-and-re-encode step. Attacker embeds executable payload in metadata/comments/polyglot structure while preserving valid leading bytes (e.g., JPEG SOI + PHP in EXIF comment, GIF header + script in trailer).
+
+```python
+# VULN: magic-byte check only — embedded script survives
+header = file.read(2048)
+if header.startswith(b'\xff\xd8\xff'):  # looks like JPEG
+    file.save(path)  # PHP in EXIF/comment still present
+
+# SAFE: re-encode strips non-image payload (defense in depth — still require allowlist)
+from PIL import Image
+img = Image.open(file)
+img.save(path, format='JPEG')  # drops foreign bytes/comments
+```
+
+**Grep seeds**: `magic\.from_buffer`, `getimagesize`, `filetype\.guess`, `mimetype`/`content_type` check with no `Image\.open.*save` / `sharp\(` / `convert` re-encode downstream.
+
+## Null-Byte and Extension Parsing Weaknesses
+
+**VULN patterns** — naive extension extraction from the original filename:
+
+```python
+# VULN: last segment only — shell.php.jpg passes allowlist {'jpg'}
+ext = filename.split('.')[-1].lower()
+
+# VULN: first segment only — shell.jpg.php passes allowlist {'jpg'}
+ext = filename.split('.')[1].lower()
+
+# VULN: null-byte truncation (legacy stacks) — shell.php%00.jpg stored/executed as .php
+name = filename.replace('\x00', '')  # too late if path already built
+```
+
+```php
+// VULN: pathinfo on unsanitized name — file.jpg.php vs file.php.jpg order matters
+$ext = pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION);
+// Bypass: shell.php.jpg (Apache may execute leftmost .php); shell.jpg.php (allowlist sees jpg)
+```
+
+**SAFE**: `rsplit('.', 1)` on basename only; reject filenames containing `%00`, `\x00`, or multiple `.` when policy is single-extension; server-generated stored name; `secure_filename()` / `basename()` before any extension logic.
+
+## Post-Upload Media Processing Chain (SSRF / RCE)
+
+After save, many apps pass the stored path or a signed URL into image/PDF/video pipelines. The **uploaded file path** becomes input to subprocesses or libraries that fetch, transcode, or render — a second-stage sink beyond web execution.
+
+**VULN condition**: user-controlled upload reaches `convert`, `ffmpeg`, ImageMagick, `sharp`, `libvips`, headless screenshot/PDF renderers, or thumbnail workers without sandboxing the path and without blocking remote schemes in nested fetches.
+
+| Stack | Grep seeds (trace from `file.save` / `transferTo` / `move_uploaded_file`) |
+|-------|---------------------------------------------------------------------------|
+| Shell | `convert\s`, `ffmpeg\s`, `magick\s`, `gm convert`, `exiftool\s`, `wkhtmltopdf`, `puppeteer`, `playwright` |
+| Node.js | `sharp\(`, `ffmpeg-static`, `fluent-ffmpeg`, `gm\(`, `jimp\.`, `pdf-lib`, `puppeteer\.launch` |
+| Python | `subprocess.*convert`, `Wand\(`, `ffmpeg\.`, `pdf2image`, `imgkit`, `weasyprint` |
+| Java | `ProcessBuilder.*ffmpeg`, `ImageIO\.read`, `Thumbnailator`, `PDFBox`, `GraphicsMagick` |
+
+```javascript
+// VULN: transcode attacker-controlled path — ImageMagick/FFmpeg CVE-class gadget chains
+sharp(uploadedFile.path).resize(200).toFile(thumbPath);
+exec(`ffmpeg -i ${uploadedFile.path} -f mp4 ${outPath}`);
+
+// VULN: URL passed to renderer after upload — nested SSRF (see ssrf.md)
+await page.goto(signedUrlFor(uploadedFile.path));
+```
+
+Tag secondary impact as `ssrf` or RCE when the processing chain invokes network/file handlers on attacker content; cross-ref `ssrf.md` for URL-fetch variants of the same pipeline.
+
+## SVG Upload — Server-Side Processing (XSS / SSRF / XXE)
+
+SVG is XML. When uploads are stored and **rendered, thumbnailed, sanitized server-side, or inlined** in responses, the file content — not just the extension — matters.
+
+**VULN surfaces**:
+- Inline `<script>`, event handlers (`onload`), `foreignObject` → stored/reflected XSS when SVG served as `image/svg+xml` without CSP; see `xss.md`
+- `xlink:href="http://169.254.169.254/..."` or external `<image href="...">` → SSRF when server-side renderer fetches resources; see `ssrf.md`
+- `<!DOCTYPE>` / external entities / XInclude in SVG → XXE when parsed by XML-aware pipelines; see `xxe.md`
+
+```xml
+<!-- VULN payload shapes in uploaded SVG -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <script>alert(document.domain)</script>
+  <image xlink:href="http://127.0.0.1:6379/"/>
+</svg>
+```
+
+**Grep seeds**: `image/svg`, `\.svg`, `dangerouslyAllowSVG`, SVG sanitizer bypass, `lxml.*svg`, `Batik`, `rsvg-convert`, `ImageMagick.*svg`.
+
+**SAFE**: reject SVG uploads; or rasterize server-side to PNG/JPEG with no script/XML retention; serve downloads as `Content-Disposition: attachment`; never inline user SVG in HTML.
 
 ## Dynamic Test / PoC
 

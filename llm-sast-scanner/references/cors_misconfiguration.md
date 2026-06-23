@@ -36,9 +36,39 @@ Cross-Origin Resource Sharing relaxes the Same-Origin Policy. When `Access-Contr
 ## Evasion Patterns
 
 - Subdomain bypass: whitelist `https://example.com` but accept `https://example.com.attacker.com` via prefix checks
+- **Suffix/prefix tricks**: `expected-host.attacker.com`, `attacker-expected-host.com` pass `endsWith('expected-host.com')` or `startsWith('https://expected-host')` but are attacker-controlled origins
 - Null origin from sandboxed iframe or `data:` documents
 - Case/unicode normalization differences between validator and browser
 - Pre-flight vs simple-request divergence on different routes
+
+## Origin Parser-Differential / Naive Parsing Evasion
+
+When code **parses or pattern-matches** the `Origin` header instead of **exact allowlist membership**, attackers evade weak validators. `regex`, `startsWith`, `endsWith`, and `includes`/`contains` on the raw Origin string are unsafe — use exact string equality against a fixed set (or parse URL and compare scheme + host + port exactly).
+
+**Unsafe validator patterns** (grep):
+```bash
+rg -n "origin\.(startsWith|endsWith|includes|match|search)|Origin.*\.match\(" --glob '*.{js,ts,py,go,java}'
+rg -n "allowedOrigin.*indexOf|origin\.indexOf|\.contains\(origin" --glob '*.{js,ts,java}'
+```
+
+| Evasion | Example Origin | Weak check bypassed |
+|---------|----------------|---------------------|
+| Suffix domain | `https://expected-host.attacker.com` | `endsWith('expected-host.com')` |
+| Prefix domain | `https://attacker-expected-host.com` | `startsWith('https://expected-host')` |
+| Embedded userinfo/port | `https://foo@evil:80@expected-host` | naive split/host extract |
+| Backslash trick | `https://expected-host\@evil.com` or `https://evil.com\@expected-host` | non-RFC parsers normalizing `\` |
+| Unicode / IDN look-alike | `https://evil-host` with homoglyph `ß` vs `ss` | case-fold without punycode canonicalization |
+| CRLF in Origin | `https://evil.com%0d%0aX-Injected: true` | header injection if Origin echoed unsafely |
+
+**VULN**:
+```python
+if origin.endswith('.expected-host.com'):          # accepts evil.expected-host.com
+    resp.headers['Access-Control-Allow-Origin'] = origin
+if origin.startswith('https://expected-host'):     # accepts https://expected-host.evil
+    allow = True
+```
+
+**SAFE**: `if origin in ALLOWED_ORIGINS:` (exact set); or `urlparse(origin)` then compare `(scheme, hostname, port)` tuple against whitelist entries — no substring/regex matching on the full Origin string.
 
 ## Sanitizers / Barriers
 
@@ -78,10 +108,13 @@ Commonly affected languages: JavaScript, Java, Python, Go. No standard CORS conf
 curl -s -H 'Origin: https://evil.com' 'https://TARGET/api/endpoint' -D- | grep -i access-control
 ```
 
-**Bypass probes** (when whitelist uses prefix/substring matching):
+**Bypass probes** (when whitelist uses prefix/substring/regex matching — see Origin Parser-Differential section):
 
 ```bash
 curl -s -H 'Origin: https://TARGET.evil.com' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: https://evil-TARGET.com' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: https://TARGET.attacker.com' 'https://TARGET/api/endpoint' -D-
+curl -s -H 'Origin: https://foo@evil@TARGET' 'https://TARGET/api/endpoint' -D-
 curl -s -H 'Origin: null' 'https://TARGET/api/endpoint' -D-
 curl -s -H 'Origin: http://TARGET' 'https://TARGET/api/endpoint' -D-
 curl -s -H 'Origin: https://TARGET%60.evil.com' 'https://TARGET/api/endpoint' -D-

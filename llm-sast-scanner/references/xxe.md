@@ -54,6 +54,34 @@ The core pattern: *user-controlled XML reaches a parser that has not disabled DT
 - Parameters: "xml", "upload", "import", "transform", "xslt", "xsl", "xinclude"
 - Processing-instruction headers
 
+## High-Risk XML Surfaces (Beyond Generic Parsers)
+
+These paths parse XML **before** or **without** the same hardening as primary REST handlers — grep for parser sinks adjacent to these feature names:
+
+| Surface | Why it matters | Grep seeds |
+|---------|----------------|------------|
+| **SAML ACS / SSO** | Assertion XML parsed upstream of signature verification; entities/XInclude may fire on unsigned bytes | `SAMLResponse`, `AssertionConsumer`, `POST.*SAML`, `opensaml`, `DocumentBuilder.*parse`, `Unmarshaller` |
+| **RSS/Atom importers** | Feed bodies are XML; Python `feedparser` and similar may expand entities depending on backend | `feedparser\.parse`, `UniversalFeedParser`, `RSS`, `Atom`, `SyndicationFeed` |
+| **Autodiscover / SOAP** | Mail/calendar autodiscover and legacy SOAP endpoints accept XML POST bodies | `autodiscover`, `Autodiscover`, `soap:Envelope`, `SoapMessage`, `WSDL` |
+| **OOXML documents** | DOCX/XLSX/PPTX/ODF are ZIP archives of XML (`word/document.xml`, `[Content_Types].xml`, rels) | `OPCPackage`, `XWPFDocument`, `openpyxl`, `docx\.Document`, `ooxml`, `SpreadsheetML` |
+| **SVG / OOXML in uploads** | Thumbnail/metadata pipelines parse embedded XML without upload-specific hardening | `\.svg`, `Batik`, `rsvg`, `ImageIO`, `POI`, `docx` + `parse` |
+| **XMP metadata (JPEG/PDF/TIFF)** | EXIF/XMP blocks are XML; `exiftool`, ImageMagick, metadata libraries may parse as XML | `exiftool`, `XMPMeta`, `Metadata\.extract`, `ImageMagick`, `pdfinfo`, `xmp` |
+
+**VULN condition**: any row above uses `DocumentBuilder`, `SAXParser`, `XMLReader`, `lxml.etree`, `SimpleXML`, or `feedparser` on attacker-influenced bytes with no `disallow-doctype-decl` / `defusedxml` / `resolve_entities=False` in the same flow.
+
+**SAFE pattern (mirror across every surface)**:
+
+```python
+import defusedxml.ElementTree as ET
+tree = ET.parse(source)  # not stdlib ET / lxml default on untrusted input
+```
+
+```java
+dbf.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true);
+dbf.setFeature("http://xml.org/sax/features/external-general-entities", false);
+dbf.setFeature("http://xml.org/sax/features/external-parameter-entities", false);
+```
+
 ## How to Detect
 
 ### Direct
@@ -149,6 +177,19 @@ Targets: transform endpoints, reporting engines (XSLT/Jasper/FOP), xml-styleshee
 - PHP: `php://filter`, `expect://` (when module enabled)
 - Gopher: craft raw requests to Redis/FCGI when client allows non-HTTP schemes
 
+### PHP `expect://` — Direct RCE
+
+When the PHP `expect` wrapper is loaded and external entities are enabled, `SYSTEM`/`PUBLIC` entities can invoke shell commands via the wrapper — not merely read files:
+
+```xml
+<!DOCTYPE x [<!ENTITY xxe SYSTEM "expect://id">]>
+<r>&xxe;</r>
+```
+
+**Grep seeds**: `expect://`, `LIBXML_NOENT`, `libxml_disable_entity_loader\(false\)`, `simplexml_load_string` / `DOMDocument::loadXML` on user XML without entity loader disabled (PHP < 8.0).
+
+**SAFE**: PHP 8.0+ external entities off by default; never enable `LIBXML_NOENT` on untrusted input; `libxml_disable_entity_loader(true)` before parse (legacy); prefer rejecting DOCTYPE entirely.
+
 ## Evasion Patterns
 
 **Encoding Variants**
@@ -162,6 +203,25 @@ Targets: transform endpoints, reporting engines (XSLT/Jasper/FOP), xml-styleshee
 **Network Controls**
 - If network blocked but filesystem readable, pivot to local file disclosure
 - If files blocked but network open, pivot to SSRF/OAST
+
+### Local-DTD Repurposing (External DTD Blocked)
+
+When outbound fetch of attacker-hosted DTDs is blocked but the parser still loads **local** DTD files from predictable paths, parameter entities can repurpose public DTD subsets to exfiltrate file content via error messages or limited reflection — without a network callback.
+
+**VULN condition**: parser accepts DOCTYPE/parameter entities; external HTTP DTD blocked; local filesystem DTD paths reachable (e.g., shipped schema/DTD under webroot or `/usr/share/xml/`).
+
+```xml
+<!DOCTYPE message [
+  <!ENTITY % local_dtd SYSTEM "file:///usr/share/xml/fontconfig/fonts.dtd">
+  <!ENTITY % expr "(<!ENTITY &#x25; file SYSTEM 'file:///etc/passwd'>)">
+  %local_dtd;
+]>
+<message>&file;</message>
+```
+
+Payload shape varies by target DTD — goal is to redefine an existing parameter entity so `file://` content appears in parser errors. Probe OAST first; pivot to local-DTD when external DTD fetch fails consistently.
+
+**SAFE**: same as core XXE — `disallow-doctype-decl`, disable external **and** parameter entities, `defusedxml`, no DTD loading on untrusted input.
 
 ## Special Contexts
 
@@ -178,8 +238,8 @@ Targets: transform endpoints, reporting engines (XSLT/Jasper/FOP), xml-styleshee
 
 ### SAML
 
-- Assertions are XML-signed, but upstream XML parsers prior to signature verification may still process entities/XInclude
-- Test ACS endpoints with minimal probes
+- Assertions are XML-signed, but **ACS endpoints often parse the SAMLResponse XML before signature verification** — entities/XInclude may resolve on unsigned attacker bytes
+- Test ACS endpoints with minimal probes; grep `AssertionConsumerService`, `SAMLResponse`, `POST` binding + `DocumentBuilder`/`SAXParser`/`XMLReader` without hardening
 
 ### SVG and Renderers
 

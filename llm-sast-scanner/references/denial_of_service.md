@@ -7,6 +7,10 @@ description: Denial of Service detection — vulnerable code patterns for ReDoS,
 
 DoS vulnerabilities occur when user-controlled input can trigger unbounded computation, memory allocation, or I/O operations. This includes algorithmic complexity attacks (ReDoS), decompression bombs, XML entity expansion, unbounded uploads, catastrophic regex backtracking, and missing pagination/rate limits.
 
+## GraphQL Structural DoS
+
+GraphQL endpoints accept declarative query documents that can amplify server work in ways REST routes typically cannot — deep nesting on cyclic types, alias/field/directive duplication, HTTP array batching, unbounded pagination arguments, circular fragments, and missing execution timeouts. **GraphQL-specific** depth/complexity/cost limits, batch caps, pagination bounds, and resolver amplification patterns are covered in **`graphql_dos.md`**. This file retains generic DoS (ReDoS, zip/XML bombs, slow-client, goroutine leaks, unbounded uploads); do not duplicate GraphQL query-cost detail here.
+
 ## CWE Classification
 
 - **CWE-400**: Uncontrolled Resource Consumption
@@ -179,6 +183,16 @@ public ResponseEntity<?> login(@RequestBody LoginRequest req) {
     return authService.authenticate(req.getUsername(), req.getPassword());
 }
 ```
+
+### Cache-poisoning DoS
+
+Attacker poisons a **shared HTTP/CDN cache** with an empty, broken, or error response that is stored under a key normal users request — denying service to everyone who hits that URL until the entry expires or is purged. Typical poison bodies: `{}`, blank HTML, or cacheable **4xx/5xx** with `Cache-Control: public` / `s-maxage`.
+
+**Common vectors**: framework data routes and middleware short-circuits (Next.js `x-middleware-prefetch` / `__nextDataReq`, Nuxt `/_payload.json`) where an attacker-controlled header or query produces a minimal cacheable response. Full framework patterns, version checks, and grep seeds live in `web_cache_deception.md`.
+
+**SAST signal**: `Cache-Control: public` or `s-maxage` on handlers that return `{}`, empty bodies, or error statuses without `private`/`no-store`.
+
+**Triage**: demonstrated or structurally obvious cacheable empty/error response on a high-traffic route → Medium/High availability impact. Prefer tag `web_cache_deception` when the caching/keying misconfiguration is primary; use `denial_of_service` when reporting pure availability denial without cross-user data leakage or XSS.
 
 ### Hash Collision DoS (HashDoS)
 

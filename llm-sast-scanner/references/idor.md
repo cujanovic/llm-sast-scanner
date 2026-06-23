@@ -140,6 +140,180 @@ query CrossAccountAccess {
 }
 ```
 
+#### Nested Input-Object ID Traversal
+
+The object identifier sits inside a nested input object; the resolver reads `args.input.<nested>.id` (or `args.parent.id`) and passes it to a DB call without verifying the nested entity belongs to `ctx.user`.
+
+```graphql
+# SDL
+input UpdateOrderInput {
+  order: OrderRefInput!
+}
+input OrderRefInput {
+  id: ID!
+}
+```
+
+```javascript
+// VULN: nested id reaches ORM with no ownership bind
+async updateOrder(_, { input }, ctx) {
+  const row = await prisma.order.update({
+    where: { id: input.order.id },
+    data: input.payload,
+  });
+  return row;
+}
+```
+
+```bash
+rg -n 'args\.(\w+\.)+id|input\.\w+\.id|args\.input\.\w+\.id' --glob '*.{js,ts}'
+# Flag resolver/DB path when nested id is not resolved then checked against ctx.user / principal
+```
+
+**SAFE**: resolve the nested entity first, then assert ownership (or use a scoped query: `where: { id, userId: ctx.user.id }`) before any read or write.
+
+#### `*ById` Root Field Naming Heuristic
+
+Root queries and mutations named `*ById` (`getById`, `updateById`, `deleteById`, `cancelById`) load or mutate solely from `args.id`. State-changing fields matching `/(update|delete|cancel|modify|patch|remove).*ById/i` are BOLA with higher severity.
+
+```graphql
+type Mutation {
+  updateById(id: ID!, data: UpdateInput!): Order
+  deleteById(id: ID!): Boolean
+}
+```
+
+```javascript
+// VULN: write keyed only on client-supplied id
+async deleteById(_, { id }) {
+  return prisma.order.delete({ where: { id } });
+}
+```
+
+```bash
+rg -n '(\w+ById)\([^)]*\bid:\s*(ID|String)!' --glob '*.{graphql,gql,ts,js}'
+rg -n '(update|delete|cancel|modify|patch|remove).*ById' --glob '*.{graphql,gql,ts,js}' -i
+```
+
+**SAFE**: scoped write `WHERE id = ? AND user_id = ?`; reject cross-owner IDs before any side effect.
+
+#### GraphQL List/Batch ID Arguments
+
+Batch arguments (`ids: [ID!]!`) feed `findMany({ where: { id: { in: args.ids } } })` or per-id loops without per-element ownership or `userId IN (...)` scoping.
+
+```graphql
+type Mutation {
+  archiveOrders(ids: [ID!]!): [Order]
+}
+```
+
+```javascript
+// VULN: batch fetch/update with no principal filter
+async archiveOrders(_, { ids }) {
+  return prisma.order.updateMany({
+    where: { id: { in: ids } },
+    data: { archived: true },
+  });
+}
+```
+
+```bash
+rg -n 'ids:\s*\[ID|ids:\s*\[String' --glob '*.{graphql,gql}'
+rg -n 'findMany\(\{[^}]*where:\s*\{\s*id:\s*\{\s*in:' --glob '*.{js,ts}'
+rg -n 'args\.ids|input\.ids' --glob '*.{js,ts}' | rg -v 'userId|ownerId|tenantId'
+```
+
+**SAFE**: filter the batch to caller-owned IDs only; fail the whole batch if any foreign ID is present.
+
+#### Service Credential with Client-Supplied Principal ID
+
+Resolver uses a server-side privileged credential (service token, admin API key header, internal service client) to call a backend keyed by a **client-supplied** `userId` / `ownerId` / `accountId` with no `args.userId === ctx.user.id` check — any authenticated caller can read or modify another user's state.
+
+```javascript
+// VULN: privileged backend client + client-controlled principal id
+async updatePreferences(_, { userId, settings }, ctx) {
+  return serviceClient.patch(`/users/${userId}/preferences`, settings, {
+    headers: { 'X-API-Key': process.env.SERVICE_KEY },
+  });
+}
+```
+
+```bash
+rg -n 'X-API-Key|serviceClient|adminClient|SERVICE_KEY|internalClient' --glob '*.{js,ts}'
+# Same resolver file must not pair privileged client with args\.(userId|ownerId|accountId) without ctx\.user bind
+rg -n 'args\.(userId|ownerId|accountId)' --glob '*.{js,ts}' | rg -i 'service|admin|internal|apiKey'
+```
+
+**SAFE**: bind the backend call to the authenticated principal (`ctx.user.id`); never trust a client-supplied principal id for privileged operations.
+
+#### Two-Hop ID-to-PII Operation Chain
+
+Operation A returns an internal or mapped id (lookup/mapping field); operation B accepts that id and returns PII (email, phone) with no ownership check — chaining yields cross-user PII disclosure.
+
+```graphql
+type Query {
+  resolveAccountRef(externalRef: String!): AccountMapping
+  accountContact(accountId: ID!): ContactInfo
+}
+type AccountMapping { accountId: ID! }
+type ContactInfo { email: String phone: String }
+```
+
+```javascript
+// VULN: op B returns PII for any accountId with no principal bind
+async accountContact(_, { accountId }) {
+  return prisma.contact.findUnique({ where: { accountId } });
+}
+```
+
+```bash
+rg -n 'resolve.*Ref|map.*Id|lookup.*Id|internalId' --glob '*.{graphql,gql,js,ts}' -i
+# Trace: id returned by mapping op → consumed by PII/email/phone resolver without ownership guard
+rg -n 'email|phone|ssn|contact' --glob '*resolver*.{js,ts}' | rg 'args\.(id|accountId|userId)'
+```
+
+**SAFE**: authorize the resolve-to-PII step; do not expose internal-id ↔ external-id mapping operations without authentication and ownership binding.
+
+#### GraphQL Response Oracle (`errors[]` vs `data`)
+
+Foreign or unauthorized objects return a different response shape (thrown error vs `data.field: null`) or an error message naming the resource type (`"Order not found"`, `"Invalid appointmentId"`) — a blind IDOR/enumeration oracle.
+
+```javascript
+// VULN: distinct shapes leak existence vs authorization
+async order(_, { id }, ctx) {
+  const row = await prisma.order.findUnique({ where: { id } });
+  if (!row) throw new UserInputError('Order not found');
+  if (row.userId !== ctx.user.id) return null;  // foreign → null; missing → error
+  return row;
+}
+```
+
+```bash
+rg -n 'UserInputError|ApolloError|GraphQLError' --glob '*.{js,ts}'
+# Error messages naming resource types: not found|invalid.*Id|does not exist
+rg -n 'not found|Invalid \w+Id|does not exist' --glob '*.{js,ts}' -i
+```
+
+**SAFE**: uniform forbidden responses for foreign and unauthorized objects; generic error messages that do not distinguish missing from forbidden.
+
+#### Tenant/Org Argument vs Principal Claim
+
+`args.tenantId`, `args.orgId`, or `args.organizationId` scopes data without verifying equality to the authenticated user's org claim (JWT/session).
+
+```javascript
+// VULN: client-supplied tenant scopes query
+async listProjects(_, { tenantId }, ctx) {
+  return prisma.project.findMany({ where: { tenantId } });
+}
+```
+
+```bash
+rg -n 'args\.(tenantId|orgId|organizationId)|input\.(tenantId|orgId)' --glob '*.{js,ts}'
+# Absence of compare to ctx\.user\.(tenantId|orgId|organizationId) or verified JWT claim
+```
+
+**SAFE**: derive tenant from the verified principal, not from client args; if a tenant arg is accepted, assert it equals the principal's org claim before any query.
+
 ### Microservices & Gateways
 
 - Token confusion: a token scoped for Service A is accepted by Service B due to shared JWT verification logic that omits audience or claims checks
@@ -200,6 +374,140 @@ Request-controlled filter/query DSLs that the backend forwards into an ORM let a
 - Use differential responses (status code, body size, ETag, timing) to infer object existence
 - Error shapes typically differ between owned and foreign objects
 - HEAD/OPTIONS and conditional requests (`If-None-Match`/`If-Modified-Since`) can confirm existence without exposing full content
+
+### Nested JSON ID Wrap
+
+Flat auth check on a top-level identifier; nested duplicate key bypasses the guard while the inner value reaches the sink.
+
+```python
+# VULN: flat compare passes; nested object used in query
+userid = request.json.get('userid')
+if str(userid) != str(session['user_id']):
+    abort(403)
+target = request.json['userid']   # {"userid": {"userid": 123}} — outer != session, inner is victim
+Order.query.filter_by(user_id=target['userid']).delete()
+```
+
+```bash
+rg -n '\.get\(["'"'"']userid|\.get\(["'"'"']user_id|request\.json\[["'"'"']id' --glob '*.{py,js,java,php}'
+# Flag when only top-level scalar compare precedes nested/body access
+```
+
+**SAFE**: normalize to scalar server-side (`userid = int(flatten_id(body['userid']))`) before auth compare and ORM use.
+
+### Path-Embedded ID with Traversal
+
+Auth compares a pre-normalized path segment; the router collapses `..` before the handler runs.
+
+```python
+# VULN: auth on raw segment before normalization
+segments = request.path.split('/')
+path_user = segments[3]   # /users/delete/123/../456 → compares "123"
+if path_user != str(current_user.id):
+    abort(403)
+# Framework resolves path to victim 456 before delete executes
+```
+
+```bash
+rg -n 'split\(["'"'"']/|path\.split|Request\.Path' --glob '*.{py,js,java,php,cs}' | rg -i 'user|owner|id'
+```
+
+**SAFE**: bind authorization to the **normalized** resource ID the handler will use (`resolve_path()` then compare).
+
+### Alternate Parameter Names for Same Object
+
+Only one parameter name is authorized; a sibling alias references the same object without a guard.
+
+```javascript
+// VULN: album_id checked; account_id (same underlying record) used for fetch
+if (req.body.album_id !== req.user.albumId) return res.sendStatus(403);
+const acct = await Account.findById(req.body.account_id);
+```
+
+```bash
+rg -n '_id|Id' --glob '*.{js,py,java,php}' | rg -i 'album|account|resource|target'
+# Pair param names on same handler — only one compared to session principal
+```
+
+**SAFE**: map all accepted aliases to one canonical ID, then run a single ownership check on that value.
+
+#### GraphQL Parameter Alias Families
+
+The same resource is referenced by multiple GraphQL argument names; when only one alias is ownership-checked, others bypass authorization.
+
+```graphql
+type Mutation {
+  updateOrder(orderId: ID!, data: UpdateInput!): Order
+  cancelOrder(order_id: ID!): Boolean
+  refundOrder(orderNumber: String!): Boolean
+}
+```
+
+```javascript
+// VULN: orderId checked in sibling resolver; orderNumber (same record) unchecked here
+async refundOrder(_, { orderNumber }, ctx) {
+  return prisma.order.update({ where: { orderNumber }, data: { refunded: true } });
+}
+```
+
+**Alias-family grep seeds** (pair names on the same resolver/schema; confirm all aliases reach one ownership check):
+
+```bash
+rg -n 'orderId|order_id|orderNumber' --glob '*.{graphql,gql,js,ts}'
+rg -n 'userId|accountId|ownerId|\bid:\s*ID' --glob '*.{graphql,gql,js,ts}'
+rg -n 'vehicleId|vin|assetId|resourceId' --glob '*.{graphql,gql,js,ts}'
+rg -n 'appointmentId|bookingId|reservationId' --glob '*.{graphql,gql,js,ts}'
+rg -n 'invoiceId|invoiceNumber|paymentId' --glob '*.{graphql,gql,js,ts}'
+```
+
+**SAFE**: canonicalize all accepted aliases to one internal id before the single ownership check; reject if any alias resolves to a record the caller does not own.
+
+### Blind IDOR
+
+HTTP 403/401 returned but the state-changing action still executed — mutation before or independent of the auth check, or async side effect after a failed guard.
+
+```java
+// VULN: delete before auth check
+orderRepo.deleteById(orderId);
+if (!authz.canDelete(orderId, principal)) {
+    throw new AccessDeniedException();   // 403 returned; row already deleted
+}
+```
+
+```javascript
+// VULN: fire-and-forget side effect; response still 403
+if (doc.ownerId !== req.user.id) {
+    queue.publish('document.deleted', { id: doc.id });  // async mutation regardless
+    return res.sendStatus(403);
+}
+```
+
+```bash
+rg -n 'delete|update|transfer|execute|destroy' --glob '*.{java,js,py,php,cs}' 
+# Trace: side-effect call must follow — not precede — ownership/tenant guard on same path
+```
+
+### Sentinel / Backdoor UUIDs
+
+Hardcoded nil or pattern UUIDs mapped to elevated privileges in application code or seed/migration data.
+
+```bash
+rg -n '00000000-0000-0000-0000-000000000000|11111111-1111-1111-1111-111111111111' --glob '*.{py,js,java,cs,go,php,sql}'
+```
+
+```python
+# VULN
+ADMIN_OVERRIDE = '00000000-0000-0000-0000-000000000000'
+if str(user.uuid) == ADMIN_OVERRIDE:
+    session['role'] = 'admin'
+```
+
+```sql
+-- VULN: seed grants superuser to nil UUID
+INSERT INTO users (id, role) VALUES ('00000000-0000-0000-0000-000000000000', 'admin');
+```
+
+**SAFE**: no magic identifiers; privilege derived only from authenticated principal lookup.
 
 ## Chaining Attacks
 

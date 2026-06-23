@@ -256,6 +256,48 @@ Regenerate session ID on password change, role elevation, account recovery compl
 - Password-change handler updates credential store but not session
 - OAuth account-linking binds new identity without session rotation
 
+### Session survival after credential or MFA change
+
+Fixation mitigation must invalidate **all** active sessions on credential rotation — not only rotate the current browser session ID.
+
+- **Password reset / change without global invalidation**: password-reset completion or change-password handler updates the hash but does not call `session.invalidate()` on the current session **and** revoke other server-side sessions/tokens for that user — attacker-held pre-change session IDs remain authenticated
+- **Parallel sessions survive 2FA enrollment**: enabling MFA/TOTP updates a flag or secret but leaves existing sessions (other browsers, stolen cookies) valid without re-authentication or forced logout
+- **Remember-me / persistent token not rotated**: long-lived remember-me, device, or refresh cookie survives password reset, privilege elevation, or MFA enrollment — no token version bump, DB revocation list, or cookie re-issue on security state change
+
+```bash
+# Password change without session teardown
+rg -n "change[_-]?password|reset[_-]?password|setPassword|updatePassword" . | rg -v "invalidate|revoke.*session|deleteAllSessions|session_version"
+# MFA enrollment without session revocation
+rg -n "enableMfa|enroll.*totp|two[_-]?factor.*enable|mfa.*enabled" . | rg -v "invalidate|revoke|logout.*all|session.*destroy"
+# Remember-me rotation
+rg -n "remember[_-]?me|persistent.*token|device[_-]?token|stay[_-]?logged" . | rg -v "rotate|invalidate|revoke|version"
+```
+
+```java
+// VULN: password changed; other sessions still valid
+user.setPassword(newHash);
+userRepository.save(user);
+
+// SECURE: bump credential epoch and destroy all sessions
+user.setPassword(newHash);
+user.incrementSessionVersion();
+sessionRegistry.expireAllSessionsForUser(user.getId());
+request.getSession(false).invalidate();
+rememberMeServices.removeAllTokens(user.getUsername());
+```
+
+```javascript
+// VULN: MFA enabled; stolen session cookie still works
+user.mfaEnabled = true;
+await user.save();
+
+// SECURE
+user.mfaEnabled = true;
+await sessionStore.deleteByUserId(user.id);
+await rememberMeTokens.revokeAll(user.id);
+req.session.regenerate(() => { /* require MFA on next sensitive action */ });
+```
+
 ```java
 // VULN: privilege elevation without rotation
 session.setAttribute("role", "admin");

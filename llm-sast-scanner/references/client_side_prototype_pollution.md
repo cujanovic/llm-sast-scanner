@@ -1,33 +1,23 @@
 ---
 name: client-side-prototype-pollution
-description: Client-Side Prototype Pollution (CSPP) — pollution sources (URL query, hash, JSON, postMessage), browser-resident pollution sinks (URL/hash parsers, jQuery `$.extend`, hand-rolled merges), and the script-gadget catalog (BlackFan, sanitizer bypasses, browser-API gadgets) that escalates pollution to DOM XSS / open redirect / cookie injection in the user's browser
+description: Client-Side Prototype Pollution (CSPP) — pollution sources (URL query, hash, JSON, postMessage), browser-resident pollution sinks (URL/hash parsers, jQuery `$.extend`, hand-rolled merges), and the script-gadget catalog (sanitizer bypasses, browser-API gadgets) that escalates pollution to DOM XSS / open redirect / cookie injection in the user's browser
 ---
 
 # Client-Side Prototype Pollution (CSPP)
 
-**CWE coverage**: CWE-1321 (primary, *Improperly Controlled Modification of Object Prototype Attributes*) plus the downstream CWEs the gadget actually lands. Prototype-pollution detection maps to **CWE-79** (DOM XSS), **CWE-94** (code injection), **CWE-400** (resource exhaustion), **CWE-471** (modification of assumed-immutable data); HackTricks-class browser-API gadgets land **CWE-601** (open redirect) and cookie-injection variants. Choose the downstream CWE that matches the gadget reached.
+**CWE coverage**: CWE-1321 (primary, *Improperly Controlled Modification of Object Prototype Attributes*) plus the downstream CWEs the gadget actually lands. Prototype-pollution detection maps to **CWE-79** (DOM XSS), **CWE-94** (code injection), **CWE-400** (resource exhaustion), **CWE-471** (modification of assumed-immutable data); browser-API gadgets land **CWE-601** (open redirect) and cookie-injection variants. Choose the downstream CWE that matches the gadget reached.
 
 Client-Side Prototype Pollution lets an attacker inject a property into `Object.prototype` (or `Array.prototype`, `String.prototype`, etc.) **inside the victim's browser**. Like SSPP, the pollution itself is rarely the impact — it is an *amplifier* that becomes DOM XSS, sanitizer bypass, open redirect, or arbitrary script load only when combined with a downstream **gadget**: existing client-side code (in the page bundle, a third-party tag, or even a built-in browser API) that reads an undefined property and uses it as a security-sensitive parameter (`innerHTML`, `src`, `href`, `srcdoc`, `onerror`, `template`, `whiteList`, `ALLOWED_ATTR`, `sourceURL`, etc.).
 
 A vulnerable page therefore needs two things to be exploitable:
 
 1. **A pollution source/sink in the browser** — a place where attacker-controlled keys flow into a write of the form `target[__proto__][key] = value`, `target.constructor.prototype[key] = value`, or `target.prototype[key] = value`. In the browser this is most commonly:
-   - A library that parses `location.search` / `location.hash` into a nested object using `__proto__` / `constructor[prototype]` bracket notation (the BlackFan PP catalog: `jquery-deparam`, `jquery-bbq`, `MooTools More`, `purl`, `arg.js`, `Aurelia path`, `analytics-utils`, `CanJS deparam`, etc.).
+   - A library that parses `location.search` / `location.hash` into a nested object using `__proto__` / `constructor[prototype]` bracket notation (the PP-vulnerable URL/hash parser catalog: `jquery-deparam`, `jquery-bbq`, `MooTools More`, `purl`, `arg.js`, `Aurelia path`, `analytics-utils`, `CanJS deparam`, etc.).
    - `$.extend(true, target, attackerJSON)` (jQuery deep merge), `_.merge` / `_.set` shipped in the page bundle, hand-rolled `for…in` recursive copy, hand-rolled hash parsers (`split('&').reduce((a,kv) => …)`).
    - `JSON.parse` of attacker JSON followed by a deep-merge into a real object (postMessage / WebSocket payloads, `localStorage` consumers).
-2. **A script gadget** — code in the same realm that reads an undefined property from an inherited prototype after pollution. This is either an **app-bundle gadget**, a **library gadget** (the BlackFan script-gadget catalog: jQuery `$.get`/`$(html)`/`$(x).attr`/`$(x).on`, Bootstrap-style merges, `recaptcha`, `Twitter UWT`, `Tealium`, `Akamai Boomerang`, `lodash` template, `sanitize-html`/`DOMPurify`/`js-xss`/`Closure` sanitizer-config gadgets, `Marionette.js`, `Adobe DTM`, `Knockout.js`, `Zepto.js`, `Sprint.js`, `Vue.js`, `Popper.js`, `Pendo Agent`, `script.aculo.us`, `hCaptcha`, `Google Tag Manager`, `Google Analytics`, etc.), or — since 2023 — a **built-in browser-API gadget** (`URL` reading `href`, `Notification` reading `title`, `Worker` reading `name`, `Image` reading `src`, `URLSearchParams` reading `toString`).
+2. **A script gadget** — code in the same realm that reads an undefined property from an inherited prototype after pollution. This is either an **app-bundle gadget**, a **library gadget** (the script-gadget catalog: jQuery `$.get`/`$(html)`/`$(x).attr`/`$(x).on`, Bootstrap-style merges, `recaptcha`, `Twitter UWT`, `Tealium`, `Akamai Boomerang`, `lodash` template, `sanitize-html`/`DOMPurify`/`js-xss`/`Closure` sanitizer-config gadgets, `Marionette.js`, `Adobe DTM`, `Knockout.js`, `Zepto.js`, `Sprint.js`, `Vue.js`, `Popper.js`, `Pendo Agent`, `script.aculo.us`, `hCaptcha`, `Google Tag Manager`, `Google Analytics`, etc.), or — since 2023 — a **built-in browser-API gadget** (`URL` reading `href`, `Notification` reading `title`, `Worker` reading `name`, `Image` reading `src`, `URLSearchParams` reading `toString`).
 
-> **Primary references**
-> - BlackFan / Sergey Bobrov — *Client-Side Prototype Pollution and useful Script Gadgets* (`https://github.com/BlackFan/client-side-prototype-pollution`) — the canonical catalog of PP-vulnerable URL parsers and 50+ script gadgets across jQuery, analytics tags, sanitizers, template engines.
-> - PortSwigger Web Security Academy — *Client-side prototype pollution vulnerabilities* (`https://portswigger.net/web-security/prototype-pollution/client-side`) — sources, sinks, gadgets, constructor-based pollution as a `__proto__` filter bypass, double-sanitization bypass.
-> - PortSwigger Research — *Widespread Prototype Pollution Gadgets* — 11 browser-API gadgets that work against any page once the prototype is polluted.
-> - HackTricks — *Client Side Prototype Pollution* (`https://hacktricks.wiki/en/pentesting-web/deserialization/nodejs-proto-prototype-pollution/client-side-prototype-pollution.html`) — modern tooling (DOM Invader, ppfuzz 2.0, ppmap, proto-find, PPScan, protoStalker), debug snippet `Object.defineProperty(Object.prototype, "x", { get() { console.trace(); return "test" } })`, recent CVEs.
-> - Michał Bentkowski (Securitum) — *Prototype pollution and bypassing client-side HTML sanitizers* (`https://research.securitum.com/prototype-pollution-and-bypassing-client-side-html-sanitizers/`) — the original sanitize-html / DOMPurify / Closure / js-xss bypass payloads.
-> - Olivier Arteau — *JavaScript prototype pollution attack in NodeJS* (NorthSec 2018) — the foundational paper still cited by the BlackFan README.
-> - Kirill89 — *prototype-pollution-explained* (`https://github.com/Kirill89/prototype-pollution-explained`) — minimal lab-style demo, lodash `_.merge` CVE-2018-16487.
-> - Acunetix — *Client-Side Prototype Pollution* vulnerability profile (`https://www.acunetix.com/vulnerabilities/web/client-side-prototype-pollution/`) — concise remediation guidance.
-> - Dodir.sec — *JavaScript Prototype Pollution Attack: A Simplified Guide* (`https://medium.com/@dodir.sec/javascript-prototype-pollution-attack-a-simplified-guide-c3b4ba8a6441`).
-> - Named guard predicates used in detection: `HasOwnPropertyGuard`, `BlacklistEqualityGuard`, `WhitelistEqualityGuard`, `InExprGuard`, `InstanceOfGuard`, `TypeofGuard`, `IsPlainObjectGuard`, `BlacklistInclusionGuard`, `WhitelistInclusionGuard`, `ObjectCreateNullCall`.
+Named guard predicates used in detection: `HasOwnPropertyGuard`, `BlacklistEqualityGuard`, `WhitelistEqualityGuard`, `InExprGuard`, `InstanceOfGuard`, `TypeofGuard`, `IsPlainObjectGuard`, `BlacklistInclusionGuard`, `WhitelistInclusionGuard`, `ObjectCreateNullCall`.
 
 For the **server-side variant** (Node.js / Deno / NPM-package gadgets, RCE/SSRF chains, `execArgv`, `lodash.template`, `bson`, `child_process`), see `references/server_side_prototype_pollution.md` — sources, sinks, and the conceptual flow are the same; only the gadget surface differs.
 
@@ -45,7 +35,7 @@ For the **server-side variant** (Node.js / Deno / NPM-package gadgets, RCE/SSRF 
 - Cookies decoded as JSON then merged.
 
 **Pollution sinks (browser-resident merges/parsers)**
-- BlackFan-cataloged URL/hash parsers that walk `__proto__` / `constructor[prototype]`:
+- Parser-catalog URL/hash parsers that walk `__proto__` / `constructor[prototype]`:
   - `jquery-query-object` (CVE-2021-20083), `jquery-sparkle` (CVE-2021-20084), `backbone-query-parameters` (CVE-2021-20085), `jquery-bbq` (CVE-2021-20086), `jquery-deparam` (CVE-2021-20087), `MooTools More` (CVE-2021-20088), `purl` / jQuery-URL-Parser (CVE-2021-20089).
   - `V4Fire Core`, `CanJS deparam`, `HubSpot Tracking Code`, `YUI 3 querystring-parse`, `Mutiny`, `jQuery parseParams`, `php.js parse_str`, `arg.js`, `davis.js`, `Component querystring`, `Aurelia path`, `analytics-utils < 1.0.3`, `Wistia Embedded Video`, `Swiftype Site Search`.
 - Generic browser-side merge / extend / set: `$.extend(true, target, src)` (jQuery deep merge — CVE-2023-26136 / CVE-2023-26140 in 3.6.0–3.6.3), `_.merge`, `_.mergeWith`, `_.defaultsDeep`, `_.set`, `_.setWith`, `_.zipObjectDeep` shipped in the page bundle, `deepmerge`, `merge-deep`, `extend`, `just-extend`, hand-rolled recursive `for…in` merges.
@@ -54,7 +44,7 @@ For the **server-side variant** (Node.js / Deno / NPM-package gadgets, RCE/SSRF 
 
 **Script gadgets (where polluted defaults turn into XSS)**
 - App code: any `if (config.<flag>) ...` / `el.innerHTML = config.<x>` / `new Image().src = config.<src>` reading a config-style object.
-- Library gadgets: see the BlackFan script-gadget table below.
+- Library gadgets: see the script-gadget table below.
 - Browser-API gadgets (any page, any origin, since 2023): see Browser-API Gadgets below.
 - HTML sanitizers configured via attacker-pollutable option keys: `sanitize-html`, `DOMPurify`, `js-xss`, `Closure HtmlSanitizer`.
 
@@ -136,9 +126,9 @@ merge(globalConfig, JSON.parse(event.data));         // VULN
 if (config.theme) document.body.setAttribute('class', config.theme);    // gadget when theme polluted with class injection
 el.innerHTML = config.welcome ?? '';                                    // → XSS when welcome polluted with <img onerror=…>
 
-// 2) Library gadget (BlackFan catalog) — see tables below
+// 2) Library gadget (script-gadget catalog) — see tables below
 
-// 3) Browser-API gadget (HackTricks 2023+) — works on every page after pollution
+// 3) Browser-API gadget (2023+) — works on every page after pollution
 new URL('#');                                                           // reads polluted Object.prototype.href → javascript: navigation
 ```
 
@@ -202,7 +192,7 @@ Not a pollution write per se, but a related primitive: attacker controls what `t
 
 A `Proxy` whose `get` trap falls through to `Reflect.get(target, prop)` will return polluted defaults exactly like a plain object — Proxies do not insulate from prototype pollution unless the trap explicitly returns `undefined` for non-own properties.
 
-## Vulnerable URL/Hash Parser Catalog (BlackFan PP table)
+## Vulnerable URL/Hash Parser Catalog
 
 These libraries parse `location.search` and/or `location.hash` into a nested object that walks `__proto__` or `constructor[prototype]` keys. Inclusion means a bare visit to a crafted URL pollutes `Object.prototype` for the rest of the page session.
 
@@ -230,11 +220,11 @@ These libraries parse `location.search` and/or `location.hash` into a nested obj
 | `Aurelia path` | `?__proto__[test]=test` | — | |
 | `analytics-utils < 1.0.3` | `?__proto__[test]=test`, `?constructor[prototype][test]=test` | — | |
 
-The full live catalog is maintained at `https://github.com/BlackFan/client-side-prototype-pollution` — recheck before triage as new entries land.
+Recheck for newly disclosed parsers/gadgets before triage.
 
 ---
 
-## Script Gadget Catalog (BlackFan gadgets table)
+## Script Gadget Catalog
 
 If pollution is confirmed, these are the existing in-the-wild gadgets that turn pollution into XSS, sanitizer bypass, cookie injection, or arbitrary script load. Many ship invisibly via marketing/analytics tags.
 
@@ -292,9 +282,9 @@ The presence of any of these libraries in a page's bundle is a high-confidence e
 
 ---
 
-## Browser-API Gadgets (PortSwigger Research, 2023–2025)
+## Browser-API Gadgets
 
-PortSwigger Research and HackTricks documented that **built-in browser APIs themselves are gadgets** once `Object.prototype` is polluted — this means even a page whose own bundle and third-party tags are clean may be exploitable through standard `URL` / `Notification` / `Worker` / `Image` / `URLSearchParams` constructors. Behavior is engine/version-dependent and not universally exploitable.
+**Built-in browser APIs themselves are gadgets** once `Object.prototype` is polluted — this means even a page whose own bundle and third-party tags are clean may be exploitable through standard `URL` / `Notification` / `Worker` / `Image` / `URLSearchParams` constructors. Behavior is engine/version-dependent and not universally exploitable.
 
 | Gadget API | Polluted property read | Primitive |
 |------------|------------------------|-----------|
@@ -318,7 +308,7 @@ Because these gadgets live in the runtime itself, **every** application becomes 
 
 ---
 
-## HTML Sanitizer Bypass Patterns (Securitum / Bentkowski)
+## HTML Sanitizer Bypass Patterns
 
 Sanitizer libraries take a **config object** (`ALLOWED_ATTR`, `whiteList`, `*` allow-rule) that is read with optional-chaining. Polluting the config keys via `Object.prototype` makes the sanitizer trust attacker-supplied attributes/elements. These payloads survive sanitization on the polluted page only.
 
@@ -359,7 +349,7 @@ The fix every sanitizer maintainer eventually shipped: replace internal allow/de
 
 ---
 
-## Constructor-Based Pollution Bypass (PortSwigger Academy)
+## Constructor-Based Pollution Bypass
 
 A common defensive pattern is to *strip property names equal to `__proto__`* from the user-controlled object before merging. This is **bypassable** because every JS object also exposes `constructor.prototype`, which is functionally equivalent to `__proto__`:
 
@@ -386,15 +376,25 @@ When a finding shows that `__proto__` is filtered, always test the `constructor[
 
 ## Double-Sanitization (Recursion-Less Strip) Bypass
 
-A failed "strip-then-walk" defence is bypassable when the strip is non-recursive:
+A failed "strip-then-walk" defence is bypassable when the strip is non-recursive. This applies to **every** dangerous token, not just `__proto__` — if the filter also strips `constructor` and `prototype` once each, the same nesting trick reconstitutes those too, so the `constructor.prototype` route is **not** closed by a triple single-pass strip:
 
 ```
+# __proto__ token
 vulnerable.example/?__pro__proto__to__.gadget=payload
-   strip "__proto__"  (single pass)  →
-vulnerable.example/?__proto__.gadget=payload   ← now valid prototype-pollution source
+   strip "__proto__" (single pass)  →  ?__proto__.gadget=payload   ← valid source
+
+# constructor + prototype tokens (defeats a filter that strips all three once)
+vulnerable.example/?constconstructorructor[prototype][gadget]=payload
+vulnerable.example/?constconstructorructor.prototype.gadget=payload
+   strip "constructor" (single pass)  →  ?constructor[prototype][gadget]=payload
+
+# both tokens nested at once (when "prototype" is also stripped)
+vulnerable.example/?constconstructorructor[protoprototypetype][gadget]=payload
+vulnerable.example/?constconstructorructor.protoprototypetype.gadget=payload
+   strip "constructor" and "prototype" (single pass each)  →  ?constructor[prototype][gadget]=payload
 ```
 
-Any time you see a string-replacement defense rather than an own-property guard, test the recursive-strip bypass alongside the constructor variant.
+Any time you see a string-replacement defense rather than an own-property guard, test the recursive-strip bypass for **all three tokens** (`__pro__proto__to__`, `constconstructorructor`, `protoprototypetype`) — a single-pass strip of `constructor`/`prototype` is just as bypassable as one of `__proto__`. Do NOT conclude the constructor route is dead just because `constructor`/`prototype` are stripped once.
 
 ---
 
@@ -406,7 +406,7 @@ Any time you see a string-replacement defense rather than an own-property guard,
 | CVE-2023-26136 / CVE-2023-26140 | jQuery (`$.extend`) | 3.6.0 – 3.6.3 | `$.extend(true, target, attackerJSON)` introduces arbitrary properties into `Object.prototype` in the browsing context; attackerJSON sourced from `location.hash` / postMessage / fetched config |
 | sanitize-html < 2.8.1 (2023-10) | sanitize-html | < 2.8.1 | Malicious attribute list `{"__proto__":{"innerHTML":"<img/src/onerror=alert(1)>"}}` bypasses the allow-list |
 | CVE-2018-16487 | lodash `_.merge` | < 4.17.11 | Foundational merge-sink CVE; still reachable when an old lodash ships in a browser bundle |
-| CVE-2021-20083..20089 | jquery-query-object, jquery-sparkle, backbone-query-parameters, jquery-bbq, jquery-deparam, MooTools More, Purl | (per CVE) | URL/hash parser walks `__proto__`/`constructor[prototype]` (BlackFan catalog) |
+| CVE-2021-20083..20089 | jquery-query-object, jquery-sparkle, backbone-query-parameters, jquery-bbq, jquery-deparam, MooTools More, Purl | (per CVE) | URL/hash parser walks `__proto__`/`constructor[prototype]` (parser catalog) |
 | CVE-2019-7609 | Kibana | 6.6.0 | Server-side variant — included for completeness; see `references/server_side_prototype_pollution.md` |
 
 ---
@@ -436,6 +436,11 @@ rg -n '\.(extend|merge|mergeWith|defaultsDeep|set|setWith|zipObjectDeep)\s*\(' -
 # jQuery deep extend
 rg -n '\$\.extend\s*\(\s*true\s*,' --glob '*.{js,jsx,ts,tsx}'
 
+# jQuery DOM-manipulation gadget call-sites — object form of .attr(), the
+# .on()/.submit()/.off() helpers, and $.getScript()/$.get(); these read inherited
+# polluted keys via for…in and are NOT fixed by the $.extend CVE patch (live in jQuery 3.7.1)
+rg -n '\.attr\s*\(\s*\{|\.(on|one|off|submit)\s*\(|\$\.get(Script)?\s*\(' --glob '*.{js,jsx,ts,tsx}'
+
 # Hand-rolled recursive merge / deep-assign
 rg -n 'for\s*\(\s*(const|let|var)\s+\w+\s+in\s+\w+' --glob '*.{js,jsx,ts,tsx}'
 
@@ -450,6 +455,38 @@ rg -n 'decodeURIComponent|split\s*\(\s*[\'"][&=.\\[\\]]' --glob '*.{js,jsx,ts,ts
 ```
 
 High-confidence triad: source grep + merge/set grep on same file or import chain + DOM/sanitizer gadget read (`innerHTML`, `ALLOWED_ATTR`, `whiteList`, `new URL(`).
+
+### jQuery DOM-manipulation gadgets are version-independent sinks
+
+Several jQuery gadgets fire through ordinary DOM helpers, **not** through `$.extend`, so they remain exploitable in the **latest jQuery (3.7.1)** — patching jQuery for CVE-2023-26136/26140 does *not* remove them. Treat these call-sites as gadget sinks whenever the page can be polluted (do not mark SAFE merely because jQuery is current):
+
+- **`$(sel).attr(obj)` — object / multi-attribute form.** jQuery runs `for (k in obj)` over the argument, so inherited polluted keys are applied as DOM attributes. The two-argument form `$(sel).attr('src', val)` is **not** this sink — only the single-object form is. Grep `\.attr\s*\(\s*\{`.
+- **Case matters (key-collision bypass).** Attackers pollute mixed-case keys (`SRC`, `OnError`) rather than `src`/`onerror`: JS property lookup is case-sensitive, so `SRC` does not collide with a legitimate own `src` the app already set on the object — but HTML attribute names are case-insensitive, so jQuery's `setAttribute('SRC'/'OnError', …)` still lands as a working `src`/`onerror` → `<img SRC=x OnError=alert(1)>`. A polluted property whose name only differs from a real one by case is a strong gadget signal.
+- **`$(sel).on(...)` / `.submit()` / `.off()`** read inherited `handler` / `selector` / `needsContext` / `delegateType` / `delegateTarget` (from `Object.prototype` **or** `Function.prototype`) and can reach a `jQuery(selector)` HTML-parse sink on user interaction.
+- **`$.getScript(...)` / `$.get(...)`** pick up polluted `url` / `src` / `dataType` / `crossDomain` defaults and load attacker script.
+- **`$(htmlString)`** parses inherited `div[0]` / `div[1]` defaults into HTML.
+
+### Gadget-read patterns — where a polluted default is consumed
+
+A *gadget read* is any expression that reads a property which can fall through to a polluted prototype. These are **candidate** sinks: confirm a real pollution source AND a security-sensitive use (HTML / URL / script / auth-flag / redirect) before reporting. Beyond the obvious `obj.x` and `obj.x ?? d`, these forms are easily missed because they don't look like a DOM write — several are pure **logic / feature-flag / privilege gadgets that need no DOM sink at all**:
+
+| Read form | Example | Why it's a gadget |
+|-----------|---------|-------------------|
+| `in` operator | `if ('isAdmin' in user)` / `if ('beta' in cfg)` | `in` walks the prototype chain, so pollution makes the membership test **true** — a control-flow / feature-flag / privilege gadget. **Distinct from `InExprGuard`** (which is `in` used as a merge-time blocklist, e.g. `if (!(key in dst))`): reading `'x' in obj` for application logic is the *opposite* — an attacker-controllable read, not a sanitizer. |
+| Destructuring + default | `const { isAdmin = false } = user` | The default fires only when the lookup is `undefined`; a polluted `Object.prototype.isAdmin` is consumed instead, so the "safe" default is silently skipped. |
+| Default function parameter | `function init(opts = {}) {…opts.x}` / `({ timeout = 30 } = opts)` | The `= {}` / `= default` object still inherits polluted keys; every later `opts.x` read is a gadget. |
+| `??` / `||` fallback | `const u = opts.returnUrl ?? '/'` | A polluted `returnUrl` short-circuits the fallback → reaches `location.assign`, `fetch`, `new Worker`, etc. |
+| `for…in` over a config object | `for (const k in cfg) apply(k, cfg[k])` | Enumerates inherited keys (also a merge sink — see above). |
+
+```bash
+# Gadget-read candidates (pair with a confirmed pollution source + a sensitive use)
+rg -n "['\"][A-Za-z_][\w-]*['\"]\s+in\s+\w+" --glob '*.{js,jsx,ts,tsx}'          # 'flag' in obj
+rg -n '(const|let|var)\s*\{[^}]*=[^}]*\}\s*=' --glob '*.{js,jsx,ts,tsx}'          # destructuring defaults
+rg -n '\([^)]*=\s*\{\s*\}[^)]*\)' --glob '*.{js,jsx,ts,tsx}'                      # default {} parameters
+rg -n '\w+\.\w+\s*(\?\?|\|\|)\s*' --glob '*.{js,jsx,ts,tsx}'                      # obj.x ?? / || default
+```
+
+These read patterns are intentionally broad (they also match benign code) — treat a hit as a gadget only when (1) the object is reachable from a proven pollution source and (2) the read drives HTML/URL/script execution or a security decision (auth flag, feature gate, redirect target). This is exactly the candidate-then-confirm model dynamic gadget-finders use.
 
 ### VULN — recursive `for…in` merge of attacker JSON / hash
 
@@ -513,9 +550,12 @@ HotJar/Adobe DTM/Demandbase/Embedly/Tealium/Boomerang/Pendo/Twitter UWT/recaptch
 ```javascript
 const config = Object.create(null);                      // no prototype; pollution has no target
 config[userKey] = userValue;
+
+const settings = { __proto__: null };                    // equivalent null-prototype literal
+settings[userKey] = userValue;                           // bracket-writing "__proto__" here is harmless — no prototype to reach
 ```
 
-`Object.create(null)` excludes this case — a base reachable through `Object.create(null)` is not flagged.
+`Object.create(null)` excludes this case — a base reachable through `Object.create(null)` is not flagged. The object-literal form `{ __proto__: null }` is **equivalent** (it creates a null-prototype object; `ObjectCreateNullCall` recognizes both). A later `obj['__proto__'] = x` on a null-prototype object writes a harmless own property and does not pollute.
 
 ### SAFE — destination-side `hasOwnProperty` guard
 
@@ -557,7 +597,9 @@ Object.freeze(Function.prototype);
 
 In strict-mode, attempts to write polluted properties throw; in sloppy mode they silently no-op. Be aware some polyfills extend prototypes at load time and break under freeze. Apply as the *first* script the page runs.
 
-### SAFE — `structuredClone()` for deep clones (HackTricks)
+`Object.seal(Object.prototype)` is a valid (slightly weaker) alternative recognized as a sanitizer: seal blocks **adding new properties** — which is exactly the classic pollution vector (`Object.prototype.<newGadget> = …`) — while still allowing existing own properties to be overwritten. It is often recommended as a good compromise when `Object.freeze` breaks a library that legitimately mutates prototypes. Treat `Object.seal(Object.prototype)` early in load order like `Object.freeze` for triage (credit it as a source-blocking defense). On Node/SSR bundles, the `--disable-proto=delete` runtime flag is a defense-in-depth measure that removes the `__proto__` accessor (does not stop `constructor.prototype`); see `references/server_side_prototype_pollution.md`.
+
+### SAFE — `structuredClone()` for deep clones
 
 ```javascript
 const clone = structuredClone(userInput);                // does not walk prototype chain
@@ -565,12 +607,19 @@ const clone = structuredClone(userInput);                // does not walk protot
 
 Replaces the unsafe `JSON.parse(JSON.stringify(obj))` and ad-hoc deep-merge snippets. Note `structuredClone` does NOT merge — it clones — so this is a "don't-deep-merge-in-the-first-place" defense.
 
-### SAFE — `Map` instead of plain object
+### SAFE — `Map` / `Set` instead of plain object
 
 ```javascript
 const cache = new Map();
-cache.set(userKey, userValue);                           // Map has no prototype-chain lookups
+cache.set(userKey, userValue);                           // Map.get/.set do not walk the prototype chain
+cache.get('evil');                                       // → undefined even if Object.prototype.evil is polluted
+
+const allowed = new Set();
+allowed.add(userValue);                                  // Set.has/.add are own-only — pollution-proof for value storage
+allowed.has('evil');                                     // → false even when Object.prototype.evil is polluted
 ```
+
+`Map`/`Set` access methods (`get`/`set`/`has`/`add`) only see own entries, so a polluted `Object.prototype` default is never returned — they are recommended over option/allow-list object literals. Use `Map` for key→value config, `Set` for value membership.
 
 ### SAFE — `Reflect.set(target, key, value)` and `Object.defineProperty` (with care)
 
@@ -642,16 +691,16 @@ Prefer `structuredClone` for deep copy, `Map` for dynamic keys, or shallow `Obje
 
 ## Tooling for Triage
 
-These are dynamic-testing tools, useful when the user explicitly asks for runtime verification or to find sources/gadgets in a minified bundle. SAST findings should still cite source patterns from above.
+These are dynamic-testing capabilities, useful when the user explicitly asks for runtime verification or to find sources/gadgets in a minified bundle. SAST findings should still cite source patterns from above.
 
-- **Burp Suite DOM Invader** (PortSwigger, ships with Burp's built-in browser; v2023.6 added a dedicated *Prototype-pollution* tab). Automatically mutates parameter names (`__proto__`, `constructor.prototype`, dot/bracket variants) on every page navigation, polls `Object.prototype` for reflected pollution, and at sink-time shows the exact dereference site. The fastest way to triage a real target.
-- **`ppfuzz` 2.0** (HackTricks, 2025) — supports ES-modules, HTTP/2 and WebSocket endpoints; `-A browser` mode spins up headless Chromium and bruteforces DOM-API gadget classes.
-- **`ppmap`** — generates payloads of the form `constructor[prototype][ppmap]=reserved`, used together with the breakpoint-debugger snippet below to find the vulnerable code path in a minified bundle.
-- **`proto-find`** — alternative scanner.
-- **`PPScan`** (browser extension) — passive scanner that watches navigation and flags successful pollution.
-- **`protoStalker`** (Chrome DevTools plug-in, 2024) — visualises prototype chains in real-time, flags writes to `onerror`, `innerHTML`, `srcdoc`, `id`, etc.
+- **Browser-based PP scanners** automatically mutate parameter names (`__proto__`, `constructor.prototype`, dot/bracket variants) on every page navigation, poll `Object.prototype` for reflected pollution, and at sink-time show the exact dereference site.
+- **Automated payload fuzzers** support ES-modules, HTTP/2, and WebSocket endpoints; browser mode spins up headless Chromium and bruteforces DOM-API gadget classes.
+- **Payload generators** produce markers such as `constructor[prototype][marker]=reserved`, used together with the breakpoint-debugger snippet below to find the vulnerable code path in a minified bundle.
+- **Gadget-candidate instrumentation** hooks JS (Node loader or browser agent) and logs every read of a potentially-polluted property, classified by AST shape: property access, element access, `for…in`, **`in` expression**, destructuring/variable declaration with defaults, object literals, and **default function parameters**. Lazy-start mode logs only gadgets reachable *after* the pollution point; configurable prototype targets cover non-`Object` prototypes. This transformer taxonomy doubles as the gadget-read taxonomy above.
+- **Passive browser extensions** watch navigation and flag successful pollution.
+- **DevTools prototype-chain visualizers** show prototype chains in real-time and flag writes to `onerror`, `innerHTML`, `srcdoc`, `id`, etc.
 
-### Debug-property snippet (HackTricks)
+### Debug-property snippet
 
 When tooling confirms pollution but the exact dereference is buried, drop this into the JS console *while paused* on the first script breakpoint:
 
@@ -701,13 +750,13 @@ Re-test `constructor[prototype]` when `__proto__` is stripped; re-test `#__proto
 
 ## Confirming a Finding
 
-1. Identify the pollution source: name the parser/merge call (`location.hash` walked by `jquery-deparam`, `$.extend(true, …)`, `_.merge`, hand-rolled `for…in`, BlackFan-cataloged URL parser, etc.) and show the file + line.
+1. Identify the pollution source: name the parser/merge call (`location.hash` walked by `jquery-deparam`, `$.extend(true, …)`, `_.merge`, hand-rolled `for…in`, cataloged URL parser, etc.) and show the file + line.
 2. Trace user-controlled keys to that sink with no `Object.create(null)` target / `Object.hasOwn` guard / `__proto__`-blocklist between source and sink.
 3. Confirm reachability of a gadget *in the same realm*. Strong evidence:
-   - The page bundles a known BlackFan-cataloged gadget library, AND
+   - The page bundles a known cataloged gadget library, AND
    - The polluted property name matches a documented gadget config key (`innerHTML`, `src`, `srcdoc`, `onerror`, `ALLOWED_ATTR`, `whiteList`, `sourceURL`, `template`, `customScriptSrc`, `assethost`, `dataHost`, `cookieName`, …).
    - Or — since 2023 — the page contains any code that calls `new URL(…)` / `new Notification(…)` / `new Worker(…)` / `new Image()` / `new URLSearchParams(…)` and the polluted property is `href` / `title` / `name` / `src` / `toString`.
-4. Construct the canonical payload form: bracket OR dot OR constructor variant. If `__proto__` is filtered, retry with `constructor[prototype]`. If the filter is non-recursive, try the `__pro__proto__to__` double-sanitization bypass.
+4. Construct the canonical payload form: bracket OR dot OR constructor variant. If `__proto__` is filtered, retry with `constructor[prototype]`. If the filter is a non-recursive *strip*, try the recursive-strip bypass for whichever token is removed — `__pro__proto__to__`, `constconstructorructor`, and/or `protoprototypetype` (a triple single-pass strip still leaves the `constructor.prototype` route open).
 5. Demonstrate the gadget firing — preferred form: harmless `alert(1)` or `console.log` for proof-of-concept. Avoid network beacons in shared environments.
 6. Distinguish severity by gadget reached (table below). DOM XSS → High; sanitizer bypass that lets the attacker re-render arbitrary HTML elsewhere → Critical; cookie injection or open-redirect-only → Medium-High.
 
@@ -715,12 +764,14 @@ Re-test `constructor[prototype]` when `__proto__` is stripped; re-test `#__proto
 
 ## False Alarms — Do NOT Report
 
-- The "merge" target is `Object.create(null)` *and* the prototype-less object never feeds back into a real `Object`-prototyped object (`ObjectCreateNullCall` excludes this case).
+- The "merge" target is `Object.create(null)` or a `{ __proto__: null }` literal *and* the prototype-less object never feeds back into a real `Object`-prototyped object (`ObjectCreateNullCall` excludes both forms).
+- User-controlled values/keys are stored in a `new Set()` / `new Map()` and read only via `.has()` / `.get()` — these never return polluted prototype defaults.
+- The page runs `Object.seal(Object.prototype)` (or `Object.freeze`) early — seal blocks new-property addition, the classic pollution write; verify it precedes any merge in load order.
 - The merge is gated by a destination-side `hasOwnProperty` guard (`HasOwnPropertyGuard`) on the destination — `__proto__`/`constructor` are *not* own properties of normal destination objects.
 - The merge is gated by an explicit `key === '__proto__' || key === 'constructor' || key === 'prototype'` blocklist (`BlacklistEqualityGuard` / `BlacklistInclusionGuard`).
 - The merge is preceded by `is-plain-object` / `is-extendable` (`IsPlainObjectGuard`).
-- Patched library versions: lodash >= 4.17.21, jQuery >= 3.7.0 (CVE-2023-26136/26140 patched), DOMPurify >= 3.0.9 (CVE-2024-45801 patched), sanitize-html >= 2.8.1.
-- A pollution source with no gadget that reaches a security-sensitive sink — i.e., the page never bundles any of the BlackFan gadgets, never calls a known browser-API gadget, and the app code does not interpolate any inherited property into HTML / URL / script / sanitizer config. Cap at INFO/Low (defense-in-depth).
+- Patched library versions: lodash >= 4.17.21, jQuery >= 3.7.0 (CVE-2023-26136/26140 patched), DOMPurify >= 3.0.9 (CVE-2024-45801 patched), sanitize-html >= 2.8.1. **Caveat:** the jQuery patch only closes the `$.extend(true,…)` pollution *sink* — the DOM-manipulation *gadgets* (`$(x).attr({…})`, `$(x).on/.submit`, `$.getScript`, `$(html)`) are NOT fixed and remain exploitable in jQuery 3.7.1 when a separate pollution source exists. Do not mark these SAFE on version alone.
+- A pollution source with no gadget that reaches a security-sensitive sink — i.e., the page never bundles any of the cataloged script gadgets, never calls a known browser-API gadget, and the app code does not interpolate any inherited property into HTML / URL / script / sanitizer config. Cap at INFO/Low (defense-in-depth).
 - Hash payloads where the page never calls `location.hash` / `URL` parsers and `JSON.parse` with prototype-walking merge. The `#` is browser-only — without a parser, there is no source.
 - `JSON.parse(req.body)` alone — `__proto__` becomes own property of the parsed object; only the *next* `_.merge`/recursive copy escalates it.
 - Pages that run `Object.freeze(Object.prototype)` at the very first script — verify the freeze precedes any merge in the load order.
@@ -747,7 +798,7 @@ Re-test `constructor[prototype]` when `__proto__` is stripped; re-test `#__proto
 ## Business Risk
 
 - **Realm-wide compromise.** A successful pollution affects every plain object in the page's JS realm for the page's lifetime — not just the merge target. A single GET request from a marketing campaign or a poisoned cached payload can subvert authentication forms, profile pages, admin tooling.
-- **Stealth and longevity.** Pollution does not throw — undefined-property reads simply return the polluted value. Detection requires explicit instrumentation (DevTools `Object.defineProperty` snippet, `protoStalker`, DOM Invader). Symptom-free until the gadget fires.
+- **Stealth and longevity.** Pollution does not throw — undefined-property reads simply return the polluted value. Detection requires explicit instrumentation (DevTools `Object.defineProperty` snippet, prototype-chain visualizers, browser-based PP scanners). Symptom-free until the gadget fires.
 - **Same-origin pivot.** CSPP commonly pairs with sanitizer-bypass to make stored XSS payloads exploitable that were previously blocked by the sanitizer — pollution is set on visit-1, sanitizer-bypass payload is rendered on visit-2 (which may target a different user/session within the same origin).
 - **Third-party tag amplification.** Many CSPP gadgets ship invisibly via marketing tags (Tealium, Adobe DTM, Boomerang, Demandbase, Pendo, Twitter UWT, GTM). The application owner often does not know they are vulnerable.
 - **CSP partially helpful but not sufficient.** Strict `script-src 'self'` blocks `<script>`-injection gadgets but not URL-handler XSS (`javascript:` href / `data:` `dataType=script`), DOM-clobbering, sanitizer bypass, or `Object.prototype.href` browser-API gadgets. CSP is defense-in-depth, not a CSPP fix.
@@ -764,7 +815,7 @@ Treat every browser-resident parser of `location.search` / `location.hash` / `JS
 4. `Map` / `structuredClone` instead of deep merging plain objects, OR
 5. `Object.freeze(Object.prototype)` (plus `Array.prototype`, `Map.prototype`, `Function.prototype`) as the first script of the page.
 
-Then audit the gadget surface — every BlackFan-listed library, every HTML sanitizer, every browser-API constructor (`URL`, `Notification`, `Worker`, `Image`, `URLSearchParams`) — and assume that any read of an undefined property from a config-style object is a gadget. Pair the sink with the gadget to determine real impact; do not report sink-only or gadget-only findings as Critical.
+Then audit the gadget surface — every catalog-listed library, every HTML sanitizer, every browser-API constructor (`URL`, `Notification`, `Worker`, `Image`, `URLSearchParams`) — and assume that any read of an undefined property from a config-style object is a gadget. Pair the sink with the gadget to determine real impact; do not report sink-only or gadget-only findings as Critical.
 
 For server-side variants of this same conceptual flow (Node.js `child_process` / `execArgv` / `lodash.template` / `bson` chains), see `references/server_side_prototype_pollution.md`.
 
@@ -773,12 +824,12 @@ For server-side variants of this same conceptual flow (Node.js `child_process` /
 ## Analyst Notes
 
 1. The pollution source decides whether the bug fires at all — check the URL/hash/JSON/postMessage/storage pipeline carefully and remember that **hash payloads bypass every server-side filter and most CDN-level WAFs**.
-2. The script gadget decides the impact — check the bundle and every tag manager / analytics / sanitizer it loads against the BlackFan catalog and the browser-API gadget list. If both pollution and any of these load on the same page, severity is at least High.
+2. The script gadget decides the impact — check the bundle and every tag manager / analytics / sanitizer it loads against the script-gadget catalog and the browser-API gadget list. If both pollution and any of these load on the same page, severity is at least High.
 3. `JSON.parse` of attacker JSON is *not* a pollution sink by itself — escalation requires a downstream `$.extend(true, …)` / `_.merge` / recursive copy that walks the parsed object.
 4. The **`constructor[prototype]`** variant is the most common "we filtered `__proto__`" bypass; always test it in addition to the dot-bracket variants.
-5. The **double-sanitization** payload (`__pro__proto__to__.gadget=value`) is the most common "we strip `__proto__`" bypass; always test it when a strip is observed.
-6. Browser-API gadgets (PortSwigger 2023+) make every page exploitable once any pollution source on the same origin is reached. Recommend `Object.freeze(Object.prototype)` at the top of the load order regardless of the bundle's library mix.
-7. For DOM Invader-confirmed CSPP, also re-test in incognito / a fresh profile to rule out a stale extension polluting the prototype chain. Browser extensions can pollute, too.
+5. The **double-sanitization** payload is the most common "we strip the token" bypass; always test it when a non-recursive strip is observed — and for **all three** tokens (`__pro__proto__to__`, `constconstructorructor`, `protoprototypetype`), since stripping `constructor`/`prototype` once does not close the `constructor.prototype` route.
+6. Browser-API gadgets (since 2023) make every page exploitable once any pollution source on the same origin is reached. Recommend `Object.freeze(Object.prototype)` at the top of the load order regardless of the bundle's library mix.
+7. For browser-scanner-confirmed CSPP, also re-test in incognito / a fresh profile to rule out a stale extension polluting the prototype chain. Browser extensions can pollute, too.
 8. When a finding involves a third-party tag (Tealium, Adobe DTM, Boomerang, etc.), document which tag's gadget is reached — the tag vendor, not the app team, is usually the upstream fix owner.
 
 ## Sources, Sinks & Sanitizers
@@ -795,6 +846,6 @@ Three JavaScript detection patterns cover **browser and Node** contexts; CSPP fi
 
 **Sanitizers**: identical to server-side — `Object.create(null)`, destination `Object.hasOwn`, blocklists, `is-plain-object`, `structuredClone` (no merge).
 
-**Pair with manual gadget review**: automated rules do not enumerate BlackFan script gadgets or browser-API gadgets (`URL`, `Image`) — sink-only hits stay LOW until gadget confirmed.
+**Pair with manual gadget review**: automated rules do not enumerate cataloged script gadgets or browser-API gadgets (`URL`, `Image`) — sink-only hits stay LOW until gadget confirmed.
 
 Per-library URL parser CVE list (jquery-deparam, etc.) requires dependency/version heuristics; DOMPurify sanitizer-bypass gadgets require separate XSS/sanitizer analysis.

@@ -121,6 +121,50 @@ Use as a domain-scoping checklist; not all categories apply to every application
 - Feature flags enforced client-side or at edge but not in core services; toggle names guessed or fallback to default-enabled
 - Role transitions leaving stale capabilities (retain premium after downgrade; retain admin endpoints after demotion)
 
+### Account Lifecycle and Identity
+
+Registration, email change, and username uniqueness are business invariants — parser/precedence bugs and missing normalization create duplicate identities or pre-account-takeover paths. Email parsing/canonicalization differentials are detailed in `references/email_parser_differential.md`; OTP/resend abuse chains in `references/verification_code_abuse.md`.
+
+- **Registration email parameter pollution**: duplicate keys or array shapes where one value drives verification and another drives delivery/identity — `email=victim@x&email=attacker@x`, `{"email":["victim","attacker"]}`, case-variant keys (`Email=` vs `email=`), or CRLF/header injection in the email field (`%0a%0dcc:`) causing verification email to one address while account is bound to another
+- **Duplicate / twin accounts**: same logical username with different case (`AdMIn` vs `admin`), whitespace/trailing-space collisions (`"admin "` vs `"admin"`), SQL column truncation collisions, or missing `UNIQUE` + trim/lowercase normalize at insert — two accounts map to one identity or bypass uniqueness checks
+- **Change-email without verification → pre-account-takeover**: authenticated user sets email to victim address without confirming inbox; attacker triggers password reset or OTP to victim email and completes takeover before victim registers — durable binding to unverified address
+
+```bash
+# Email pollution / duplicate-key handling
+rg -n "request\.(form|json|query|body).*email|getlist\(['\"]email|email.*\[\]" .
+rg -n "normalizeEmail|trim.*email|lower.*email|UNIQUE.*email|citext" .
+
+# Twin-account / case sensitivity
+rg -n "username.*unique|createUser|register|sign[_-]?up" . | rg -v "lower|trim|normalize|citext"
+rg -n "VARCHAR\(|CHAR\(|username" --glob "*.{sql,py,java,rb,php}"
+
+# Change-email without step-up verification
+rg -n "change[_-]?email|update.*email|setEmail|email.*=" . | rg -v "verify|confirm|otp|token|pending"
+```
+
+```python
+# VULN: first email wins for verify, last for storage (parameter pollution)
+emails = request.form.getlist("email") or [request.json.get("email")]
+send_verification(emails[0])
+user.email = emails[-1] if isinstance(emails, list) else emails
+user.save()
+
+# VULN: case-sensitive username uniqueness
+User.create(username=request.json["username"])  # "Admin" and "admin" both succeed
+
+# SECURE: canonical identity + single verified email
+email = normalize_email(single_email_value(request))  # reject arrays/duplicates
+if User.exists(username=canonical_username(request.json["username"])):
+    raise ConflictError()
+user.pending_email = email
+send_verification(email)  # account email updates only after token verify
+
+# VULN: email change without verification — pre-account-takeover
+user.email = request.json["new_email"]
+user.save()
+send_password_reset(user.email)
+```
+
 ## Advanced Techniques
 
 ### Event-Driven Sagas

@@ -292,6 +292,10 @@ object obj = formatter.Deserialize(Request.InputStream);
 LosFormatter losFormatter = new LosFormatter();
 object viewState = losFormatter.Deserialize(Request.Form["__VIEWSTATE"]);
 
+// VULNERABLE: ObjectStateFormatter on posted ViewState (same chain as LosFormatter)
+ObjectStateFormatter osf = new ObjectStateFormatter();
+object state = osf.Deserialize(Request.Form["__VIEWSTATE"]);
+
 // VULNERABLE: NetDataContractSerializer with untrusted input
 NetDataContractSerializer serializer = new NetDataContractSerializer();
 object obj = serializer.Deserialize(stream);
@@ -301,6 +305,40 @@ object obj = serializer.Deserialize(stream);
 - `BinaryFormatter`, `NetDataContractSerializer`, `SoapFormatter`
 - `LosFormatter` (with ViewState MAC disabled)
 - `ObjectStateFormatter` (without validation)
+
+### ASP.NET ViewState Deserialization Chain (CWE-502)
+
+Web Forms posts opaque state in `__VIEWSTATE`. When MAC or encryption is weakened, an attacker forges ViewState that deserializes into a gadget chain → **RCE**.
+
+**Vulnerable conditions** (config + sink):
+- `LosFormatter.Deserialize(Request.Form["__VIEWSTATE"])` or `ObjectStateFormatter.Deserialize(...)` in code-behind, handlers, or custom controls
+- `enableViewStateMac="false"` on `<pages>` — disables integrity check on ViewState
+- `ViewStateEncryptionMode="Never"` — ViewState not encrypted; pairs with MAC-off forgery
+- Hardcoded `<machineKey validationKey="..." decryptionKey="..."/>` in committed `Web.config` — enables ViewState MAC forgery even when MAC is nominally on (cross-ref `aspnet_security_misconfig.md`, `weak_crypto_hash.md` / secrets handling)
+
+**Exploit chain**: attacker obtains or derives `machineKey` → crafts signed ViewState blob with `BinaryFormatter`-compatible gadget → POST to any page with ViewState enabled → server deserializes via `LosFormatter`/`ObjectStateFormatter`.
+
+```xml
+<!-- VULN: MAC disabled — ViewState forgery without key when combined with LosFormatter sink -->
+<pages enableViewStateMac="false" />
+
+<!-- VULN: encryption off — aids tampering/replay analysis -->
+<pages ViewStateEncryptionMode="Never" />
+
+<!-- VULN: static keys in repo — deserialization enabler -->
+<machineKey validationKey="..." decryptionKey="..." />
+```
+
+```csharp
+// SAFE: rely on platform ViewState handling; never manual Deserialize on __VIEWSTATE
+// SAFE: enableViewStateMac="true" (default), ViewStateEncryptionMode Auto/Always, machineKey from secure store
+```
+
+**Grep seeds** (Web.config / transforms / code-behind):
+- `enableViewStateMac="false"`, `enableViewStateMac='false'`
+- `ViewStateEncryptionMode="Never"`, `ViewStateEncryptionMode='Never'`
+- `<machineKey`, `validationKey=`, `decryptionKey=`
+- `LosFormatter`, `ObjectStateFormatter`, `Deserialize(Request.Form["__VIEWSTATE"])`, `Request.Form["__VIEWSTATE"]`
 
 **.NET safe alternatives**:
 - `DataContractSerializer` with known type list
@@ -324,7 +362,8 @@ var obj = JsonConvert.DeserializeObject<MyDto>(userInput);
 
 - `BinaryFormatter.Deserialize(userStream)` — **CONFIRM** (RCE via .NET gadget chains)
 - `JsonConvert.DeserializeObject` with `TypeNameHandling.All` or `TypeNameHandling.Auto` on user input — **CONFIRM**
-- `LosFormatter.Deserialize(Request.Form["__VIEWSTATE"])` when `enableViewStateMac=false` — **CONFIRM**
+- `LosFormatter.Deserialize(Request.Form["__VIEWSTATE"])` or `ObjectStateFormatter.Deserialize(Request.Form["__VIEWSTATE"])` when `enableViewStateMac="false"` or `ViewStateEncryptionMode="Never"` — **CONFIRM**
+- Hardcoded `machineKey` `validationKey`/`decryptionKey` in committed config enabling ViewState forgery — **CONFIRM** as deserialization enabler (pair with ViewState/LosFormatter surface)
 - `NetDataContractSerializer.Deserialize(stream)` with user-controlled stream — **CONFIRM**
 
 ## .NET FALSE POSITIVE Rules

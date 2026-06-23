@@ -52,6 +52,78 @@ export const dynamic = 'force-dynamic';           // or Cache-Control: private, 
 - The reflected unkeyed input reaches a sink: absolute URL / link / redirect built from `Host`/`X-Forwarded-Host` (see `ssrf.md` Host-header class), or reflected into HTML/JS (see `xss.md`).
 - Cache-key normalization differs from origin parsing (`//`, `/%2e/`, case, trailing chars) → "cache key confusion" lets an attacker poison the key that victims request.
 
+### Unkeyed-input catalog (cache key omits dimension)
+
+| Input | Typical effect if unkeyed |
+|-------|---------------------------|
+| `X-Forwarded-Host`, `X-Forwarded-Scheme`, `X-Host`, `X-Original-URL` | Absolute URLs, redirects, canonical links poisoned (cross-ref `trust_boundary.md` when header drives auth/routing) |
+| `utm_*`, `_method`, tracking/marketing query params | Response body or routing differs but query stripped from CDN cache key |
+| `Accept`, `Accept-Encoding` (when `Vary` missing) | Wrong representation served to victims |
+
+Flag when application code reads/processes the input but CDN/proxy cache key config does not include it.
+
+### Cache-poisoning DoS (empty / error responses)
+
+Attacker seeds a **shared cache entry** with a broken body — empty `{}`, truncated HTML, or cacheable **4xx/5xx** — so all subsequent users receive the poisoned response. Distinct from XSS/redirect poisoning: impact is **denial of service** (see `denial_of_service.md`).
+
+- `Cache-Control: public` or `s-maxage` on error handlers, middleware short-circuits, or JSON data routes that return `{}` under attacker-controlled headers.
+- Framework internal routes that return minimal/empty JSON when probed with prefetch or internal headers, yet responses are edge-cacheable.
+
+```http
+# VULN — empty JSON cached publicly after middleware short-circuit
+HTTP/1.1 200 OK
+Cache-Control: public, s-maxage=31536000
+Content-Type: application/json
+{}
+```
+
+### Next.js — framework cache-poisoning vectors
+
+Check `package.json` `"next"` version against known-vulnerable ranges (e.g. middleware prefetch DoS **CVE-2023-46298** in Next.js before **13.5.2**; confirm against installed semver).
+
+- **`x-middleware-prefetch`**: middleware reacts to prefetch header → returns empty `{}` or minimal body that shared cache stores under the victim URL.
+- **`__nextDataReq` / data-route confusion**: client data fetches (`/_next/data/...`) cached with wrong key or confused with page route; personalized `getServerSideProps` payload cached as static.
+- **RSC / internal invoke headers**: server reads client-supplied `Rsc`, `x-invoke-status`, or `x-invoke-error` and changes response shape without those headers in cache key.
+- **SSR + public cache**: `getServerSideProps` / `getServerSideProps`-equivalent routes setting `Cache-Control: public` or `s-maxage` on per-user data without `private`, `no-store`, or correct `Vary`.
+
+```js
+// VULN (Pages Router) — personalized SSR response publicly cacheable
+export async function getServerSideProps(ctx) {
+  const me = await getUser(ctx.req);
+  ctx.res.setHeader('Cache-Control', 'public, s-maxage=60, stale-while-revalidate');
+  return { props: { me } };
+}
+
+// SAFE
+ctx.res.setHeader('Cache-Control', 'private, no-store');
+```
+
+```js
+// VULN (middleware) — branch on prefetch header without opting out of edge cache
+export function middleware(req) {
+  if (req.headers.get('x-middleware-prefetch')) {
+    return NextResponse.json({});
+  }
+  return NextResponse.next();
+}
+```
+
+### Nuxt — `/_payload.json` and Nitro cache
+
+Check `package.json` `"nuxt"` version: **CVE-2025-27415** affects Nuxt **3.0.0–3.15.2** (payload route cache confusion via `?poc=/_payload.json` or `#/_payload.json`).
+
+- **`routeRules` / Nitro route cache** on dynamic pages without query string (or hash) in cache key — attacker poisons payload JSON for a high-traffic route.
+- Public `cache: { swr, maxAge }` on routes whose body varies by auth cookie or query param omitted from key.
+
+```js
+// VULN — cache dynamic route without query in key
+export default defineNuxtConfig({
+  routeRules: {
+    '/account/**': { swr: 3600, cache: { maxAge: 3600 } },  // per-user page
+  },
+});
+```
+
 ```http
 # VULN — X-Forwarded-Host is reflected into an absolute script src but is NOT in the cache key
 GET / HTTP/1.1
@@ -129,7 +201,37 @@ curl -s "https://TARGET/" | grep "alert(1)"
 
 Poisoning is confirmed when the second (header-free) request returns `X-Cache: HIT` (or `Age > 0`) and still contains the injected payload.
 
----
+## SAST grep indicators
+
+**Next.js prefetch / data routes / SSR cache headers:**
+```bash
+rg -n "x-middleware-prefetch|__nextDataReq|x-invoke-status|x-invoke-error|\bRsc\b" --glob "*.{js,ts,tsx,mjs}"
+rg -n "getServerSideProps" . | rg -n "Cache-Control|s-maxage|public"
+rg -n '"next"\s*:\s*"(1[0-2]\.|13\.[0-4]\.)' package.json   # adjust range to advisory for installed major
+```
+
+**Nuxt payload / Nitro cache:**
+```bash
+rg -n "_payload\.json|/_payload" .
+rg -n "routeRules|nitro.*cache|swr\s*:" nuxt.config.{ts,js,mjs}
+rg -n '"nuxt"\s*:\s*"(\^)?3\.(0\.|[1-9]|1[0-5])\.' package.json
+```
+
+**Unkeyed headers / query params processed but not keyed:**
+```bash
+rg -n "x-forwarded-host|x-forwarded-scheme|x-original-url|req\.headers\['x-host" --glob "*.{js,ts,py,rb,go,java}"
+rg -n "utm_|_method|req\.query\." . | rg -v "cache|key|vary"
+```
+
+**Cacheable empty/error responses (DoS class):**
+```bash
+rg -n "Cache-Control.*public|s-maxage" . | rg -n "json\(\{\}\)|status\s*\(\s*(4|5)\d\d\s*\)|NextResponse\.json\(\{\}\)"
+```
+
+## Related references
+
+- `denial_of_service.md` — cache-poisoning DoS as availability impact; prefer `web_cache_deception` when caching misconfiguration is the root cause.
+- `trust_boundary.md` — unkeyed `X-Forwarded-*` / `Host` trusted for URL generation or routing decisions.
 
 ---
 

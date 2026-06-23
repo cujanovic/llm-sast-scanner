@@ -115,6 +115,45 @@ Grep for query execution calls where the SQL string argument is built dynamicall
 - Error-based: `to_number`/`to_date` coercion failures, `XMLType` conversion errors
 - File: `UTL_FILE` with directory objects (requires privilege)
 
+### SQL-to-RCE Primitives (SAST)
+
+Dangerous even when embedded in **admin**, export, migration, or maintenance features — if **any** SQL fragment is tainted, these tokens in application-built strings are a **dangerous sink family** (escalation to OS command execution). See also `rce.md`.
+
+| Engine | Primitive tokens | Impact |
+|--------|------------------|--------|
+| MSSQL | `xp_cmdshell`, `sp_configure 'xp_cmdshell'`, `sp_OACreate`, `sp_OAMethod`, `OPENROWSET`, `OPENDATASOURCE`, linked-server `EXEC('...') AT` | Shell via `xp_cmdshell`; COM/OLE automation; remote query/exec |
+| MySQL | `INTO OUTFILE`, `INTO DUMPFILE`, `LOAD_FILE` + write path | Webshell or binary drop when `FILE` privilege and `secure_file_priv` allow |
+| PostgreSQL | `COPY ... TO PROGRAM`, `COPY ... FROM PROGRAM`, `CREATE FUNCTION ... LANGUAGE C` | OS command via `COPY PROGRAM`; arbitrary code in C language functions (superuser) |
+
+**VULN** — dynamic SQL containing RCE primitives (even "internal" tooling):
+
+```python
+cursor.execute(f"EXEC xp_cmdshell '{user_path}'")  # tainted fragment
+```
+
+```csharp
+context.Database.ExecuteSqlRaw("EXEC sp_configure 'xp_cmdshell', 1; " + adminInput);
+```
+
+```sql
+-- migration or seed script built from config/user input
+SELECT * INTO OUTFILE '/var/www/shell.php' FROM ...
+```
+
+**SAFE**:
+- Never enable or expose `xp_cmdshell`, OLE automation, or `COPY PROGRAM` in application SQL paths
+- Least-privilege DB account — no `FILE`, `SUPERUSER`, `sysadmin`, or linked-server execute
+- Parameterize all value positions; never concatenate user input into strings that reference these primitives
+
+**Grep seeds** (code, migrations, raw-SQL APIs — trace taint separately):
+- `xp_cmdshell`, `sp_configure\s*['\"]xp_cmdshell`, `sp_OACreate`, `sp_OAMethod`
+- `OPENROWSET`, `OPENDATASOURCE`, `EXEC\s*\(.*\)\s*AT\s`
+- `INTO\s+OUTFILE`, `INTO\s+DUMPFILE`
+- `COPY\s+.*\s+(TO|FROM)\s+PROGRAM`, `LANGUAGE\s+C`
+- Sink APIs: `execute(`, `executemany(`, `FromSqlRaw`, `ExecuteSqlRaw`, `exec_driver_sql`, `connection\.execute`, `sequelize\.query`, `RawSQL`, `objects\.raw`, `createNativeQuery`, `jdbcTemplate\.execute`
+
+Flag **LIKELY** when a primitive token appears in a dynamically built SQL string; escalate to **CONFIRM** when untrusted input reaches the concatenation/interpolation site.
+
 ## Vulnerability Patterns
 
 ### UNION-Based Extraction

@@ -77,15 +77,42 @@ A related class worth detecting independently of session storage: an application
 - "Internal / subrequest" markers: `X-Internal`, generic `X-Forwarded-*`, and framework-specific internal markers such as Next.js `x-middleware-subrequest`
 - Client-IP trust: `X-Forwarded-For`, `True-Client-IP`, `X-Real-IP` (for IP-only cases prefer the `xff_spoofing` tag)
 
-**Concrete instance — middleware-only authorization (Next.js `x-middleware-subrequest`)**: when authn/authz is enforced *only* in edge `middleware.ts`, a request the framework treats as an internal subrequest skips the middleware entirely. Generic lesson: **never enforce authorization solely at a layer that a client-supplied header can cause the request to bypass.** Re-derive identity from a server-trusted source and re-check authorization in the handler/route itself (defense in depth).
+**Concrete instance — middleware-only authorization (Next.js `x-middleware-subrequest`, CVE-2025-29927)**: when authn/authz is enforced *only* in edge `middleware.ts`, a client-supplied `x-middleware-subrequest` header causes the framework to treat the request as an internal subrequest and **skip middleware entirely** — including auth gates. Affected Next.js **11.1.4 through 15.2.2**; fixed in **15.2.3** and **14.2.25**. Generic lesson: **never enforce authorization solely at a layer that a client-supplied header can cause the request to bypass.** Re-derive identity from a server-trusted source and re-check authorization in the handler, Server Action, or Route Handler (defense in depth). Function-level escalation from middleware-only auth: `privilege_escalation.md`; path/proxy representation splits: `reverse_proxy_access_bypass.md`.
+
+**Package.json semver heuristic** — flag dependency when `next` satisfies vulnerable range and middleware is the sole auth layer:
+
+```bash
+rg -n '"next"\s*:\s*"' package.json package-lock.json pnpm-lock.yaml yarn.lock
+# Vulnerable if semver in [11.1.4, 15.2.3) on 15.x track or [11.1.4, 14.2.25) on 14.x track
+# Pair with: rg -l 'middleware' --glob 'middleware.{ts,js}'
+```
+
+```json
+// package.json — heuristic TRUE POSITIVE when middleware.ts is sole auth gate
+{ "dependencies": { "next": "15.1.0" } }
+```
+
+**Middleware-only auth anti-pattern (SAST)** — no `[Authorize]` / session re-check in the route handler, Server Action, or API route the middleware was meant to protect:
+
+```bash
+rg -n 'export\s+(async\s+)?function\s+middleware|NextResponse\.redirect|NextResponse\.next' middleware.ts
+# Then verify protected app/**/route.ts and page.tsx lack independent auth guard
+rg -L 'getServerSession|auth\(|verifySession|getSession' --glob 'app/**/{route,page,layout}.{ts,tsx}'
+```
 
 ```js
 // VULN — trusts a client header as proof of identity / internal origin
 if (req.headers['x-internal'] === '1') return next();   // any client can send this
 const userId = req.headers['x-user-id'];                // spoofable identity used for authz
-// VULN — authz ONLY in middleware; the route handler re-trusts it with no check of its own
+
+// VULN — authz ONLY in middleware.ts; route handler performs sensitive work with no re-check
+// Attacker: curl -H 'x-middleware-subrequest: middleware' https://app/admin
+export async function GET() {
+  return deleteAllUsers();   // no getServerSession() / role check here
+}
 ```
-**SAFE**: identity comes from a server-verified session/token re-derived per request; gateway-injected identity headers are explicitly stripped at the trust boundary before the app reads them; authorization is re-checked in the handler, not just in middleware/edge.
+
+**SAFE**: identity comes from a server-verified session/token re-derived per request; gateway-injected identity headers are explicitly stripped at the trust boundary before the app reads them; authorization is re-checked in every protected handler — not only in middleware/edge; upgrade `next` to a patched release.
 
 ## FALSE POSITIVE Rules
 
