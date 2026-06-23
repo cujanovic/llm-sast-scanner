@@ -116,6 +116,7 @@ Red flags at verification sites: no `algorithms` allowlist on asymmetric endpoin
 - scope/roles fully trusted from token: the server does not re-derive authorization; privilege inflation via claim manipulation when signature checks are weak
 - exp/nbf/iat not enforced or excessively broad clock skew tolerance; long-expired or not-yet-valid tokens are accepted
 - typ/cty not enforced: ID tokens accepted where access tokens are required (token confusion)
+- **account status not re-checked after token/credential validation**: a token, API key, or personal access token validates by signature/lookup but the handler never verifies the backing account is still `active` (`deactivated`, `blocked`, `disabled`, `state != 'active'`) before authorizing the request — deactivated/blocked accounts keep executing privileged operations. Common when the password/session login path enforces status but the token/API-key path skips it (`User.find_by_token(t)` → `ctx.current_user = user` with no `user.active?` guard; API-key branch missing the `before_action :check_user_active` applied to web sessions). Re-derive and enforce account status server-side on every auth path, not just interactive login.
 
 ### Token Binding, Claim Trust, and Replay Controls
 

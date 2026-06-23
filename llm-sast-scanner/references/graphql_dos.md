@@ -252,7 +252,7 @@ Non-spec-compliant or custom engines that expand fragments without cycle detecti
 
 **Grep**: custom fragment expansion; absence of `NoFragmentCycles` (graphql-js built-in) in forked parsers.
 
-**CVE-shape signal**: circular-fragment DoS in Agoo engine (CVE-2022-30288) — detectable via vulnerable package version in lockfiles + custom GraphQL server without cycle guard. Cross-ref `cve_patterns.md`.
+**CVE-shape signal**: circular-fragment DoS (e.g. Agoo, CVE-2022-30288) — the SAST-detectable shape is a custom/forked GraphQL server executing fragment spreads without a cycle guard (`NoFragmentCycles`).
 
 **SAFE**: rely on spec-compliant `graphql-js` / `libgraphqlparser` validation; verify `NoFragmentCycles` active.
 
@@ -288,7 +288,7 @@ new ApolloServer({
 });
 ```
 
-**CVE-shape**: array-batching DoS in WordPress GraphQL plugin (WPGraphQL) — manifest pin of affected versions + no batch cap. Cross-ref `cve_patterns.md`.
+**CVE-shape**: array-batching DoS (e.g. WPGraphQL) — the SAST-detectable shape is an HTTP handler that executes a JSON-array request body element-by-element with no `maxBatchSize`/operation-count cap.
 
 ### 9. Client-controlled pagination without server max
 
@@ -411,6 +411,22 @@ Complexity rules that **exclude** introspection meta-fields (`__schema`, `__type
 
 **SAFE**: disable introspection in production **or** include introspection in complexity; cap argument string lengths in validation rules.
 
+**Circular introspection (meta-schema recursion)**: the introspection meta-types are self-referential — `__Type.ofType → __Type`, `__Type.fields → __Field.type → __Type`, `__Type.interfaces/possibleTypes → __Type` — so a single introspection document can nest these meta-fields arbitrarily deep and force exponential resolution **regardless of the domain schema**. Bites when introspection is enabled and the depth/complexity rule is applied only to user types or exempts `__`-prefixed fields (the same exclusion above), so domain-schema depth limits never trip.
+
+```graphql
+query { __schema { types { fields { type { ofType { ofType {
+  fields { type { ofType { name } } } } } } } } }
+```
+
+**Grep seeds**:
+```bash
+rg -n "depthLimit|maxDepth|costAnalysis|complexity" --glob '*.{js,ts,py,go,java,cs,rb}' -C2
+# exemptions/ignores that skip introspection from limits
+rg -n "ignoreIntrospection|skip.*__|startsWith\\(\"__\"\\)|ignore.*introspection" --glob '*.{js,ts,py,go,java,cs}' -i
+```
+
+**SAFE**: disable introspection in production; if it must stay on, apply depth/complexity limits to introspection meta-fields too (do not exempt `__`), or serve introspection only from a static pre-validated document.
+
 ### 13. `@stream` / `@defer` incremental-delivery abuse
 
 Incremental delivery enabled without limits on concurrent streams, stream batch size, or total deferred fields — long-lived connections and unbounded partial execution.
@@ -431,6 +447,18 @@ Post: {
 ```
 
 **SAFE**: DataLoader per request; eager `includes` / JOIN in list resolvers; complexity limits as backstop.
+
+### 15. Multipart `Upload` orphan/excess-part exhaustion
+
+Stacks implementing the GraphQL multipart request spec (`Upload` scalar, `operations` + `map` form fields) where the parser **buffers every received file part to disk/RAM before checking whether it is referenced in `map`**. Unreferenced ("orphan") or oversized extra parts — plus reusing one `Upload` variable across many arguments to force repeated stream reads — drive memory/disk exhaustion from a single request.
+
+**VULN**:
+```js
+// graphql-upload with no caps: every part is processed/buffered before map validation
+app.use(graphqlUploadExpress()); // no maxFiles / maxFileSize
+```
+
+**SAFE**: set `maxFiles` and per-file `maxFileSize`; reject parts not referenced in `map`; treat each `Upload` variable as single-use; stream to bounded temp storage with cleanup. Cross-ref `graphql_injection.md` (Multipart `Upload` scalar abuse) and `arbitrary_file_upload.md`.
 
 ## Vulnerable vs Safe Examples
 
@@ -512,7 +540,7 @@ rg -n "createComplexityLimitRule\(\s*[5-9][0-9]{3,}|max_complexity:\s*[5-9][0-9]
 - `denial_of_service.md` — generic ReDoS, HTTP slow-client, zip/XML bombs, LLM token exhaustion (not GraphQL-specific).
 - `graphql_injection.md` — document injection, authz, CSRF, introspection disclosure (not structural DoS).
 - `regex_injection_redos.md` — search/filter args passed to regex in resolvers.
-- `cve_patterns.md` — WPGraphQL batching, Agoo circular-fragment (CVE-2022-30288), complexity-bypass CVE shapes in manifests.
+- `cve_patterns.md` — known-CVE methodology (sink+source pattern, fix-pattern variant sweep) for generalizing a confirmed DoS shape to its unfixed siblings.
 - `websocket_security.md` — subscription transport DoS / missing Origin (complements HTTP GraphQL limits).
 
 ## Core Principle

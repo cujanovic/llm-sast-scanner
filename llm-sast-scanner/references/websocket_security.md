@@ -183,6 +183,42 @@ rg -n "__schema|__type" --glob '*.{js,ts,py}' -B3 | rg -v "validation|block|disa
 
 **SAFE**: enforce introspection disable, authn/authz, depth/complexity limits, and operation allowlists at the **GraphQL engine** (validation rules / `execute` wrapper) so every transport shares one policy. Cross-ref `graphql_injection.md`.
 
+## GraphQL Subscriptions / WebSocket as CSRF-Bypassing State-Change Vector
+
+GraphQL subscriptions — and queries/mutations accepted on the same WebSocket transport (`graphql-ws`, `graphql_transport_ws`, legacy `subscriptions-transport-ws`) — can **mutate server state**, but the **WebSocket upgrade path does not pass through HTTP CSRF synchronizer tokens or SameSite POST restrictions**. CSRF defenses wired to HTML forms, JSON POST middleware, or `csrfPrevention` on the HTTP `/graphql` route are **invisible to WS frames**. If the server authenticates the upgrade with ambient cookies and `onConnect` omits an `Origin` allowlist check, a cross-origin page opens the socket and drives state-changing `mutation` payloads — CSWSH used as a **CSRF primitive** that bypasses HTTP-only anti-CSRF controls.
+
+Distinct from **GraphQL Transport Parity Bypass** (introspection/auth rules disabled on HTTP but reachable on WS) and generic **CSWSH** (cross-site socket hijack for read/exfil): this pattern is when HTTP mutations are CSRF-protected but the **same mutations succeed over WS without any CSRF token**.
+
+**Vulnerable conditions**:
+- HTTP `/graphql` POST requires CSRF token / custom header; `useServer` / `SubscriptionServer` accepts `mutation { deleteUser ... }` with cookie-only auth and no `Origin` validation in `onConnect`
+- `connectionParams` carries no auth token; identity inferred solely from upgrade cookies
+- Mutations sent in `graphql-ws` `subscribe` frames or legacy `"type":"start"` payloads without CSRF-equivalent gate
+
+**Grep seeds**:
+```bash
+rg -n "onConnect\s*:\s*(\(\)|\(\s*\)\s*=>|\(\s*ctx|\(\s*connectionParams)" --glob '*.{js,ts}' -A6 | rg -v "origin|Origin|reject|401|403"
+rg -n "useServer|SubscriptionServer" --glob '*.{js,ts}' -A10 | rg -n "mutation|execute|graphql"
+rg -n "connectionParams" --glob '*.{js,ts}' -B2 -A4
+rg -n "csrfPrevention|csrfProtection|ValidateAntiForgery" --glob '*.{js,ts}' -B3 -A5 | rg -n "graphql|useServer|ws"
+rg -n "onConnect|handleProtocols|verifyClient|CheckOrigin" --glob '*.{js,ts,go,java}' -A5
+```
+
+**VULN**:
+```js
+// VULN — CSRF on HTTP POST only; WS drives same mutation with victim cookies
+app.post('/graphql', csrfProtection, graphqlHttpHandler);
+useServer({
+  schema,
+  onConnect: () => true,  // no Origin check; cookie session from upgrade
+});
+// Attacker page: ws.send(JSON.stringify({
+//   type: 'subscribe', id: '1',
+//   payload: { query: 'mutation { deleteAccount { ok } }' }
+// }));
+```
+
+**SAFE**: validate `Origin` on the WebSocket upgrade (exact allowlist; reject missing/malformed); do not authenticate WS by ambient cookies alone — require a short-lived token in `connectionParams` validated in `onConnect`; apply the **same authorization** to mutations regardless of transport. Cross-ref `csrf.md`, `graphql_injection.md`.
+
 ## Missing Max Frame / Message Size (DoS)
 
 WebSocket libraries default to large or unlimited frame buffers. Without **`maxPayload`** (`ws`), **`maxMessageSize`** / **`max_size`** (Python `websockets`), or **`setMaxTextMessageBufferSize`** (Java), a single oversized text/binary frame can exhaust server memory.
@@ -220,6 +256,7 @@ const wss = new WebSocket.Server({ server });  // default maxPayload ~100MB — 
 - Per-message authz missing (handshake-only) on sensitive operations → **High/Medium**.
 - Privileged WS actions (`kick`, `ban`, role change) without per-message role check → **High**.
 - GraphQL subscriptions without `onConnect` auth → **High** (live data exfiltration).
+- GraphQL WS mutations bypassing HTTP CSRF controls (cookie auth, no Origin) → **High** (cross-site state change without CSRF token).
 - Message payload → SQL/command/SSRF/XML/file sink → severity per sink reference.
 - No `maxPayload` / message size limit → **Medium** DoS (cross-ref `denial_of_service.md`).
 - Broadcast XSS via WS → severity per `xss.md` (stored DOM XSS → High).
@@ -252,13 +289,13 @@ Confirmed when the cross-origin connection succeeds (HTTP 101) and returns the v
 
 ## Cross-References
 
-- `csrf.md` — CSWSH is the WebSocket analogue of CSRF; cookie-driven, cross-site.
+- `csrf.md` — CSWSH is the WebSocket analogue of CSRF; cookie-driven, cross-site; GraphQL WS mutations bypass HTTP CSRF tokens.
 - `cors_misconfiguration.md` — analogous origin-trust failure for `fetch`/XHR.
 - `cleartext_transmission.md` — `ws://` carrying tokens.
 - `xss.md` — message broadcast rendered into the DOM.
 - `sql_injection.md` / `rce.md` / `ssrf.md` / `xxe.md` / `path_traversal.md` — per-message server-side sinks.
 - `denial_of_service.md` — oversized frames / unbounded message buffers.
-- `graphql_injection.md` — unauthenticated GraphQL subscription transports; introspection/authz parity across HTTP and WS.
+- `graphql_injection.md` — unauthenticated GraphQL subscription transports; introspection/authz parity across HTTP and WS; CSRF-bypassing mutations over WS transport.
 - `idor.md` / `race_conditions.md` — per-message authorization and concurrency on WS streams.
 
 ## Core Principle

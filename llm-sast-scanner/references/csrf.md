@@ -137,6 +137,28 @@ app.get('/graphql', graphqlHandler);  // no token, no Content-Type gate
 
 **SAFE**: disallow GET (and HEAD) for mutations and other state-changing operations; require **`Content-Type: application/json`** plus synchronizer token or non-simple custom header (`X-CSRF-Token`, `X-Requested-With`) on cookie-authenticated routes; enable framework CSRF prevention (e.g. Apollo `csrfPrevention: true`); enforce the same policy on batch and persisted-query paths. Cross-ref `graphql_injection.md`.
 
+#### Subscription / WebSocket CSRF vector
+
+State-changing GraphQL operations over the **WebSocket subscription transport** bypass HTTP CSRF protections — synchronizer tokens, `csrfPrevention`, SameSite POST semantics, and custom-header gates apply to HTTP requests, not to framed WS messages after upgrade. Cookie-authenticated WS without `Origin` validation in `onConnect` lets a cross-origin page open the socket and send mutation payloads on behalf of the victim. Cross-ref `websocket_security.md` (GraphQL Subscriptions / WebSocket as CSRF-bypassing state-change vector), `graphql_injection.md` (Cross-Site WebSocket Hijacking / Transport Parity).
+
+**Grep seeds**:
+```bash
+rg -n "useServer|SubscriptionServer|graphql-ws|subscriptions-transport-ws" --glob '*.{js,ts}' -A8
+rg -n "onConnect|connectionParams" --glob '*.{js,ts}' -A4
+```
+
+**SAFE**: validate `Origin` on upgrade; require non-cookie token in `connectionParams`; enforce authz on WS mutations same as HTTP POST.
+
+#### Request smuggling / CRLF as CSRF or auth bypass
+
+CRLF injection or HTTP request smuggling in a **forwarded or proxied** GraphQL request can desync front-end vs back-end parsing so edge CSRF or auth controls apply to one view of the request while the backend executes another — e.g. unsanitized `query`, `variables`, or custom headers concatenated into forwarded request lines without neutralizing `\r`/`\n`. Treat user-controlled data placed into outbound proxy headers or raw request assembly as a smuggling risk that can reach state-changing operations without the intended CSRF token check. Cross-ref `http_response_splitting.md`, `smuggling_desync.md`.
+
+**Grep seeds**:
+```bash
+rg -n "proxy_pass|proxy_set_header|forward.*header" --glob '*.{js,ts,conf}' -B2 -A3 | rg -n "query|variables|GraphQL"
+rg -n "%0d|%0a|\\\\r|\\\\n|\\r\\n" --glob '*.{js,ts,py,java}' -B2 -A2 | rg -n "graphql|forward|proxy"
+```
+
 **CSRF-or-session OR-gate**: mutation gate `if (hasSession || hasCsrfToken) allow` where **both** the session and the CSRF token are freely obtainable by an anonymous client — CSRF token minted without login (public `csrfToken` query/mutation), or anonymous session from a bootstrap operation — so satisfying **either** branch is not real authentication. Also: CSRF token **not bound** to an authenticated session (cross-session reuse accepted). Cross-ref `graphql_injection.md` (Request Forgery / CSRF section).
 
 **Vulnerable conditions**:
@@ -200,6 +222,7 @@ res.setHeader('X-Content-Type-Options', 'nosniff');
 
 - Browsers automatically include cookies on WebSocket upgrade requests
 - Without server-side Origin enforcement, cross-site pages can establish authenticated WebSocket connections and trigger server-side actions
+- **GraphQL over WS**: subscription transports accept mutations that bypass HTTP CSRF tokens — see GraphQL CSRF section above and `websocket_security.md`
 
 ## Evasion Patterns
 

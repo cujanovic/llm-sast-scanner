@@ -194,7 +194,7 @@ references/smuggling_desync.md           — HTTP request smuggling / desync
 references/web_cache_deception.md        — Web cache deception / cache poisoning (cached personalized data, unkeyed-input poisoning)
 references/shared_client_cache_leak.md   — Cross-user leak via shared client caches / request dedup-coalescing / mutable-auth singletons / pooled-connection & thread-local reuse / module-global request state (in-process, all client libs & languages)
 references/dependency_confusion.md       — Dependency confusion candidate flagging (npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo)
-references/cve_patterns.md               — Known CVE patterns
+references/cve_patterns.md               — Known-CVE methodology (sink+source not version, fix-pattern variant sweep); generic sinks delegated to class refs (SAST, not SCA version matching)
 references/expression_language_injection.md — Expression language injection (SpEL / OGNL)
 references/jndi_injection.md             — JNDI injection (Log4Shell class)
 references/denial_of_service.md          — Denial of service / resource exhaustion
