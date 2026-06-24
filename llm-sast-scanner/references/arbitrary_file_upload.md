@@ -386,6 +386,32 @@ img.save(path, format='JPEG')  # drops foreign bytes/comments
 
 **Grep seeds**: `magic\.from_buffer`, `getimagesize`, `filetype\.guess`, `mimetype`/`content_type` check with no `Image\.open.*save` / `sharp\(` / `convert` re-encode downstream.
 
+### Shallow sniff: detectors read only a handful of bytes
+
+Type-sniff libraries are fast because they read *as little as possible*, so the "valid leading bytes" the attacker must preserve are often tiny — and bytes the sniffer never looks at are fully attacker-controlled. Example: the common Node `file-type` library identifies ISO-BMFF media (HEIC/AVIF/MP4/MOV) by checking only `ftyp` at offset 4 and a 4-byte brand at offset 8 — it **never validates the 4-byte box-size field at offset 0**. Those free bytes plus the unconstrained tail let one buffer be `image/heic` to the sniff **and** valid JavaScript/HTML/CSS/JSON/SVG to a consumer (e.g. open a `/*` JS block-comment or `<!--` HTML-comment over the magic, then append the real payload after a closing `*/`/`-->`). A passing content sniff is **necessary but not sufficient**; only a full decode-and-re-encode (or rejecting non-re-encodable input) actually proves the bytes are an image.
+
+### Verify-type vs serve-type consistency gap (the real defect)
+
+A polyglot only becomes exploitable when the type decided at **upload** (from bytes) drifts from the `Content-Type` chosen at **download**. The dangerous shape: the server sniffs bytes on upload but then derives the response `Content-Type` from the **filename extension** (or a stored client-supplied field) at serve time — so the same bytes verified as `image/heic` get served as `application/javascript`, `text/html`, `application/json`, or `image/svg+xml` depending on the extension the attacker registered, landing in a script / HTML / trusted-API / stylesheet sink.
+
+```javascript
+// VULN: type verified from bytes on upload, but served from attacker-controlled extension
+const detected = await FileType.fromBuffer(buf);            // sniffs ~12 bytes → image/heic
+if (!detected?.mime?.startsWith('image/')) return res.sendStatus(415);
+const ext = safeExt(req.body.filename);                     // attacker controls extension (.js/.html/.svg)
+// ... later, on download:
+res.setHeader('Content-Type', contentTypeFromName(filename)); // derived from extension, NOT verified bytes
+
+// SAFE: persist the verified type and serve exactly that; never trust extension/form Content-Type
+const detected = await FileType.fromBuffer(buf);
+if (!ALLOWED_IMAGE_MIME.has(detected?.mime)) return res.sendStatus(415);
+const stored = { bytes: reencodeImage(buf), mime: detected.mime }; // re-encode + pin verified mime
+res.setHeader('Content-Type', stored.mime);
+res.setHeader('X-Content-Type-Options', 'nosniff');           // block browser content-sniffing too
+```
+
+**Grep seeds**: `FileType\.fromBuffer|fileTypeFromBuffer|file-type`, response `Content-Type`/`setHeader` derived from `extname`/`path.extname`/`splitext`/filename rather than the persisted detected mime; presence of a sniff at upload but no re-encode and no pinned-mime store; missing `X-Content-Type-Options: nosniff` on user-content responses.
+
 ## Null-Byte and Extension Parsing Weaknesses
 
 **VULN patterns** — naive extension extraction from the original filename:

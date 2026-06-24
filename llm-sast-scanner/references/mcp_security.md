@@ -127,6 +127,18 @@ Grep: `Authorization.*arguments`, `userToken`, `access_token.*params`, `forward.
 - Local stdio server runs as full user with no sandbox while exposing command/file/network tools
 - Tool description or input schema is non-constant (runtime-assigned or mutated after registration), enabling a benign-at-approval/malicious-at-call rug-pull
 - A server issues `sampling`/`createMessage` requests built from tool output or external content, or a tool's metadata references/overrides another server's tools (cross-server shadowing)
+- **AI-only usage assumptions treated as security controls**: tool descriptions that *instruct* the model ("do not use local/internal URLs", "only call with public IDs") relied on as the access boundary. A direct client (see Open DCR below) ignores these guidelines entirely and calls tools with inputs the developers never anticipated — natural-language guardrails are documentation, not enforcement.
+
+## Open Dynamic Client Registration (DCR) attack surface
+
+When an MCP server fronts an OAuth 2.0 / OIDC authorization server, it commonly advertises a registration endpoint (`registration_endpoint` in `/.well-known/oauth-authorization-server` or `/.well-known/openid-configuration`, per RFC 7591/8414). If that `/register` endpoint is **open** (anyone can POST client metadata and get a usable `client_id` with no approval), the attacker controls fields that flow straight into the authorize/consent/token flow:
+
+- **Client-controlled `redirect_uri` → token theft / open redirect**: register with `javascript:` (DOM-XSS if the server does the final redirect client-side: `redirect_uri=javascript://allowed.host/%0aalert(origin)//` defeats naive hostname extraction), or with an attacker URL to steal the `code`. Even when redirect URIs are restricted to one allowed host, RFC-6749 §4.1.2.1 **error redirects** turn the authorize endpoint into an **open-redirect gadget** (trigger an error → `302 Location: <registered redirect_uri>?error=...`), chainable with SSRF/CSPT.
+- **`client_name` / `logo_uri` / `client_uri` reflected on the consent screen → stored XSS** when reflected into HTML/`<script>` (`client_name`=`</script>...`), and **SSRF** when the server fetches `logo_uri` server-side (internal/metadata endpoints).
+- **Missing / vague consent screen → 1-click ATO**: server authenticates the user then redirects to the registered `redirect_uri` with the `code` and no app-identity confirmation.
+- **Direct MCP access bypassing AI guardrails**: the attacker completes the flow themselves (register → authorize → exchange `code` for an access token, even reusing an *allowed* third-party redirect host and capturing the code), then connects to `/mcp` or `/sse` with `Authorization: Bearer …` and invokes every tool directly — reaching SSRF/file/command sinks behind tools that were "protected" only by AI-usage instructions.
+
+**Safe**: gate DCR (authenticated/approved registration or software statements); exact-match `redirect_uri` and **reject non-`http(s)` schemes** (no `javascript:`); HTML-encode all client metadata on consent pages and never reflect it into script context; always show an unambiguous consent screen naming the client; do not fetch `logo_uri`/`client_uri` server-side without an allowlist; enforce the same authZ on direct tool calls as on AI-mediated ones. **Grep seeds**: `registration_endpoint`, `/register`, `redirect_uris`, `logo_uri`, `client_uri`, `client_name`; consent template interpolating client fields; server-side fetch of `logo_uri`.
 
 ## Safe Patterns
 

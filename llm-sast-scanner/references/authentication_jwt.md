@@ -1,6 +1,6 @@
 ---
 name: authentication-jwt
-description: JWT and OIDC security testing covering token forgery, algorithm confusion, and claim manipulation
+description: JWT and OIDC security testing covering token forgery, algorithm confusion, kid/jku/x5u/jwk/x5c header injection and JKU allowlist bypass, JWE encryption-layer attacks (RSA1_5/CBC padding oracle, ECDH-ES invalid curve, PBES2 p2c DoS, GCM nonce reuse, zip decompression bomb, nested alg:none JWE→JWS confusion), ECDSA psychic signatures, OAuth/OIDC token-validation gaps (at+jwt typ confusion, ALBeast shared-signer binding, DPoP downgrade/ath), and claim manipulation
 ---
 
 # Authentication / JWT / OIDC
@@ -96,18 +96,41 @@ Red flags at verification sites: no `algorithms` allowlist on asymmetric endpoin
 - RS256→HS256 confusion: change alg to HS256 and use the RSA public key as the HMAC secret when algorithm pinning is absent
 - "none" algorithm acceptance: set `"alg":"none"` and omit the signature if libraries process it without rejection
 - ECDSA malleability/misuse: weak verification settings that accept non-canonical signatures
+- **Psychic signatures (ECDSA `r=s=0`)**: a signature whose `r` and `s` are both zero (e.g. base64url `MAYCAQACAQA`) verifies for *any* message under *any* key on ECDSA implementations that skip the `r,s ∈ [1, n-1]` range check — canonically CVE-2022-21449 on Java 15–18 (`java.security`/Nimbus/`jjwt` on a vulnerable JDK), but the *pattern* (not just that JDK) is the finding. SAST signal: ES256/ES384/ES512 verification running on a JDK in the 15–18 range without the patch, or any custom ECDSA verifier that does not reject zero/`>= n` `r`/`s`. Grep: `rg -n "ES256|ES384|ES512|EC.*verify|Signature\.getInstance\(\"SHA256withECDSA\"" --glob '*.java'` and check the target JDK version.
+
+### JWE (Encrypted Token) Attacks
+
+JWE is the encrypted JWT form (5 dot-separated parts: protected header, encrypted key, IV, ciphertext, tag). Beyond the JWS attacks above, the **key-management (`alg`) and content-encryption (`enc`) choices are themselves an attack surface**, and most are detectable from configuration/library use:
+
+- **`alg` not pinned on decryption**: the decryptor trusts the token's header `alg`/`enc` instead of an allowlist — the JWE analogue of alg confusion. Pin both `alg` and `enc` to the expected values before decrypting.
+- **RSA1_5 (RSA PKCS#1 v1.5) key wrapping → Bleichenbacher / Million-Message oracle**: any use of `RSA1_5` (vs `RSA-OAEP`/`RSA-OAEP-256`) is a padding-oracle risk; flag it outright.
+- **AES-CBC content encryption (`A128CBC-HS256`/`A256CBC-HS512`) padding oracle**: exploitable when decryption errors are distinguishable; prefer AEAD (`A256GCM`). Decrypt-then-MAC ordering or leaked padding errors are the signal.
+- **ECDH-ES invalid-curve / untrusted `epk`**: the ephemeral public key (`epk`) from the header is used in ECDH without validating the point is on the expected curve — leaks the static private key over repeated requests. Signal: ECDH-ES decryption that does not validate/whitelist the `epk` curve and point.
+- **PBES2 (`PBES2-HS256+A128KW`…) DoS via attacker-controlled `p2c`**: the iteration count `p2c` comes from the token header; an unbounded value (e.g. 10^9) makes one request burn CPU. Signal: PBES2 key-management with no upper bound enforced on `p2c`.
+- **AES-GCM IV/nonce reuse ("forbidden attack")**: reusing a 96-bit IV across two messages under the same key recovers the GHASH authentication key → tag forgery. Signal: static/counter IVs or app-managed nonces for `A*GCM` instead of fresh CSPRNG per encryption.
+- **`zip:"DEF"` decompression bomb**: JWE may DEFLATE-compress the payload before encryption; a token whose compressed body expands to gigabytes exhausts memory on decrypt (CVE-2024-33664, CVE-2024-21319 class). Signal: JWE decompression with no decompressed-size cap. Reject `zip` or bound the inflated size.
+- **JWE→JWS confusion (nested `alg:none`)**: the decryptor unwraps the JWE, finds a *nested* JWT, and trusts its claims **without verifying the inner signature** — an inner `alg:none` (or attacker-signed) token then bypasses auth entirely (pac4j-jwt CVE-2026-29000 class, CVSS 10.0). Signal: decrypt step followed by claim use without an explicit inner-JWS verification with a pinned algorithm.
+
+**Grep seeds**:
+```bash
+rg -n "RSA1_5|A128CBC-HS256|A256CBC-HS512|PBES2|ECDH-ES|p2c|epk|zip.*DEF|JsonWebEncryption|JWEObject|jwe\.decrypt|compactDecrypt" --glob '*.{java,kt,js,ts,py,go,rb,cs}'
+rg -n "RSA-OAEP|A256GCM|A128GCM" --glob '*.{java,kt,js,ts,py,go}'   # presence of safer choices
+```
+
+**SAFE**: pin `alg`+`enc` to an allowlist before decrypt; use `RSA-OAEP-256` (not `RSA1_5`) and AEAD `A256GCM` (not CBC); validate `epk` curve/point for ECDH-ES; cap `p2c` (e.g. ≤ 10^6) for PBES2; generate a fresh random IV per GCM encryption — never reuse; reject/limit `zip`; **after decrypting, verify the nested JWS with a pinned algorithm** before trusting claims; return a **single uniform error for every crypto failure** (bad padding/MAC/OAEP indistinguishable) so no decryption oracle exists.
 
 ### Header Manipulation
 
-- **kid injection**: path traversal `../../../../keys/prod.key`, SQL/command/template injection in key lookup, or references to world-readable files
-- **jku/x5u abuse**: host attacker-controlled JWKS/X509 chain; if not pinned or whitelisted, the server fetches and trusts attacker keys
-- **jwk header injection**: embed attacker JWK directly in the token header; certain libraries prefer the inline JWK over server-configured keys
-- **SSRF via remote key fetch**: exploit the JWKS URL retrieval mechanism to reach internal hosts
+- **kid injection**: path traversal `../../../../keys/prod.key`, SQL/command/template injection in key lookup, or references to world-readable files. Two extra primitives to flag: (a) **predictable-content file as the HMAC key** — pointing `kid` at a file whose bytes the attacker knows lets them sign with that value: `/dev/null` (empty key), `/proc/sys/kernel/randomize_va_space` (`"2"`), or a Docker-default `/etc/hostname`; (b) **command execution** when `kid` reaches a shell-capable API — e.g. Ruby `open("| whoami")` (leading pipe) → RCE; and **SSRF** when `kid`/key lookup fetches a URL (`http://169.254.169.254/…`, `http://127.0.0.1:6379/`)
+- **jku/x5u abuse**: host attacker-controlled JWKS/X509 chain; if not pinned or whitelisted, the server fetches and trusts attacker keys. **Allowlist-bypass shapes** when the URL check is substring/`endsWith`/`startsWith` rather than a parsed-host equality: userinfo `https://trusted.com@attacker.com/jwks`, subdomain suffix `https://trusted.com.attacker.com/jwks`, open redirect on the trusted host, backslash `https://trusted.com%5c@attacker.com`, fragment `https://attacker.com#trusted.com` (see `ssrf.md` / `open_redirect.md` for the full parser-confusion set). Even a non-forgeable fetch is **SSRF** (reaches internal hosts/metadata)
+- **jwk header injection**: embed attacker JWK directly in the token header; certain libraries prefer the inline JWK over server-configured keys (CVE-2018-0114 class — recurs in later libraries)
+- **x5c injection (self-signed cert)**: attacker puts a self-signed X.509 cert chain in `x5c`; if the library extracts the leaf public key but never validates the chain to a trusted CA, the forged token verifies. Signal: `x5c` consumed for verification without trust-store/chain validation
+- **SSRF via remote key fetch**: exploit the JWKS/`jku`/`x5u` URL retrieval mechanism to reach internal hosts
 
 ### Key and Cache Issues
 
 - JWKS caching TTL and key rollover: accepting obsolete keys, racing key rotation windows, and missing kid pinning that causes any matching kty/alg to be accepted
-- Mixed environments: identical secrets shared across dev/stage/prod; keys reused across tenants or unrelated services
+- Mixed environments / regions: identical signing secret shared across dev/stage/prod **or across geographic regions/instances**; keys reused across tenants or unrelated services. Consequence — tokens are **portable between instances**: a token minted where the attacker *can* register (a different region, or a dev/staging instance) verifies and authorizes on the target instance, because nothing in the token is bound to the issuing deployment. Aggravated when a lower environment is weaker (e.g. dev returns the OTP/verification code in the response or skips email verification), letting the attacker mint a victim-scoped token there and replay it to prod. Signal: one shared `JWT_SECRET`/keyfile across environments **and** no per-deployment `iss`/`aud` (or region/env claim) enforced on verify — bind tokens to the deployment or use distinct per-environment/per-region keys
 - Fallbacks: verification logic that succeeds when kid is not found by cycling through all keys or skipping verification entirely (implementation bugs)
 
 ### Claims Validation Gaps
@@ -123,6 +146,9 @@ Red flags at verification sites: no `algorithms` allowlist on asymmetric endpoin
 JWT verification that validates signature and `exp` but omits binding or replay checks still accepts cross-context tokens and stale replays. OAuth/OIDC **flow** misconfiguration (redirect URI, state, PKCE, code reuse) is covered in `references/oauth_oidc_misconfiguration.md` — this section covers **token-validation** gaps only.
 
 - **Cross-service / cross-app token acceptance**: token passes signature and `exp` but `aud`, `azp`, or `client_id` is not compared to this app's registered client/API identifier — a token minted for another client, microservice, or tenant is accepted
+- **Access-token type not pinned (`typ != at+jwt`)**: RFC 9068 requires access tokens to carry header `typ: "at+jwt"` (or `application/at+jwt`); a resource server that accepts an ID token (`typ: JWT`) where an access token is expected enables ID-as-access-token confusion (NGINX OIDC CVE-2024-10318 class). Signal: API token validation that checks signature/`aud` but never asserts `typ`
+- **Shared-infrastructure signer not bound (ALBeast-style)**: when many tenants share one regional signing infrastructure (e.g. AWS ALB + Cognito), a token the attacker minted in their *own* pool verifies cryptographically against *your* service. The header carries an issuer/`signer` identifier (ALB ARN) that must be compared to your own — verifying only the signature is insufficient. Signal: federated token validation that trusts the shared key without pinning the `signer`/issuer to this deployment
+- **DPoP / proof-of-possession not enforced**: `cnf.jkt`-bound (RFC 9449) access tokens are still accepted as plain Bearer (downgrade — drop the `DPoP` header / change `Authorization: DPoP` → `Bearer`), the proof's `ath` (access-token hash) is not checked (one proof reused with different tokens), or there is no server nonce (replay within the issuer's window). Signal: token acceptance path that ignores the `DPoP` header / `cnf` claim, or DPoP verification missing `ath`/`htm`/`htu`/nonce checks
 - **Unverified identity claims (nOAuth-style)**: account lookup, creation, or linking keyed on `email`, `preferred_username`, or `upn` from the token without requiring `email_verified === true` (or equivalent) — attacker-controlled IdP issues a token with victim email and unverified flag
 - **JTI replay window**: `jti` absent, predictable (numeric `0001`–`9999`), or not stored/checked in a replay cache — same token redeems multiple times within TTL
 - **`nbf` not enforced alongside `exp`**: `exp` validated but `nbf` skipped or `verify_nbf: false` — not-yet-valid tokens accepted when clock skew or staged issuance is abused

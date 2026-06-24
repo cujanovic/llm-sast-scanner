@@ -1,6 +1,6 @@
 ---
 name: oauth-oidc-misconfiguration
-description: OAuth 2.0 / OpenID Connect flow misconfiguration — weak redirect_uri validation, missing state/PKCE, authorization-code reuse, cross-client token acceptance, unverified email linking, implicit/ROPC grants, dynamic registration SSRF, and client-secret exposure (CWE-287 / CWE-346 / CWE-601)
+description: OAuth 2.0 / OpenID Connect flow misconfiguration — weak redirect_uri validation, missing state/PKCE, authorization-code reuse, token-exchange and refresh-token rotation race conditions, incomplete revocation (persistent access after revoke, silent re-approval), cross-client token acceptance, unverified email linking, scope manipulation (dropping email scope → absent/undefined email claim → ORM match-all wrong-user login), implicit/ROPC grants, dynamic registration SSRF, and client-secret exposure (CWE-287 / CWE-346 / CWE-362 / CWE-601 / CWE-613)
 ---
 
 # OAuth 2.0 / OIDC Misconfiguration (CWE-287 / CWE-346 / CWE-601)
@@ -16,7 +16,7 @@ OAuth 2.0 and OpenID Connect delegate authentication and authorization to an ide
 ## Source -> Sink Pattern
 
 - **Source**: HTTP query/body on authorize and callback — `redirect_uri`, `response_type`, `response_mode`, `state`, `code`, `client_id`, `code_challenge`, `code_challenge_method`; token endpoint — `grant_type`, `code`, `code_verifier`, `client_secret`; IdP profile/ID-token claims — `email`, `email_verified`, `sub`, `aud`, `azp`; dynamic registration JSON — `logo_uri`, `client_uri`, `redirect_uris`.
-- **Sink (misconfiguration)**: redirect URI validator that uses `startsWith`/`includes`/regex/prefix instead of set equality; callback handler that exchanges `code` without verifying `state` against session; token endpoint that omits PKCE verification or accepts `plain`; code store that does not delete/mark-used on first redemption; resource/login handler that trusts token claims without `aud`/`azp`/`client_id` match; `findOrCreateUser({ email })` ignoring `email_verified`; signup route allowing unverified local email later merged on social login; metadata advertising `response_type=token` or `grant_type=password`; server-side HTTP fetch of registration `logo_uri`/`client_uri`; SPA callback rendering token from URL hash without referrer stripping.
+- **Sink (misconfiguration)**: redirect URI validator that uses `startsWith`/`includes`/regex/prefix instead of set equality; callback handler that exchanges `code` without verifying `state` against session; token endpoint that omits PKCE verification or accepts `plain`; code store that does not delete/mark-used on first redemption; resource/login handler that trusts token claims without `aud`/`azp`/`client_id` match; `findOrCreateUser({ email })` ignoring `email_verified`; user lookup that feeds a possibly-absent `email` claim (attacker drops `email` from `scope`) into an ORM `where`/`findFirst`/`findOne` where `undefined`/`""` coerces to match-all/first-row; signup route allowing unverified local email later merged on social login; metadata advertising `response_type=token` or `grant_type=password`; server-side HTTP fetch of registration `logo_uri`/`client_uri`; SPA callback rendering token from URL hash without referrer stripping.
 - **Aggravating chain**: loose `redirect_uri` + missing `state` → authorization code interception; unverified email + pre-registration → account takeover; cross-client `aud` gap → token from attacker's registered app accepted by victim app.
 
 ## Recon Indicators (Grep)
@@ -50,6 +50,9 @@ rg -ni 'logo_uri|client_uri|registration_client_uri' .
 rg -ni 'email_verified|emailVerified' .
 rg -ni 'findOrCreate|find_or_create|linkAccount|link_account|mergeAccount' --glob '*.{js,ts,py,java,rb,php}'
 rg -ni 'profile\.email|claims\.email|userinfo\.email|id_token.*email' .
+# Scope-stripping → undefined/empty email reaching an ORM filter (Prisma/TypeORM coerce undefined → match-all)
+rg -n 'findFirst|findUnique|findOne|where:\s*\{[^}]*email' --glob '*.{js,ts}' -C1 | rg -i 'email'
+rg -ni 'where.*email.*undefined|email:\s*(profile|claims|userinfo)\.email|requestedScopes|scope.*split' .
 
 # ID token acceptance (flow binding only — crypto in authentication_jwt.md)
 rg -ni 'id_token|idToken|verify_id_token|decode_id_token' .
@@ -78,6 +81,11 @@ Then trace each hit: does redirect validation compare **full strings** against a
 9. **Dynamic registration SSRF**: authorization server fetches `logo_uri` or `client_uri` from registrant-controlled URL server-side without blocklist (internal metadata/metadata poisoning).
 10. **Client secret / ROPC**: `client_secret` in frontend env/ bundle; password grant enabled for public or general users.
 11. **ID token flow trust**: ID token used for session establishment without signature verification or without `iss`/`exp`/`nbf`/`aud` checks — brief; full JWT rules in `authentication_jwt.md`.
+12. **Refresh-token rotation race / no single-use**: the `grant_type=refresh_token` handler is not atomic, so **parallel redemptions of the same refresh token each mint a fresh access/refresh pair** instead of the first winning and the rest being rejected. With rotation the danger compounds — every concurrent call returns a *new* valid refresh token, so the attacker's token count grows per round and there is no failure case. Indicators: refresh redeem with no `SELECT … FOR UPDATE`/atomic `DELETE … RETURNING`/version check; rotation enabled without **reuse detection** (redeeming an already-rotated token should revoke the whole token family/chain, not just error).
+13. **Second / app-defined redirect target outside the OAuth protocol**: the provider's `redirect_uri` is validated correctly, but the app stuffs its *own* post-login destination into a custom param or into `state` (e.g. `state={"redirect_uri":"https://app/landing"}`, or a `next`/`rPath`/`returnTo` param) and then redirects there **without validating it** — because developers assume "the provider already checked redirect_uri." An attacker sets the app-defined target to their domain (often via an `@`/userinfo or relative→absolute trick) and the authorization `code`/token rides along. Anywhere the OAuth flow is *extended* with an extra redirect hop ("out of normal" custom implementations) needs its own allowlist check. Indicators: callback reads a URL/path from `state`/`next`/`returnTo`/`rPath` and passes it to `redirect()`/`location =` with no allowlist; `state` used as a data carrier rather than an opaque CSRF nonce.
+14. **`response_type`/`response_mode` manipulation to derail into a non-happy path**: swapping `response_type=code` → `id_token`, `token`, or a multi-value `code,id_token` (comma) pushes the app into an alternate/error branch where credentials land in the **URL fragment** or where the app falls back to redirecting by `Referer`. Combined with `prompt=none` (skips the account-chooser/consent that would reset the referrer) and an opener + 3xx hop (so the final hop's `Referer` is the attacker origin), the `code`/`token` leaks cross-origin. Indicators: callback handles multiple `response_type`/`response_mode` values; error/fallback branch redirects to `document.referrer`/`Referer`; no exact-match enforcement that the returned artifact type equals the one requested; client-side fragment forwarding (`location.hash` → `fetch`).
+15. **Incomplete revocation (persistence after revoke)**: when a user revokes an app's access, the server fails to invalidate the *full* set of artifacts, so the client keeps access. Three concrete shapes: (a) **race-minted tokens not all revoked** — only one of the access/refresh tokens issued from a single code is revoked, the others stay valid; (b) **outstanding authorization codes not invalidated** — an unredeemed (or silently re-obtained) code can still be exchanged for a new token *after* revocation; (c) **silent re-approval** — auto-approve / `prompt=none` / `approval_prompt` lets a malicious client mint a fresh code+token immediately after revoke (e.g. a hidden `<img src=".../authorize?...response_type=code">` re-issuing codes), defeating the revocation entirely. Revocation must cascade across the whole grant, not a single token row.
+16. **Scope manipulation → absent email claim → wrong-user login (ATO)**: the callback identifies the user by looking up the `email` returned in the IdP profile/ID token, but **`email` is attacker-removable from the requested `scope`** (drop `email`/`openid email` on the authorize URL). The provider then returns no email and the app receives `undefined`/`null`/`""`, which it passes straight into the user lookup. Two failure modes: (a) **ORM null/undefined coercion** — `prisma.user.findFirst({ where: { email: undefined } })` treats `undefined` as *no filter* and returns the **first user in the table** (TypeORM `findOne({ where: { email: undefined } })` and several query builders behave the same); (b) **empty-string match** — `where: { email: "" }` matches any account whose email column is blank (common when signup allows phone-only/SSO-only accounts). Either way the attacker is logged into an account they do not own; combined with profile-email-edit or account switching it generalizes to arbitrary takeover. Indicators: OAuth/OIDC callback that (i) does not assert the email claim is **present and non-empty** before lookup, (ii) does not require `email_verified === true`, and (iii) feeds a possibly-`undefined` value into an ORM `where`/`findFirst`/`findOne` that coerces undefined to "match-all". Fix: fail closed when the claim is missing/empty; validate the requested scope server-side; never let `undefined` reach a query filter (guard the value, or use APIs that reject undefined filters).
 
 ## Vulnerable vs Safe Code Examples
 
@@ -151,6 +159,52 @@ async function redeemCode(code) {
 ```
 
 ```javascript
+// VULN: refresh redeemed non-atomically + rotation with no reuse detection —
+//       parallel calls each mint a new valid pair; old token still works
+async function refresh(oldToken) {
+  const row = await db.query('SELECT * FROM refresh_tokens WHERE token = ?', [oldToken]);
+  if (!row) throw new Error('invalid');
+  return issueTokens(row);                       // race: N concurrent calls → N valid pairs
+}
+
+// SAFE: atomic single-use rotation; redeeming an already-rotated token = reuse →
+//       revoke the entire token family (grant), not just error
+async function refresh(oldToken) {
+  return db.transaction(async (tx) => {
+    const r = await tx.query(
+      'DELETE FROM refresh_tokens WHERE token = ? AND revoked = false RETURNING grant_id', [oldToken]);
+    if (!r.length) {                              // already consumed → token reuse detected
+      await tx.query('UPDATE oauth_grants SET revoked = true WHERE grant_id = (SELECT grant_id FROM refresh_tokens WHERE token = ?)', [oldToken]);
+      throw new Error('reuse_detected');
+    }
+    return issueTokens(r[0]);
+  });
+}
+```
+
+```javascript
+// VULN: revoke deletes ONE access token row — leaves race-minted siblings,
+//       outstanding authorization codes, and re-consent untouched (persistence)
+async function revokeApp(userId, clientId) {
+  await db.query('DELETE FROM access_tokens WHERE user_id=? AND client_id=? LIMIT 1', [userId, clientId]);
+}
+
+// SAFE: revocation cascades over the WHOLE grant — every access+refresh token
+//       derived from it AND any unredeemed authorization codes; require fresh
+//       consent afterward (no silent prompt=none re-grant)
+async function revokeApp(userId, clientId) {
+  await db.transaction(async (tx) => {
+    const g = await tx.query('SELECT grant_id FROM oauth_grants WHERE user_id=? AND client_id=?', [userId, clientId]);
+    const ids = g.map(r => r.grant_id);
+    await tx.query('DELETE FROM access_tokens   WHERE grant_id = ANY(?)', [ids]);
+    await tx.query('DELETE FROM refresh_tokens  WHERE grant_id = ANY(?)', [ids]);
+    await tx.query('DELETE FROM auth_codes      WHERE grant_id = ANY(?)', [ids]); // outstanding codes too
+    await tx.query('UPDATE oauth_grants SET revoked=true, consent_required=true WHERE grant_id = ANY(?)', [ids]);
+  });
+}
+```
+
+```javascript
 // VULN: accept any signed ID token — cross-app token
 const payload = jwt.decode(idToken);
 req.session.userId = payload.sub;
@@ -177,6 +231,25 @@ async function onOAuthProfile(profile) {
   let user = await User.findOne({ email: profile.email, emailVerified: true });
   if (!user) user = await User.create({ email: profile.email, emailVerified: true });
   return user;
+}
+```
+
+```javascript
+// VULN: attacker drops `email` from OAuth scope → profile.email is undefined →
+//       Prisma treats `where: { email: undefined }` as NO filter and returns the FIRST user.
+//       Empty string ("") instead would match any account with a blank email column.
+async function loginWithOAuth(profile) {
+  const user = await prisma.user.findFirst({ where: { email: profile.email } });
+  req.session.userId = user.id;          // logged in as an arbitrary / blank-email account
+}
+
+// SAFE: fail closed when the claim is missing/empty and require it verified;
+//       never let undefined/"" reach the query filter.
+async function loginWithOAuth(profile) {
+  if (profile.email_verified !== true || !profile.email) throw new Error('email claim required');
+  const user = await prisma.user.findFirst({ where: { email: profile.email, emailVerified: true } });
+  if (!user) throw new Error('no matching account');
+  req.session.userId = user.id;
 }
 ```
 
@@ -209,6 +282,8 @@ def register_client(body):
 - **State + nonce**: CSPRNG `state` stored server-side; single use; OIDC `nonce` echoed in ID token per spec.
 - **PKCE**: require for public clients; only `S256`; bind challenge to authorization request record; verify at token endpoint.
 - **Authorization code**: short TTL (minutes); cryptographically random; delete on successful exchange inside a transaction/lock.
+- **Refresh tokens**: redeem atomically (single-use); rotate on every use; implement **reuse detection** — a redeemed/rotated token presented again revokes the whole token family. Bind each token to a grant id so the family can be revoked together.
+- **Revocation completeness**: revoke by **grant**, not by single token row — cascade to all access *and* refresh tokens derived from the grant, plus any unredeemed authorization codes; set the grant to require fresh consent so `prompt=none`/auto-approve cannot silently re-mint a code+token. (The RFC requires that detecting code/refresh reuse SHOULD revoke all tokens issued from it.)
 - **Token binding**: enforce `aud`/`azp`/`client_id` match app registration on every token acceptance path; reject tokens from other OAuth clients even if signature valid.
 - **Account linking**: require `email_verified === true`; block local signup with IdP-managed domains when SSO is offered; on link, require step-up auth and rotate sessions.
 - **Flows**: authorization code only; no implicit; no ROPC for user authentication; confidential secrets only on server.
@@ -224,6 +299,8 @@ def register_client(body):
 | Missing/weak `state` on login/linking callback | **High** — CSRF account binding |
 | Missing PKCE on public client + predictable redirect | **High** |
 | Authorization code reuse / no TTL | **High** |
+| Refresh-token rotation race / no single-use / no reuse detection | **High** — token multiplication, no failure case |
+| Incomplete revocation — race-minted tokens or outstanding codes survive revoke; silent re-approval | **High** — persistent access after user revokes |
 | Cross-client token acceptance (`aud`/`azp` not checked) | **High** |
 | Account create/link without `email_verified` | **High** — account takeover |
 | Pre-registration stub + social link merge | **High** |
@@ -234,7 +311,7 @@ def register_client(body):
 | Missing `Referrer-Policy` on callback only | **Low–Medium** (chain-dependent) |
 | ID token decode-only at callback | **Critical** if exploitable — delegate severity to `authentication_jwt.md` |
 
-Downgrade when: exact redirect list enforced, state/PKCE/nonce verified, codes single-use, tokens audience-bound, email_verified enforced, code-only flow, secrets server-only.
+Downgrade when: exact redirect list enforced, state/PKCE/nonce verified, codes single-use, refresh tokens rotated atomically with reuse detection, revocation cascades by grant, tokens audience-bound, email_verified enforced, code-only flow, secrets server-only.
 
 ## Common False Alarms
 
@@ -242,6 +319,8 @@ Downgrade when: exact redirect list enforced, state/PKCE/nonce verified, codes s
 - `state` generated server-side, stored in session, cleared after use, mismatch returns error.
 - PKCE enforced with `S256` only; `plain` rejected.
 - Authorization code deleted or marked used in same transaction as token issuance.
+- Refresh tokens redeemed atomically and rotated with reuse detection (presenting a rotated token revokes the family).
+- Revocation cascades by grant id over all access/refresh tokens and outstanding codes, and forces re-consent (the OAuth library/IdP — e.g. a managed provider — handles this; confirm the custom revoke handler isn't a single-row delete before flagging).
 - `aud`/`client_id` checked after proper JWT verification.
 - `email_verified` explicitly required before link/create.
 - `client_secret` referenced only in server-side config (not bundled).
@@ -252,6 +331,7 @@ Downgrade when: exact redirect list enforced, state/PKCE/nonce verified, codes s
 
 - `authentication_jwt.md` — JWT/OIDC **cryptographic** verification, algorithm confusion, `kid`/`jku`, claim validation (`exp`, `iss`, `aud`, `nbf`); not duplicated here.
 - `csrf.md` — OAuth `state` as CSRF token; constant-state anti-patterns.
+- `race_conditions.md` — generic concurrency patterns (TOCTOU, missing lock/atomicity) behind code/refresh token-exchange races.
 - `open_redirect.md` — attacker-controlled redirect destinations; often chained with loose `redirect_uri`.
 - `ssrf.md` — server-side fetch of `logo_uri`/`client_uri` during dynamic client registration.
 - `session_fixation.md` — session rotation after OAuth callback / account linking.

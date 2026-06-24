@@ -501,6 +501,7 @@ A *gadget read* is any expression that reads a property which can fall through t
 | Default function parameter | `function init(opts = {}) {…opts.x}` / `({ timeout = 30 } = opts)` | The `= {}` / `= default` object still inherits polluted keys; every later `opts.x` read is a gadget. |
 | `??` / `||` fallback | `const u = opts.returnUrl ?? '/'` | A polluted `returnUrl` short-circuits the fallback → reaches `location.assign`, `fetch`, `new Worker`, etc. |
 | `for…in` over a config object | `for (const k in cfg) apply(k, cfg[k])` | Enumerates inherited keys (also a merge sink — see above). |
+| Computed / bracket access | `headers['if-modified-since']`, `map[ext]`, `registry[userKey]` | A lookup into a map/registry/header object by a key that may be **absent** falls through to the polluted prototype and returns the injected value instead of `undefined` — distinct from dot access because the key is often *dynamic* (so name-based review misses it), and a preceding `'x' in map` guard does **not** save you (the `in` test is itself polluted). |
 
 ```bash
 # Gadget-read candidates (pair with a confirmed pollution source + a sensitive use)
@@ -508,6 +509,7 @@ rg -n "['\"][A-Za-z_][\w-]*['\"]\s+in\s+\w+" --glob '*.{js,jsx,ts,tsx}'         
 rg -n '(const|let|var)\s*\{[^}]*=[^}]*\}\s*=' --glob '*.{js,jsx,ts,tsx}'          # destructuring defaults
 rg -n '\([^)]*=\s*\{\s*\}[^)]*\)' --glob '*.{js,jsx,ts,tsx}'                      # default {} parameters
 rg -n '\w+\.\w+\s*(\?\?|\|\|)\s*' --glob '*.{js,jsx,ts,tsx}'                      # obj.x ?? / || default
+rg -n '\w+\[[A-Za-z_$][\w$]*\]' --glob '*.{js,jsx,ts,tsx}'                        # obj[dynamicKey] map/registry lookup (noisy; confirm key may be absent)
 ```
 
 These read patterns are intentionally broad (they also match benign code) — treat a hit as a gadget only when (1) the object is reachable from a proven pollution source and (2) the read drives HTML/URL/script execution or a security decision (auth flag, feature gate, redirect target). This is exactly the candidate-then-confirm model dynamic gadget-finders use.

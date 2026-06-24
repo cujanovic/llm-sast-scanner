@@ -88,6 +88,25 @@ Automated checks flag **framework CSRF protection disabled or weakened**, not pe
 - When a server parses JSON from `text/plain` or form-encoded bodies, craft parameters that reconstruct the expected JSON structure
 - Some frameworks accept JSON keys expressed as form fields (e.g., `data[foo]=bar`) or handle duplicate keys permissively
 
+### Content-Type is not a CSRF defense (parse-as-JSON-regardless bypasses)
+
+A `Content-Type: application/json` body normally triggers a CORS preflight, so many apps treat "we only parse JSON" as implicit CSRF protection. That collapses whenever the body parser produces JSON for a request the browser still classifies as **simple** (no preflight). Three source-detectable shapes:
+
+- **Missing `Content-Type` ⇒ framework defaults to JSON.** Some frameworks parse the body as JSON when *no* `Content-Type` header is present. An attacker sends the JSON body inside a `new Blob([...])` with no type, so the browser attaches **no** `Content-Type` → simple request, no preflight, parsed as JSON. The *absence* of a header is more permissive than sending one.
+  ```javascript
+  // VULN (server): no content-type ⇒ treat as JSON
+  if (!request.headers.get('content-type')) body = await request.json();
+  // Attack (browser): Blob with no type ⇒ no Content-Type header ⇒ simple request
+  fetch('https://target/profile/update', { method:'POST', credentials:'include',
+    body: new Blob([JSON.stringify({ email:'attacker@evil.test' })]) });
+  ```
+- **Parse-everything-as-JSON.** Body-parser configured to ignore the declared type, e.g. Express `express.json({ type: () => true })` (or `type: '*/*'`). Every request body is JSON-parsed, so any simple-content-type request reaches the handler as a parsed object.
+- **Browser safelist drift / blocklist incompleteness.** Content-type-based defenses that **blocklist** the three spec "simple" types (`application/x-www-form-urlencoded`, `multipart/form-data`, `text/plain`) are incomplete by construction: a blocklist can only reject types it knows. Browsers have shipped additional non-preflighted content types beyond the WHATWG-spec three (e.g. a Chromium ads-API type), so a request carrying an unlisted but browser-safelisted `Content-Type` slips past both the preflight and the blocklist while the server still parses it. This also enables **GET-only** cross-origin GraphQL/query execution → **XS-Leak** (timing/size oracle) even when mutations are POST-gated.
+
+**SAFE**: never rely on content-type checks alone. Require an anti-CSRF token (or a custom header that *forces* a preflight, e.g. `X-Requested-With` validated server-side), validate `Origin`/`Referer` against an allowlist, and set `SameSite=Lax/Strict` cookies. Treat any "we only parse JSON" comment near a state-changing handler with a permissive/declared-type-ignoring parser as a **VULN**.
+
+**Grep seeds**: `express\.json\(\{\s*type:` (`() => true`, `'\*/\*'`); `if not content_type`/`if (!content-?type)` followed by JSON parse; CSRF middleware built as an allow/deny list of content types (`text/plain`, `urlencoded`, `multipart`) with no token/Origin check; `request.json()` reached without a token gate.
+
 ### Login/Logout CSRF
 
 - Force a victim logout to invalidate existing CSRF tokens, then chain a login CSRF to bind the victim's browser to an attacker-controlled account
