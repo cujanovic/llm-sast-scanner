@@ -10,7 +10,7 @@ description: >
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.5.0"
+  version: "1.6.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -54,12 +54,23 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 
 Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-scanner/SKILL.md). Load
 reference files from its `references/` directory ON DEMAND, per pass — only the subset relevant to the
-current pass's analysis lens (see LOOP CONTROL), rather than all 82 at once. As the lens rotates across
+current pass's analysis lens (see LOOP CONTROL), rather than all 91 at once. As the lens rotates across
 passes, every vulnerability class gets covered, without holding all references in context simultaneously.
 Following the base skill's read-once discipline, keep the current pass's lens references loaded while you read
 each file so all of that pass's classes are evaluated in a single read. All step numbers (Step 1-6), the Judge
 protocol, the false-positive guardrails, the severity model, and the report structure are defined there and
 MUST be used.
+
+## Context & cache efficiency
+
+The agent runtime (not this skill) performs LLM prompt caching, but a cache only hits when the prompt **prefix is stable and byte-identical across calls**. Long multi-pass, multi-subagent runs are exactly the high-cost / high-cacheability case, so structure every prompt *static-first, dynamic-last*:
+
+- **Identical static preamble across all lens subagents.** The **Convergence Loop Procedure**, GROUND RULES, REFERENCE LOADING, and LOOP CONTROL text MUST be byte-identical for every lens (and across re-runs). Pass the per-lens variables (lens name, class list, results-file path) as a short **tail block appended after** that shared text — never interleaved into it. Six lenses sharing one large identical prefix lets the runtime serve it from cache instead of reprocessing it six times.
+- **Keep volatile tokens out of the prefix.** Do not bake values that change every call (wall-clock timestamps, `git rev-parse HEAD`, run IDs, counters) into the analysis prompt. Compute the report timestamp and SHA only at OUTPUT / Project-Memory time (the end), not in the loop body. Date-only is stable for a day; clock time would invalidate the cache continuously.
+- **Deliver dynamic context as tool results at the tail, not inline.** Read `architecture.md`, `project-memory.md`, and source files **by path** (their changing contents then arrive as tool output at the end of context) rather than pasting their text into the static instruction prefix.
+- **Append, don't rewrite, working state.** Extend the ledger, coverage map, and results files by appending; editing earlier context invalidates every cached block after the edit point.
+
+This "stable prefix, dynamic at the tail" discipline complements the base skill's read-once / load-references-once rules: it lowers token cost on long runs **without changing what gets analyzed or the coverage guarantees**.
 
 ## Parallel Orchestration (default — `mode=parallel`)
 
@@ -82,7 +93,10 @@ this to finish.
 ### Step D2 — Parallel convergence loops (one subagent per lens)
 
 Start **one subagent per lens**, all **in parallel**. Skip any lens whose deep results file already exists.
-Give each subagent this instruction (substitute the lens, class list, and results file from the table):
+Give each subagent the instruction below as a **byte-identical static preamble**, then append the three
+per-lens variables (lens, class list, results file from the table) as a short **tail block** — do not splice
+those variables into the middle of the shared text (see **Context & cache efficiency**), so all lens
+subagents share one cacheable prefix:
 
 > Read `.llm-sast-scanner-cache/architecture.md` for context and `.llm-sast-scanner-cache/project-memory.md` as **hints,
 > never authority** (base skill's **Project Memory Protocol**: never skip a line or auto-dismiss a class; a
@@ -248,7 +262,7 @@ cap of 10; NO adv inside the loop)
   crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
   passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
 supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
-pass's lens (not all 82 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
+pass's lens (not all 91 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
 applicable class — every class on the stack-gated allowlist (see REFERENCE LOADING) — in all six lens groups
 from the Step D2 table, including the cloud/infrastructure and web-platform classes (IaC, Kubernetes/cloud,
 CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-chain) whenever their files
