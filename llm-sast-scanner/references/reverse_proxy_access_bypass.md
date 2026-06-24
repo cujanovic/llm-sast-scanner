@@ -10,7 +10,7 @@ Authorization fails when the **path the access-control layer evaluates** differs
 ## What It Is / Is Not
 
 - **Is**: auth middleware, gateway policy, or proxy `location`/`allow` block keyed on one path form while routing/upstream selection uses another — including trust of client-supplied rewrite/forward headers for authz, normalization mismatches (`..;/`, `%2e%2e`, `%2f`, `;/`, trailing dot, case variants, format suffixes, double slashes), stale parallel API mounts (`/v1` without the guard present on `/v3`), and Referer/Origin-based gates.
-- **Is not**: generic missing role check on the same canonical path (`privilege_escalation.md` — BFLA when path is agreed); object-level IDOR (`idor.md`); path traversal to read arbitrary files (`path_traversal_lfi_rfi.md` — filesystem escape, not ACL desync); HTTP request smuggling/desync (`http_request_smuggling.md` — byte-level framing); spoofing identity headers without a path split (`trust_boundary.md`).
+- **Is not**: generic missing role check on the same canonical path (`privilege_escalation.md` — BFLA when path is agreed); object-level IDOR (`idor.md`); path traversal to read arbitrary files (`path_traversal_lfi_rfi.md` — filesystem escape, not ACL desync); HTTP request smuggling/desync (`smuggling_desync.md` — byte-level framing); spoofing identity headers without a path split (`trust_boundary.md`).
 - **Highest signal** when repo contains both (a) an auth guard on `req.path`/`request.uri`/`HttpContext.Request.Path` and (b) routing/proxy logic that reads `x-original-url`, `x-rewrite-url`, `x-forwarded-prefix`, or applies different normalization than the guard.
 
 ## Source -> Sink Pattern
@@ -193,7 +193,7 @@ location /static/ {
 - `trust_boundary.md` — client-supplied headers trusted as identity or internal-origin markers; middleware-only auth.
 - `nginx_security.md` — `location`/`alias`/`try_files`/`auth_request` misconfiguration, `merge_slashes`, path confusion at the edge.
 - `path_traversal_lfi_rfi.md` — filesystem escape via alias/normalization (often chained with proxy ACL bypass).
-- `http_request_smuggling.md` — byte-level front/back desync (distinct from path-string mismatch but similar impact).
+- `smuggling_desync.md` — byte-level front/back desync (distinct from path-string mismatch but similar impact).
 - `web_cache_deception.md` — path-suffix/normalization at CDN diverging from origin auth.
 - `client_side_path_traversal.md` — frontend path decoding desync (client-side cousin of server path/auth mismatch).
 

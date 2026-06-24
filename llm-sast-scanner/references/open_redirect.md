@@ -1,6 +1,6 @@
 ---
 name: open-redirect
-description: Open redirect and unvalidated forward detection (CWE-601)
+description: Open redirect and unvalidated forward detection (CWE-601), including allowlist/parser-confusion bypasses — protocol-relative, multiple slashes, backslash, userinfo @, encoded host, IDN/Unicode homoglyph, and bidi code-point evasions
 ---
 
 # Open Redirect (CWE-601)
@@ -60,6 +60,7 @@ return redirect(url)
 ```
 
 - **Exact host match**: allowlist compares parsed host to full hostname — never suffix/substring/`endsWith`/`contains` on the raw string
+- **Normalize before comparing**: decode percent-encoding, IDNA/punycode-normalize the host, and reject backslashes, multiple leading slashes, and control/non-ASCII bytes **before** the host check — so `///`, `\`, `%2e`, `。`/`｡`, and bidi/RTL code points cannot move the effective host past the allowlist
 - **Authorization gate**: verify the authenticated subject may reach the mapped or allowlisted destination (forward/redirect)
 - **External interstitial**: off-domain targets pass through a confirmation page; `Location` only set after explicit user consent
 - **PHP**: always `exit`/`die` immediately after `header("Location: ...")` to prevent post-redirect logic execution
@@ -77,6 +78,17 @@ return redirect(url)
 - **CRLF in redirect value**: `%0d%0a` or literal `\r\n` embedded in param — flag taint reaching `Location`; classify as `http_response_splitting` only when CR/LF breaks header structure
 - **Multi-layer encoding**: `%252f%252fevil.com` (double-encoded `//`), `\u002f\u002fevil.com`, `%5c%65vil.com` (encoded `\e`)
 - **Mixed separators**: `/\/evil.com`, `//evil.com%2f@trusted.com` — parser/normalizer divergence vs naive prefix checks
+- **Multiple leading slashes**: `///evil.com`, `////evil.com`, `/////evil.com` — browsers collapse the extra slashes and treat the value as protocol-relative, while a guard that inspects only the first one or two characters (`startsWith("/")` and `!startsWith("//")`) passes it
+- **Backslash as authority separator**: browsers normalize `\` to `/`, so `\\evil.com`, `\/\/evil.com`, `/\/evil.com`, `//\/evil.com` all resolve to an off-site protocol-relative target that slash-only checks miss
+- **Parser-confusion via userinfo delimiters**: the validator and the browser disagree on where the host ends. `https://trusted.com#@evil.com`, `https://trusted.com?@evil.com`, `https://trusted.com:80#@evil.com`, `https://trusted.com;@evil.com`, a bare leading `@evil.com`, multiple `@` (`a@trusted.com@evil.com`), and encoded forms (`%40`, `%23`, `%3F`, Unicode small semicolon `﹔`) move the real host past a prefix/`contains` allowlist
+- **Encoded host metacharacters**: `%2e` / double-encoded `%252e` for the dot (`trusted.com%2eevil.com`), `%2f`/`%5c` inside the host, and `%40` for `@` — decode server-side to push the effective host outside an allowlisted prefix
+- **Scheme obfuscation**: colon-only scheme with no slashes (`https:evil.com`, `http:evil.com`), encoded scheme colon (`https%3A/evil.com`), and `javascript:`/`data:` schemes hidden via HTML entities (`javascript&#58;`, `&colon;`, `&Tab;`/`&NewLine;`), `\xNN`/`\uNNNN`/octal `\NNN` escapes, or embedded newlines/tabs (`java%0ascript:`, `java%09script:`) — bypass denylists matching the literal scheme string
+- **IDN / Unicode host homoglyphs**: full-width or alternative code points that a parser maps back to ASCII — e.g. ideographic full stop `。` (`%E3%80%82`) or half-width `｡` used as the dot, full-width letters, and homoglyph domains — defeat an exact-string host compare unless the host is IDNA/punycode-normalized first
+- **Bidi / line-separator code points**: right-to-left override `%E2%80%AE`, line/paragraph separators `%E2%80%A8` / `%E2%80%A9`, plus `%a0` / `%19` / `%01` control bytes inserted into the scheme or userinfo to spoof the visible host or break a `javascript:` filter
+- **Control / invalid bytes in host**: `%00`, `%FF`, raw tab/newline (`%09`/`%0a`/`%0d`), and unpaired surrogates around the `@` — exploited where the validator stops at the byte but the browser's parser does not
+- **IP-address host encodings** (when the allowlist is IP-based): decimal (`http://3627734734`), hex (`http://0xd8.0x3a.0xd6.0xce`), octal (`http://0330.072.0326.0316`), and IPv6-mapped (`http://[::ffff:127.0.0.1]`) forms — see `ssrf.md` for the full IP-encoding matrix
+
+**SAST principle for all of the above**: any allowlist/denylist applied to the **raw string** (prefix, suffix, `contains`, regex) is bypassable because the validator and the browser's URL parser disagree on scheme/host boundaries. Safe validation parses the value with a spec-compliant parser (WHATWG URL / `java.net.URI` / `urlparse`), **IDNA/punycode-normalizes the host**, then compares the parsed host against an exact allowlist and rejects any non-`http(s)` scheme, backslash, or control character.
 
 ## Detection Indicators (grep)
 
@@ -182,6 +194,10 @@ curl -s -D- 'https://TARGET/redirect?PARAM=data:text/html,<script>alert(1)</scri
 ```bash
 curl -s -D- 'https://TARGET/redirect?PARAM=https:evil.com'
 curl -s -D- 'https://TARGET/redirect?PARAM=/\evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=///evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET#@evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET%2eevil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=//evil%E3%80%82com'
 curl -s -D- 'https://TARGET/redirect?PARAM=//trusted.example/path/../@evil.com'
 ```
 

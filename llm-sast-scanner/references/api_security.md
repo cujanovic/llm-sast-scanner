@@ -1,6 +1,6 @@
 ---
 name: api_security
-description: API/REST/web-service layer detection — excessive data exposure, missing rate limits, endpoint inventory gaps, transport and content negotiation misconfig, and absent response schema filtering
+description: API/REST/web-service layer detection — excessive data exposure, missing rate limits, endpoint inventory gaps, transport and content negotiation misconfig, absent response schema filtering, and server-side parameter pollution (argument injection into internal/upstream API calls)
 ---
 
 # API / REST / Web-Service Security
@@ -21,6 +21,7 @@ API-layer weaknesses live in route registration, request/response handlers, seri
 - **Content-Type / Accept mishandling**: accepting any body without validating `Content-Type`; echoing `Accept` into `Content-Type`; no 415/406 on unsupported media types
 - **JSON / AJAX response weaknesses**: top-level JSON arrays (legacy hijacking surface), string-concatenated JSON, missing `Content-Type: application/json`, sensitive fields in query strings on GET API routes
 - **HTTP verb handling gaps**: routes registered without method allowlist; handlers that ignore `req.method`; method-override headers processed without guard (see `http_method_tamper.md` for CSRF overlap)
+- **Server-side parameter pollution (argument injection into internal calls)**: user input concatenated into a server-side request to an *internal/upstream* API (query string, form body, REST path, or JSON/XML) without URL-encoding/validation, letting an attacker inject delimiters (`&`, `#`, `=`, `/`) to append, override, truncate, or re-route the internal request (CWE-88)
 - **API security misconfiguration**: missing `Cache-Control: no-store` on sensitive JSON; absent HSTS on HTTPS API; debug/swagger/openapi UI enabled in production router
 
 **What it is NOT**
@@ -94,6 +95,62 @@ rg -n "Content-Type.*accept|req\.headers\.accept|http://|ssl_context=None|secure
 - Sensitive JSON responses omit `Cache-Control: no-store` and are cacheable by shared proxies
 - No request body size limit; large JSON/XML uploads parsed fully into memory
 
+## Server-Side Parameter Pollution (Argument Injection into Internal Requests)
+
+Distinct from *Server-Side **Prototype** Pollution* (`server_side_prototype_pollution.md`). Here the front-end/public endpoint takes user input and **builds a server-side request to an internal or upstream API** by string concatenation, without encoding the value. Because the value lands inside a structured target (query string, form body, REST path, or serialized JSON/XML), an attacker who supplies the syntax delimiters of that target can change the internal request:
+
+- **Append a parameter** — inject `&` (`%26`) to add an unintended field: `name=peter%26role=admin` → internal `…/search?name=peter&role=admin`.
+- **Override a parameter** — inject a duplicate key and rely on last/first-wins parsing differences between the edge and the internal service (`name=peter%26name=admin`); see `idor.md` for precedence-based bypass.
+- **Truncate the request** — inject `#` (`%23`) to drop the parameters the server appends after the injection point: `username=administrator%23` → internal `…?username=administrator` (the trailing `&publicProfile=true` etc. is cut off).
+- **Re-route a REST path** — when input is placed in a path segment, inject encoded `/..` (`%2f%2e%2e%2f`) to traverse to a different internal endpoint/field: `user/alice%2f..%2fadmin` → `…/user/admin`.
+- **Break out of JSON/XML** — when input is interpolated into a serialized body, inject the structural characters (`","field":"` for JSON, a new element for XML) to add fields to the internal call.
+
+**SAST signal:** an outbound/internal request URL, path, or body assembled from user input via concatenation/interpolation instead of a structured client API (params dict, encoded path segment, real serializer). The bug is *encoding/validation missing at the trust boundary between the public handler and the internal service* — independent of whether the public input itself looked validated.
+
+```python
+# VULN — user input concatenated into an internal API query string (no encoding)
+#   attacker: name = "x%23"  -> truncates;  name = "x%26admin=true" -> injects param
+def public_search(name):
+    r = requests.get(f"http://internal-api/users/search?name={name}&publicProfile=true")
+    return r.json()
+
+# VULN — user input placed in an internal REST path (path traversal re-routes the call)
+def get_field(username, field):
+    return requests.get(f"http://internal-api/v1/users/{username}/field/{field}").json()
+
+# SAFE — pass values as structured params; the client library encodes them,
+#        so '&', '#', '/', '=' are escaped and cannot change the request shape
+def public_search(name):
+    r = requests.get("http://internal-api/users/search",
+                     params={"name": name, "publicProfile": "true"})
+    return r.json()
+
+# SAFE — validate/allowlist path segments, then percent-encode each one
+def get_field(username, field):
+    if field not in ALLOWED_FIELDS:
+        raise ValueError("bad field")
+    seg = urllib.parse.quote(username, safe="")
+    return requests.get(f"http://internal-api/v1/users/{seg}/field/{field}").json()
+```
+
+```javascript
+// VULN — building the upstream URL by interpolation; `req.query.name` can carry `&`/`#`
+const url = `http://internal-api/users/search?name=${req.query.name}&publicProfile=true`;
+await fetch(url);
+
+// SAFE — URLSearchParams encodes the value; delimiters can't leak into the query
+const u = new URL("http://internal-api/users/search");
+u.search = new URLSearchParams({ name: req.query.name, publicProfile: "true" }).toString();
+await fetch(u);
+```
+
+```bash
+# Internal/upstream request URLs/paths built from user input by concatenation
+rg -n "(requests\.(get|post)|fetch|http\.(Get|NewRequest)|HttpClient|RestTemplate|axios)\s*\(\s*[\"'\`][^\"'\`]*\$?\{?[^\"'\`]*(req\.|request\.|params|args|input)" --glob '*.{py,js,ts,java,go,rb,php}'
+# f-string / template-literal URLs with a query string or path interpolated from input
+rg -n "[\"'\`]https?://[^\"'\`]*(\?[^\"'\`]*=)?\$\{|f[\"']https?://[^\"']*\{" --glob '*.{py,js,ts}'
+```
+
 ## Safe Patterns
 
 **Response shaping**
@@ -109,6 +166,10 @@ rg -n "Content-Type.*accept|req\.headers\.accept|http://|ssl_context=None|secure
 - Version all public routes (`/api/v1/...`); remove or gate deprecated handlers behind feature flags
 - Mount management, swagger, and debug UIs on separate host/port or require strong auth; disable in prod config profiles
 - Maintain machine-readable contract (OpenAPI/JSON Schema) and reject unknown request fields
+
+**Internal/upstream request construction**
+- Pass user values as structured parameters (`params=`/`URLSearchParams`/query builders) so the HTTP client percent-encodes delimiters; never concatenate raw input into a query string, REST path, or serialized body
+- Allowlist and individually encode path segments; build internal JSON/XML with a real serializer, not string templates
 
 **Transport and negotiation**
 - HTTPS-only external API; HSTS on TLS responses; redirect HTTP→HTTPS at edge
@@ -250,3 +311,5 @@ Route::any('/api/delete/{id}', [ItemController::class, 'destroy']);
 - REST handler correctly using PUT/DELETE with auth — not HTTP verb tampering; see `http_method_tamper.md` only when GET mutates or override headers are trusted
 - CORS `*` on anonymous public read API with no credentials — cross-ref `cors_misconfiguration.md`; not an API inventory issue
 - Pagination optional on small fixed-size collections (enum lists, config keys) — DoS class requires unbounded user-driven growth
+- User input forwarded to an internal API but already passed through a structured client (`params=`, `URLSearchParams`, prepared path-segment encoding) — the delimiters are escaped, so it is not server-side parameter pollution
+- Value interpolated into a URL after strict allowlist/format validation (e.g. numeric ID, enum) that cannot contain `&`/`#`/`/` — note the fragility but lower priority than raw string concatenation

@@ -1,6 +1,6 @@
 ---
 name: http-response-splitting
-description: HTTP response splitting and header injection detection (CWE-113)
+description: HTTP response splitting, CRLF injection, and header/cookie injection detection — including encoding-based sanitizer bypasses (double-encoding, %u, overlong UTF-8, %5c escapes, obs-fold) (CWE-113)
 ---
 
 # HTTP Response Splitting / Header Injection (CWE-113)
@@ -26,29 +26,45 @@ Writing user-controlled data into HTTP headers without neutralizing CR (`\r`) an
 
 ## Safe Patterns
 
-- Reject or strip CR/LF before any header write: `value.replace("\r","").replace("\n","")`
-- Java: `String.replace('\n',' ').replace('\r',' ')` or `replaceAll` removing `[\r\n]`
-- Use framework APIs that encode or reject illegal header characters
+- **Validate after full canonicalization, not before**: recursively URL-decode and Unicode-normalize the value until it stops changing, then reject if *any* control char (`[\x00-\x1f\x7f]`) is present. Stripping once leaves double/`%u`/overlong/`%5c` encodings to collapse into CR/LF at a later stage (see Evasion Patterns).
+- Reject (don't just strip) any value reaching a header sink that contains CR, LF, or a control char — strip-once `replace("\r","").replace("\n","")` is bypassable by the multi-layer encodings above.
+- Java: `String.replace('\n',' ').replace('\r',' ')` or `replaceAll` removing `[\r\n]` — only safe when applied to the *fully decoded* value
+- Use framework APIs that encode or reject illegal header characters (most modern stacks reject embedded CR/LF at the header API)
 - Netty: `validateHeaders: true` (default in secure configurations)
+- Don't reflect request-derived URL/host input into `Location`/`Set-Cookie` without the canonicalize-then-reject step (covers the open-redirect+CRLF chain)
 
 ## Evasion Patterns
 
 - URL-encoded `%0d%0a` decoded before header write
 - Unicode line separators (NEL, LS, PS) if not filtered
 - **UTF-8 overlong / multibyte CRLF bypass**: sequences such as `%E5%98%8A` (overlong `\n`) and `%E5%98%8D` (overlong `\r`) — and other multibyte encodings some frameworks, reverse proxies, or legacy decoders normalize to CR/LF after a naive `%0d`/`%0a`/`[\r\n]` strip. Bypasses string filters that only reject literal `\r`/`\n` or single-byte percent-encoding.
+- **Multi-layer / double URL-encoding**: `%250d%250a`, `%25250a`, `%25%30%61` (→`%0a`), or malformed `%%0a0a` — the value is decoded **more than once** (edge proxy decodes, then the app decodes again, or a framework double-decodes). A sanitizer that strips `\r\n`/`%0d%0a` exactly once runs *before* the final decode and misses it.
+- **Legacy `%uXXXX` Unicode escaping**: `%u000a` / `%u000d` — decoded to CR/LF by IIS, classic ASP/.NET, and some legacy stacks even though it is not standard percent-encoding.
+- **Backslash-escaped form**: `%5cr%5cn` decodes to the literal text `\r\n`, which a downstream JSON/JavaScript/template/log layer then interprets as real CR/LF (C-style escape processing after URL-decode). Relevant whenever the header value transits a second escape-processing stage.
+- **Delimiter-prefix and obs-fold bypass**: a CR/LF preceded by a junk delimiter — leading space `%20`, tab `%09`, `#` (`%23`), or `?` (`%3F`) — defeats filters anchored at the value start or "looks like a valid URL/token" checks. A **trailing** `%0d%0a%09` or `%0d%0a%20` opens an obs-fold *continuation line* (RFC 7230 line folding) that still injects a header on permissive parsers.
+- **CRLF chained with open-redirect/path-traversal prefix**: payloads like `/%2F%2E%2E%0d%0a…` place traversal/redirect syntax before the break so one input both re-points `Location` and injects a header — cross-ref `open_redirect.md`.
 - Header **name** injection when attacker controls the header key (Python query covers name and value)
 
 ```python
-# VULN — strips literal CR/LF only; overlong UTF-8 survives and may collapse downstream
+# VULN — strips literal CR/LF once; overlong UTF-8, double-encoding, %u, and %5c survive
+#   and collapse to CR/LF at a later decode/escape stage
 safe = user_input.replace("\r", "").replace("\n", "")
 response.headers["X-User"] = safe
-# Attacker: %E5%98%8A%E5%98%8DSet-Cookie:%20session=evil
+# Bypasses: %E5%98%8A%E5%98%8D... | %250d%250a... | %u000d%u000a... | %5cr%5cn...
 
-# SAFE — reject all control characters; prefer framework header APIs that disallow them
+# SAFE — fully canonicalize (recursive decode) THEN reject any control char
 import re
-if re.search(r"[\x00-\x1f\x7f]", user_input):
+from urllib.parse import unquote
+def fully_decode(s, rounds=3):
+    for _ in range(rounds):
+        d = unquote(s)
+        if d == s:
+            break
+        s = d
+    return s
+if re.search(r"[\x00-\x1f\x7f]", fully_decode(user_input)):
     abort(400)
-response.headers["X-User"] = user_input
+response.headers["X-User"] = user_input   # prefer a framework header API that rejects CR/LF
 ```
 
 ## Sanitizers / Barriers

@@ -24,7 +24,7 @@ The WebSocket handshake is an HTTP upgrade that browsers send **with the user's 
   - **OS command** → `exec`/`spawn`/`subprocess` with message payload (`rce.md`)
   - **XML parse** → `parseString`, `DocumentBuilder` on message body (`xxe.md`)
   - **Outbound fetch** → server-side HTTP client URL from message field (`ssrf.md`)
-  - **File path** → `readFile`, `open()` with user path from message (`path_traversal.md`)
+  - **File path** → `readFile`, `open()` with user path from message (`path_traversal_lfi_rfi.md`)
 
 ## Recon Indicators (Grep)
 
@@ -72,7 +72,7 @@ Data from `ws.on('message')`, `socket.on('message')`, or framework `onmessage` h
 | OS command | `exec(msg.cmd)` / `subprocess.run(msg['shell'])` | `rce.md` |
 | XML parse | `parseString(msg.body)` / `DocumentBuilder.parse(msg)` | `xxe.md` |
 | Outbound fetch | `fetch(msg.url)` / `axios.get(data.endpoint)` | `ssrf.md` |
-| File path | `fs.readFile(msg.path)` / `open(data.filename)` | `path_traversal.md` |
+| File path | `fs.readFile(msg.path)` / `open(data.filename)` | `path_traversal_lfi_rfi.md` |
 | DOM broadcast | `el.innerHTML = msg.text` / `broadcast(msg)` rendered unsafely | `xss.md` |
 
 **VULN**:
@@ -293,7 +293,7 @@ Confirmed when the cross-origin connection succeeds (HTTP 101) and returns the v
 - `cors_misconfiguration.md` — analogous origin-trust failure for `fetch`/XHR.
 - `cleartext_transmission.md` — `ws://` carrying tokens.
 - `xss.md` — message broadcast rendered into the DOM.
-- `sql_injection.md` / `rce.md` / `ssrf.md` / `xxe.md` / `path_traversal.md` — per-message server-side sinks.
+- `sql_injection.md` / `rce.md` / `ssrf.md` / `xxe.md` / `path_traversal_lfi_rfi.md` — per-message server-side sinks.
 - `denial_of_service.md` — oversized frames / unbounded message buffers.
 - `graphql_injection.md` — unauthenticated GraphQL subscription transports; introspection/authz parity across HTTP and WS; CSRF-bypassing mutations over WS transport.
 - `idor.md` / `race_conditions.md` — per-message authorization and concurrency on WS streams.

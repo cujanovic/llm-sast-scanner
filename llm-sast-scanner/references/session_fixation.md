@@ -164,6 +164,38 @@ req.sessionID = sessionId;
 String id = new BigInteger(130, new SecureRandom()).toString(32);
 ```
 
+### Persistent "remember me" token value
+
+A long-lived auth cookie (remember-me / stay-logged-in / device token) must be an opaque, high-entropy, server-issued value — never a deterministic or reversible function of the user's identity or credentials. When the value is `encode(identifier + secret_material)`, anyone who steals or guesses one cookie can forge others; and if the embedded "secret" is a password hash, a stolen cookie leaks crackable credential material for offline attack. This is distinct from the cookie *flags* (`references/insecure_cookie.md`) — here the **value construction itself** is the flaw, and from rotation (below) — here the token is forgeable even when rotated.
+
+**Detection indicators (VULN):**
+- Value built as `base64(username + ":" + hash(password))`, `encode(user_id + hash)`, or similar — deterministic, no server-side random, no keyed MAC/signature
+- Embedded hash is unsalted or fast (`md5`, `sha1`, `sha256(password)`) — cookie theft → offline password crack (see `references/weak_crypto_hash.md`)
+- Value is just `encode(username)` or `username:role` with no integrity protection — forge any user by re-encoding
+- Reversible encoding (`base64`, hex, JSON) of any identity/credential field presented as the persistent-auth secret
+
+**SAFE pattern — selector/validator stored server-side:**
+- Generate a high-entropy random token (`secrets.token_urlsafe(32)`, `crypto.randomBytes(32)`); store only its **hash** server-side keyed to the user; the cookie carries `selector:validator`, never credentials
+- Token is unrelated to the password; rotate on each use; revoke on logout / password change (see "Session survival after credential or MFA change")
+
+```python
+# VULN: persistent-login cookie is a reversible function of credentials
+#   -> forgeable for any user, and leaks an unsalted hash for offline cracking
+token = base64.b64encode(f"{username}:{hashlib.md5(password.encode()).hexdigest()}".encode())
+resp.set_cookie("stay_logged_in", token)
+
+# SAFE: opaque random validator stored hashed server-side; no credential material in the cookie
+validator = secrets.token_urlsafe(32)
+db.save_remember_token(user.id, selector, hashlib.sha256(validator.encode()).hexdigest())
+resp.set_cookie("remember", f"{selector}:{validator}", httponly=True, secure=True, samesite="Strict")
+```
+
+```bash
+# remember-me / persistent cookie value built from username/password or a raw hash
+rg -n "remember|stay[_-]?logged|persistent.*(cookie|token)|auth[_-]?cookie" . -A3 \
+  | rg -i "base64|md5|sha1|\\bencode\\b|username|user_id|password|hash"
+```
+
 ## Session IDs in URLs
 
 Passing session IDs in query strings or path segments enables fixation via link sharing, Referer leakage, and log exposure.

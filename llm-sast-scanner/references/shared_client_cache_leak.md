@@ -1,6 +1,6 @@
 ---
 name: shared-client-cache-leak
-description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, pooled-connection or thread-local reuse, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state (CWE-488 / CWE-524 / CWE-567 / CWE-362)
+description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, shared cookie jars, pooled-connection or thread-local reuse, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers JS/TS (urql, Apollo, DataLoader, TanStack/React Query, SWR, axios), Python (requests, aiohttp, httpx, SQLAlchemy, Django/Flask caches), Go (singleflight, gorm, go-redis, go-resty), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient, OkHttp, Ktor, Hibernate L2, gRPC), Ruby (Rails.cache, Faraday), PHP (Guzzle, Octane/Swoole), C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest), Elixir/Phoenix (:persistent_term, ETS), Scala, Clojure (CWE-488 / CWE-524 / CWE-567 / CWE-362)
 ---
 
 # Shared-Client Cache / Dedup Cross-User Leak
@@ -27,10 +27,10 @@ The canonical trigger:
 
 - **Client construction at shared scope**: `memoize(() => new Client(...))`, `lazy`/`once_cell`/`lazy_static`, module-level `const client = ...`, `static`/`@Bean`(singleton) clients, DI singletons, and **module-scope state in serverless handlers** (anything declared outside the handler in Lambda/Cloud Functions persists across invocations).
 - **Dedup / coalescing primitives**: urql v4/v5 `Client` (built-in dedup, always on), Apollo Client query dedup, `DataLoader` (must be per-request), `p-memoize`/`pMemoize`, Go `singleflight.Group`, Caffeine/Guava `LoadingCache.get(k, loader)`, `async_lru`, custom "in-flight promise" maps.
-- **Caches**: `lru-cache`, `IMemoryCache`, `cachetools`/`requests-cache`/`aiocache`, Caffeine/Guava, Spring `@Cacheable`, Rails `Rails.cache`/`||=` memoization, PHP `static`/APCu, `functools.lru_cache`/`@cache`, Next.js `unstable_cache` / `'use cache'` / `React.cache()`, **server-side GraphQL/HTTP response caches** (Apollo Server `responseCachePlugin` + its `sessionId`, Mercurius cache, `@cacheControl` `PRIVATE`/`PUBLIC` scope), and any Redis/Memcached namespace shared across tenants.
-- **ORM session / identity map / L2 cache**: a long-lived or module-global ORM session (global SQLAlchemy `Session` instead of `scoped_session`, a Hibernate `Session`/JPA `EntityManager` outliving the request) whose identity map returns another user's loaded entities; second-level/query caches keyed without `tenantId`.
+- **Caches**: `lru-cache`, **TanStack/React Query `QueryClient`** and **SWR** global cache (must be per server request), `IMemoryCache`/`FusionCache`/`LazyCache`, `cachetools`(`TTLCache`/`@cached`)/`requests-cache`/`aiocache`, **Django `cache.get_or_set`/`@cache_page`**, **Flask-Caching `@cache.cached`**, Caffeine/Guava, Spring `@Cacheable`, Rails `Rails.cache`/`||=` memoization, `Dalli`/Memcached, PHP `static`/APCu, `functools.lru_cache`/`@cache`, Rust `moka`/`DashMap`, Go `go-redis`/`groupcache`/`bigcache`, Elixir `:persistent_term`/`:ets`, Clojure `memoize`/`core.cache`, Next.js `unstable_cache` / `'use cache'` / `React.cache()`, **server-side GraphQL/HTTP response caches** (Apollo Server `responseCachePlugin` + its `sessionId`, Mercurius cache, `@cacheControl` `PRIVATE`/`PUBLIC` scope), and any Redis/Memcached namespace shared across tenants.
+- **ORM session / identity map / L2 cache**: a long-lived or module-global ORM session (global SQLAlchemy `Session` instead of `scoped_session`, a Hibernate `Session`/JPA `EntityManager` outliving the request, **EF Core `DbContext` registered as Singleton**, a global `*gorm.DB`) whose identity map / change-tracker returns another user's loaded entities; Hibernate/Ehcache second-level/query caches keyed without `tenantId`; per-session DB state (`SET ROLE`/`search_path`/`SET app.current_tenant`) on a shared `*sql.DB` pool.
 - **The KEY**: what goes into the cache/dedup key — query+vars, URL, method args — and whether the auth token / session / `userId` / `tenantId` is in it or only in headers/options.
-- **Mutable auth / shared cookies on shared clients**: `instance.defaults.headers.common['Authorization'] = ...`, `session.headers['Authorization'] = ...`, `client.setToken(...)`, `HttpClient.DefaultRequestHeaders.Authorization = ...`, interceptors reading a mutable field, and a **shared cookie jar** (`requests.Session.cookies`, a process-wide `http.cookiejar`/`CookieJar`, `axios` + shared jar) that accumulates one user's session cookie.
+- **Mutable auth / shared cookies on shared clients**: `instance.defaults.headers.common['Authorization'] = ...`, `session.headers['Authorization'] = ...`, `client.setToken(...)`, `HttpClient.DefaultRequestHeaders.Authorization = ...` (incl. **`IHttpClientFactory` typed clients**), Spring `RestTemplate`/`WebClient` mutated default headers, **OkHttp `CookieJar`/`Authenticator`**, Ruby **Faraday** shared connection, Python **`aiohttp.ClientSession`/`httpx` shared cookie jar + pool**, interceptors reading a mutable field, and a **shared cookie jar** (`requests.Session.cookies`, a process-wide `http.cookiejar`/`CookieJar`, `axios` + shared jar, `reqwest` `cookie_store`) that accumulates one user's session cookie.
 - **Connection-bound credentials**: NTLM/Kerberos/Negotiate or mTLS on a pooled keep-alive connection, `UnsafeAuthenticatedConnectionSharing`, a gRPC **channel-level** credential / shared stub used for many users.
 - **Pools / thread-locals**: connection-pool checkout without reset, transaction-pooled DB proxies (PgBouncer transaction mode) + session `SET`s, `ThreadLocal` without `remove()`, `contextvars`/`AsyncLocalStorage`/`Thread.current[...]` for "current user", `SecurityContextHolder` `MODE_INHERITABLETHREADLOCAL` with thread pools, and `@Async`/`Executor`/reactive pipelines that don't propagate the security context.
 
@@ -100,6 +100,20 @@ export const getResource = cache(async () => fetchResource())                   
 ```
 (Cross-ref `web_cache_deception.md` for the route/CDN-level `Cache-Control`/cacheability variant.)
 
+**Data-fetching cache built at module scope (TanStack Query / React Query, SWR)**
+```ts
+// VULN — one QueryClient created at module root; the server is long-lived, so its cache is shared
+// across every SSR request and ALL users' fetched data collapses into one store (official docs: "NEVER DO THIS").
+export const queryClient = new QueryClient()
+// SAFE — new client per server request; reuse a singleton only in the browser tab.
+import { isServer } from '@tanstack/react-query'
+export function getQueryClient() {
+  if (isServer) return new QueryClient()              // fresh per request
+  return (globalThis.__qc ??= new QueryClient())      // browser singleton
+}
+// SWR: the same applies to a hoisted global `cache` / <SWRConfig provider> reused server-side — scope per request.
+```
+
 **Server-side GraphQL/HTTP response cache without a per-user session key**
 ```ts
 // VULN — response cache enabled but no sessionId; a PRIVATE/per-user response is shared across callers
@@ -116,6 +130,16 @@ responseCachePlugin({ sessionId: (ctx) => ctx.request.http?.headers.get('authori
 const api = wrapper(axios.create({ jar: sharedJar, withCredentials: true }))  // sharedJar is module-global
 // SAFE — a fresh jar per request/user (or don't persist cookies on a shared client at all).
 const api = wrapper(axios.create({ jar: new CookieJar(), withCredentials: true }))
+```
+
+**GraphQL/fetch clients with a mutated header or shared dispatcher (graphql-request, undici/global `fetch`)**
+```ts
+// VULN — graphql-request GraphQLClient singleton; setHeader/setHeaders mutate SHARED state → callers race.
+const gql = new GraphQLClient(url); function call(token){ gql.setHeader('authorization', `Bearer ${token}`); return gql.request(Doc) }
+// VULN — Node's global fetch uses one shared undici dispatcher (Agent) with keep-alive pooling; a shared
+// cookie interceptor / CookieAgent on it (or setGlobalDispatcher) persists one user's cookies for the next.
+// SAFE — pass auth per request; don't attach a shared cookie jar to the global dispatcher in a multi-user server.
+const call = (token: string) => gql.request(Doc, {}, { authorization: `Bearer ${token}` })   // per-request headers
 ```
 
 **Warm serverless: module-scope state survives across invocations/tenants**
@@ -144,6 +168,28 @@ def fetch_resource(token):
     return session.get(f"{BASE}/api/resource", headers={"Authorization": f"Bearer {token}"})
 ```
 ```python
+# VULN — shared aiohttp.ClientSession: one process-wide session holds a single cookie jar AND a
+# connection pool, so one user's Set-Cookie/session cookie is replayed on another caller's request;
+# it is also not safe to share across event loops/threads. (httpx.AsyncClient shares state the same way.)
+SESSION = aiohttp.ClientSession()                         # module-global, shared cookie jar
+async def fetch_resource(token):
+    return await SESSION.get(f"{BASE}/api/resource", headers={"Authorization": f"Bearer {token}"})
+# SAFE — a session per request/user, or disable cookie persistence on a shared client.
+from aiohttp import ClientSession, DummyCookieJar
+async def fetch_resource(token):
+    async with ClientSession(cookie_jar=DummyCookieJar()) as s:   # no cross-request cookie carryover
+        return await s.get(f"{BASE}/api/resource", headers={"Authorization": f"Bearer {token}"})
+```
+```python
+# VULN — framework cache helpers keyed without the principal: Django cache.get_or_set / @cache_page,
+# Flask-Caching @cache.cached(), cachetools TTLCache/@cached — one entry serves every user.
+@cache.cached(timeout=60)                 # Flask-Caching: key = request path, identity omitted
+def resource(): return api_get("/api/resource")
+# SAFE — add the principal to the key (Flask-Caching: make_cache_key / key_prefix; cachetools: key=...).
+@cache.cached(timeout=60, make_cache_key=lambda *a, **k: f"resource:{g.user.id}")
+def resource(): return api_get("/api/resource")
+```
+```python
 # VULN — module-global ORM session; the identity map can hand back another user's loaded entities.
 Session = sessionmaker(bind=engine); db = Session()        # one shared session for the whole process
 # SAFE — request-scoped session (scoped_session per request, closed in teardown).
@@ -163,6 +209,13 @@ def get_record(user_id): ...
 # VULN — contextvar/threadlocal request identity not reset, leaks across pooled workers.
 _current_principal = ContextVar("principal")   # set in middleware, read after an await that ran another request's code
 ```
+```python
+# VULN — requests-oauthlib OAuth2Session (or any SDK client) HOLDS the token on the instance; sharing one
+# process-wide instance across users sends user A's bearer token on user B's call.
+SESSION = OAuth2Session(client_id, token=user_token)      # token bound to a shared instance
+# VULN — urllib3.PoolManager / a vendor SDK client (boto3, openai, stripe) constructed once with per-user
+# creds and reused across users. SAFE — build the authed client/session per user, or pass creds per call.
+```
 
 ### Go
 
@@ -181,6 +234,24 @@ v, _, _ := g.Do("resource:"+userID, func() (any, error) { return fetchResource(c
 var requestPrincipal *Principal
 // VULN — storing the token on a shared http.Transport/RoundTripper instead of a per-request header.
 // SAFE — thread identity through ctx and per-request headers; reusing *http.Client itself is fine.
+```
+```go
+// VULN — shared go-resty client mutated on the CLIENT: SetAuthToken/SetHeader/SetCookieJar are process-wide,
+// so concurrent requests race and one user's token/cookies leak to another caller.
+client.SetAuthToken(token)                              // shared mutation on the singleton client
+// VULN — http.DefaultClient with a shared cookiejar.Jar persists a user's Set-Cookie for the next caller.
+// SAFE — set auth/cookies PER REQUEST: resty's client.R().SetAuthToken(token); a per-request header on net/http.
+resp, _ := client.R().SetAuthToken(token).Get("/api/resource")   // per-request, client reuse is fine
+```
+```go
+// VULN — per-request session state (SET ROLE / search_path / SET app.current_tenant) issued on the
+// shared *sql.DB or global *gorm.DB pool: the next request that checks out the SAME pooled connection
+// inherits the previous user's role/tenant (silent RLS bypass). Same as the PgBouncer transaction-mode trap.
+db.Exec("SET app.current_tenant = $1", tenantID)   // leaks to the next checkout of this conn
+// VULN — go-redis/groupcache/bigcache key that omits the tenant for per-user data (shared namespace).
+// SAFE — scope to one connection for the whole unit of work and use SET LOCAL inside a tx, or pass the
+//        tenant as a query predicate; include tenantID in every cache key.
+tx, _ := db.BeginTx(ctx, nil); tx.Exec("SET LOCAL app.current_tenant = $1", tenantID)  // reset on commit/rollback
 ```
 
 ### Java / Kotlin
@@ -218,6 +289,34 @@ ManagedChannel ch = ... ; var stub = Grpc.newStub(ch).withCallCredentials(userAC
 // SAFE — attach per-call credentials to each RPC (reusing the channel/stub itself is fine).
 stub.withCallCredentials(perRequestCreds(token)).fetch(req);
 ```
+```java
+// VULN — OkHttp singleton with a shared CookieJar (or an Authenticator caching credentials):
+// user A's session cookie is stored on the client and resent on user B's call.
+OkHttpClient client = new OkHttpClient.Builder().cookieJar(new PersistentCookieJar()).build();  // shared jar
+// VULN — Spring RestTemplate/WebClient singleton with a mutated default header (concurrent header race).
+restTemplate.getInterceptors().add((req,b,ex) -> { req.getHeaders().setBearerAuth(currentToken); return ex.execute(req,b); });
+// SAFE — no per-user state on the shared client: pass auth per request and don't persist cookies.
+Request req = new Request.Builder().url(url).header("Authorization","Bearer "+token).build();   // per call
+webClient.get().uri("/api/resource").headers(h -> h.setBearerAuth(token)).retrieve();           // per call
+```
+```java
+// VULN — Apache HttpClient with a shared BasicCookieStore (or connection-bound NTLM/Kerberos on the pool):
+// cookies/identity from one request are reused for the next caller on the shared client/connection.
+CloseableHttpClient http = HttpClients.custom().setDefaultCookieStore(new BasicCookieStore()).build();  // shared
+// VULN (Kotlin/Ktor) — singleton HttpClient with install(HttpCookies) (default in-memory AcceptAllCookiesStorage,
+// shared by all calls) or install(Auth){ bearer{...} } (caches the token on the client) → cookie/token shared.
+// VULN — OpenFeign/Retrofit client whose interceptor reads a mutable/ThreadLocal token field.
+// SAFE — per-request HttpClientContext with its OWN cookie store (Apache); don't install client-wide
+// HttpCookies/Auth on a multi-user Ktor client — pass bearerAuth(token) per call; Feign interceptor reads
+// request-scoped identity (not a shared field).
+HttpClientContext ctx = HttpClientContext.create(); ctx.setCookieStore(new BasicCookieStore());  // per request
+```
+```java
+// VULN — Hibernate 2nd-level / query cache (or Ehcache region) keyed without tenant; a cached entity
+// from tenant A is served to tenant B. Same for a JPA EntityManager that outlives the request.
+// SAFE — enable Hibernate multi-tenancy (CurrentTenantIdentifierResolver) so caches are tenant-partitioned,
+//        and use a request-scoped EntityManager (one persistence context per request).
+```
 
 ### Ruby / Rails
 
@@ -229,6 +328,22 @@ Rails.cache.fetch("resource") { API.get("/api/resource") }
 # SAFE — per-principal key and request-scoped state.
 Rails.cache.fetch("resource/#{current_user.id}") { API.get("/api/resource", token: current_user.token) }
 ```
+```ruby
+# VULN — shared Faraday connection whose Authorization header is mutated per request (concurrency race
+# under Puma threads), or a shared cookie jar on the connection. Dalli/Memcached key omits the principal.
+CONN = Faraday.new(URL)                       # process-wide
+def call(token) = CONN.tap { |c| c.headers["Authorization"] = "Bearer #{token}" }.get("/api/resource")
+# SAFE — pass auth per request; never mutate the shared connection's headers.
+def call(token) = CONN.get("/api/resource") { |r| r.headers["Authorization"] = "Bearer #{token}" }
+```
+```ruby
+# VULN — HTTParty class-level config is GLOBAL: headers / basic_auth / default_options set on the class
+# (or `Api.default_options[:headers]=`) are shared by every caller — classic cross-user auth bleed.
+class Api; include HTTParty; headers "Authorization" => "Bearer #{token}"; end   # class-level = shared
+# VULN — a shared RestClient::Resource built with an Authorization header reused across users.
+# SAFE — pass auth per call; never set it at class level on a multi-user client.
+Api.get("/api/resource", headers: { "Authorization" => "Bearer #{token}" })
+```
 
 ### PHP (long-running workers: Swoole / RoadRunner / Laravel Octane / FPM with persistent singletons)
 
@@ -238,6 +353,16 @@ class Api { private static ?array $resource = null;
   public static function resource($t){ return self::$resource ??= self::get('/api/resource', $t); } }  // leaks across requests
 // VULN — APCu/cache keyed without principal id for identity-dependent data.
 // SAFE — request-scoped instance (not static), or cache key includes the principal id; reset persistent singletons between requests.
+```
+```php
+// VULN — shared Guzzle client with cookies enabled and/or a default auth header: ['cookies' => true]
+// creates ONE cookie jar for ALL requests by this client, and a default 'headers' Authorization is sent on
+// every call — so user A's session cookie/token rides on user B's request. (Symfony HttpClient: a singleton
+// with auth_bearer baked in via withOptions reused across users is the same bug.)
+$client = new GuzzleHttp\Client(['cookies' => true, 'headers' => ['Authorization' => "Bearer $token"]]);
+// SAFE — reuse the client for pooling, but pass a FRESH jar + auth per request (or 'cookies' => false).
+$res = $client->get('/api/resource', ['cookies' => new GuzzleHttp\Cookie\CookieJar(),
+                                      'headers' => ['Authorization' => "Bearer $token"]]);
 ```
 
 ### C# / .NET
@@ -263,14 +388,100 @@ handler.UnsafeAuthenticatedConnectionSharing = true;   // do NOT enable when one
 _cache.GetOrCreate("resource", e => api.GetResource());   // same entry for all callers
 // SAFE — _cache.GetOrCreate($"resource:{userId}", ...);  register per-request state as Scoped, not Singleton.
 ```
+```csharp
+// VULN — typed HttpClient from IHttpClientFactory but auth set on the shared DefaultRequestHeaders
+// (the underlying handler is pooled/shared) → same concurrency race as a raw singleton HttpClient.
+_typed.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token);
+// VULN — EF Core DbContext registered as Singleton (or a static/captured context): DbContext is NOT
+// thread-safe and its change-tracker/identity map serves one request's entities to another.
+services.AddSingleton<AppDbContext>();                 // must be Scoped (per request)
+// VULN — FusionCache/LazyCache/CacheManager GetOrAdd keyed without the principal for per-user data.
+// SAFE — per-request HttpRequestMessage header; AddDbContext (Scoped); cache key includes the principal.
+```
+```csharp
+// VULN — RestSharp RestClient reused with an Authenticator (or default header) set on the CLIENT, or a Flurl
+// IFlurlClientCache client with .WithOAuthBearerToken on the CACHED client → one identity serves all callers.
+var client = new RestClient(opts) { Authenticator = new JwtAuthenticator(token) };   // shared client auth
+// SAFE — auth per request: RestSharp new RestRequest(...).AddHeader("Authorization", $"Bearer {token}");
+//        Flurl flurlClient.Request(url).WithOAuthBearerToken(token) per call (the cached client carries no auth).
+var req = new RestRequest("/api/resource").AddHeader("Authorization", $"Bearer {token}");
+```
 
 ### Rust
 
 ```rust
-// VULN — global cache (once_cell/lazy_static) of identity-dependent data; shared reqwest::Client with a default auth header.
+// VULN — global cache (once_cell/lazy_static, or a moka::Cache / DashMap) of identity-dependent data
+// keyed without the principal; or a shared reqwest::Client with a default auth header / enabled cookie_store.
 static RESOURCE: Lazy<Mutex<Option<Record>>> = Lazy::new(|| Mutex::new(None));   // one value for everyone
-// SAFE — key by principal (DashMap<UserId, _>) or fetch per request; pass the token per-request (.bearer_auth(token)).
+static CACHE: Lazy<moka::sync::Cache<String, Record>> = Lazy::new(|| moka::sync::Cache::new(10_000));
+// SAFE — key by principal (Cache<UserId, _> / DashMap<UserId, _>) or fetch per request; pass the token
+//        per-request (.bearer_auth(token)) and do NOT enable a shared cookie_store on a multi-user client.
 ```
+
+### Elixir / Erlang (Phoenix)
+
+```elixir
+# VULN — :persistent_term and (named/public) ETS are GLOBAL across all processes; storing per-user/per-tenant
+# data there, or keying an ETS cache without the tenant, serves one user's value to every other process.
+:persistent_term.put(:current_user, user)          # global — shared by all requests on the node
+:ets.insert(:resource_cache, {:resource, value})   # key omits tenant → cross-tenant read
+# VULN — tenant kept in the process dictionary but NOT re-propagated across a process boundary:
+# Task.async / start_async / a GenServer.call run in a DIFFERENT process with no tenant set.
+Task.async(fn -> Repo.all(Resource) end)           # no tenant in the spawned process
+# SAFE — ETS/:persistent_term only for stateless/public data, or include tenant in the key; keep per-request
+# identity in the request process (Process dictionary / conn assigns) and re-set it before crossing a boundary.
+tenant = Tenant.current(); Task.async(fn -> Tenant.put(tenant); Repo.all(Resource) end)
+```
+
+### Scala (Cats Effect / Akka / Play)
+
+```scala
+// VULN — a shared cache (Caffeine, Play `cache`, a global `TrieMap`) or an sttp/STTP backend whose auth is
+// held in shared mutable state, keyed/scoped without the principal — concurrent fibers/actors collide.
+val cache = Caffeine.newBuilder().build[String, Record]() ; cache.get("resource", _ => api.fetch())
+// SAFE — carry identity explicitly (Cats Effect `IOLocal`, a Reader/`Kleisli` env, an explicit param) and
+// include the principal in any cache key; never stash "current user" in an actor field reused across messages.
+```
+
+### Clojure
+
+```clojure
+;; VULN — clojure.core/memoize or a global atom/core.cache holding identity-dependent data with no principal
+;; in the key; or a dynamic var rebound per request but read after crossing a thread (future/pmap/core.async).
+(def fetch-resource (memoize (fn [] (api-get "/api/resource"))))   ;; one cached value for everyone
+;; SAFE — include the principal in the memo/cache key, or pass identity as an argument; use (binding ...)
+;; with `bound-fn`/conveyed bindings so futures/agents keep the right principal.
+(def fetch-resource (memoize (fn [user-id] (api-get "/api/resource" user-id))))
+```
+
+## Popular clients — the shared-state knob to check
+
+Quick lookup of widely-used HTTP/GraphQL/SDK clients and the **exact shared-state API** that leaks across users when the client is reused process-wide. The fix is always the same shape: **reuse the client for pooling, but carry auth/cookies per request** (or scope the client per user).
+
+| Client (language) | Leaky shared-state API | Safe per-request form |
+|---|---|---|
+| axios / got / ky (JS) | `instance.defaults.headers`; shared cookie jar | per-call `headers`; fresh jar per request |
+| graphql-request (JS) | `client.setHeader()`/`setHeaders()` | `request(doc, vars, headers)` |
+| undici / global `fetch` (Node) | shared dispatcher / `setGlobalDispatcher`; cookie interceptor | per-request headers; no shared jar |
+| Apollo / urql / DataLoader (JS) | module-level client/loader (built-in dedup) | per-request client/loader |
+| TanStack/React Query, SWR (JS) | `QueryClient`/cache at module root (SSR) | new client per server request / `React.cache()` |
+| requests (Python) | `Session.headers`, `Session.cookies` | per-call `headers=`; session per user |
+| httpx / aiohttp (Python) | shared client/session cookie jar + pool | `DummyCookieJar` / session per user |
+| requests-oauthlib (Python) | `OAuth2Session` holds the token | session per user |
+| net/http + cookiejar, go-resty (Go) | `DefaultClient`+jar; `client.SetAuthToken/SetHeader/SetCookieJar` | per-request header; `client.R().SetAuthToken()` |
+| OkHttp / Retrofit (JVM) | client `cookieJar` / `Authenticator` | per-request `.header()` |
+| Apache HttpClient (JVM) | `setDefaultCookieStore`; connection-bound NTLM/Kerberos | per-request `HttpClientContext` cookie store |
+| Ktor (Kotlin) | `install(HttpCookies)` (shared storage) / `install(Auth)` (cached token) | per-call `bearerAuth(token)` |
+| Spring RestTemplate / WebClient (JVM) | mutated default headers / interceptor field | per-request headers |
+| OpenFeign (JVM) | interceptor reading a mutable/ThreadLocal token | request-scoped identity |
+| gRPC stub/channel (JVM/Go/…) | channel-level / shared-stub `CallCredentials` | per-call `CallCredentials` |
+| Guzzle / Symfony HttpClient (PHP) | `['cookies' => true]`; default `headers`/`auth_bearer` | fresh jar + auth per request |
+| Faraday / HTTParty / RestClient (Ruby) | shared conn headers; HTTParty **class-level** `headers`/`basic_auth` | per-call headers |
+| HttpClient / IHttpClientFactory (.NET) | `DefaultRequestHeaders.Authorization` | per-request `HttpRequestMessage` |
+| RestSharp / Flurl (.NET) | client `Authenticator` / `.WithOAuthBearerToken` on cached client | per-`RestRequest` / per-`Request()` header |
+| reqwest / awc (Rust) | default auth header; `cookie_store(true)` | `.bearer_auth(token)` per request |
+
+**Connection-bound auth caveat:** for NTLM/Kerberos/Negotiate and mTLS the identity rides the *connection*, so even per-request headers don't help — isolate the connection/handler pool per identity (see the rule below).
 
 ## Safe Patterns (general)
 

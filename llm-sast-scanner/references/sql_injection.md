@@ -191,6 +191,41 @@ Flag **LIKELY** when a primitive token appears in a dynamically built SQL string
 - JSON containment operators exposed through ORM abstractions (e.g., `@>` in PostgreSQL) carrying raw fragments
 - Parameter mismatch: partial parameterization where operators or IN-list members remain unbound (`IN (...)`)
 
+### PDO Emulated Prepared-Statement Parser Confusion (PHP)
+
+A query can use `prepare()`/placeholders and still be injectable when **emulated prepares** are on (`PDO::ATTR_EMULATE_PREPARES`, the **default for MySQL**). Emulation does the escaping in PHP using PDO's own *imperfect* SQL parser before the query reaches the server. If user input is concatenated into the prepared query **text** — typically an identifier (`` `$col` ``) or a hand-escaped fragment — alongside `?`/`:name` placeholders, a parser misparse can let attacker bytes (a NUL byte, or a fake `\`-escape) flip a string/identifier boundary and promote injected text into a new bound-parameter token. Result: SQLi even though "everything is escaped."
+
+**The vulnerable shape is *mixing*** manually-built fragments with the prepare interface — not placeholders alone. Triggers seen in the wild: a NUL after a quoted identifier (`?%00`, `` `$col`=?#\0 ``) causes the parser to backtrack and re-read a `?` as a placeholder; a backslash-quote (`\'?`) fools the parser into thinking `'` is escaped (devastating on engines like Postgres that don't use backslash escapes), so a `?` falls outside the string. PHP ≤ 8.3 uses one MySQL-style parser for all drivers (assumes backslash escaping → breaks Postgres `quote()`), and pre-8.4 even a smuggled `:`/`?` in an identifier injects with no NUL needed; PHP 8.4 added per-dialect parsers but identifier/fragment mixing under emulation is still risky.
+
+```php
+// VULN — emulated prepare (MySQL default) + user-controlled identifier mixed with a placeholder.
+// `?%00` / backtick payloads in $_GET['col'] can break the identifier and inject a bound token.
+$col  = '`' . str_replace('`', '``', $_GET['col']) . '`';   // "escaped" identifier — not enough
+$stmt = $pdo->prepare("SELECT $col FROM fruit WHERE name = ?");
+$stmt->execute([$_GET['name']]);
+
+// VULN — hand-escaped value fragment concatenated next to a placeholder, emulation on.
+// On Postgres with ATTR_EMULATE_PREPARES=>true, a `\'?` payload escapes the parser, not the DB.
+$sku  = $pdo->quote($_GET['sku']);                            // quote() ≠ safe when mixed under emulation
+$stmt = $pdo->prepare("SELECT * FROM fruit WHERE sku = $sku AND name = ?");
+$stmt->execute([$_GET['name']]);
+
+// SAFE — turn OFF emulation so the server parses/binds natively; never mix fragments with bindings.
+$pdo = new PDO($dsn, $user, $pass, [PDO::ATTR_EMULATE_PREPARES => false]);
+$stmt = $pdo->prepare("SELECT name FROM fruit WHERE sku = ? AND name = ?");
+$stmt->execute([$_GET['sku'], $_GET['name']]);
+// Identifiers that must vary → allowlist, do not concatenate (see "Allowlist for dynamic identifiers").
+$allowed = ['name','sku','id'];
+$col = in_array($_GET['col'], $allowed, true) ? $_GET['col'] : 'name';
+```
+
+**SAST signals** (flag **LIKELY**; escalate to **CONFIRM** when taint reaches the concatenation site):
+- A `prepare(` argument built with `.` concatenation or `"...$var..."` interpolation that contains a request source (`$_GET`/`$_POST`/`$_REQUEST`/`$_COOKIE`/`php://input`), **especially** a backtick/quote-wrapped identifier or a hand-escaped fragment (`str_replace('\`'`, `addslashes`, `strtr(..., ["'" => "\\'"])`, custom escapers, even `$pdo->quote()`), while the same string also has `?`/`:name` placeholders.
+- Emulation enabled: `PDO::ATTR_EMULATE_PREPARES => true`, or **absence** of an explicit `=> false` on a MySQL DSN (emulation is on by default).
+- Dynamic-confirmation payloads: `?%00` (NUL after identifier) and `\'?` / `\%27?` (backslash-quote breakout), plus `?#`/`?--` to terminate trailing tokens.
+
+**SAFE / barriers**: `PDO::ATTR_EMULATE_PREPARES => false` (native server-side prepares); never concatenate user input — values **or** identifiers — into a `prepare()` string; allowlist dynamic identifiers; `SQLite` emulation is not exploitable this way (NUL always errors). `$pdo->quote()` blocks the `?%00` variant but does **not** fix the `\'` breakout on PHP ≤ 8.3 — disabling emulation is the durable fix.
+
 ### Uncommon Contexts
 
 - ORDER BY/GROUP BY/HAVING with `CASE WHEN` to build boolean extraction channels
@@ -426,7 +461,7 @@ Login/authentication endpoints with raw SQL concatenation are almost always blin
 ### PHP
 - **VULN**: `mysqli_query($conn, "SELECT * FROM users WHERE id = " . $_GET['id'])`
 - **VULN**: `$pdo->query("SELECT * FROM users WHERE id = '$_POST[id]'")`
-- **SAFE**: `$stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?"); $stmt->execute([$_GET['id']])`
+- **SAFE**: `$stmt = $pdo->prepare("SELECT * FROM users WHERE id = ?"); $stmt->execute([$_GET['id']])` — only when the query text is fully static; a `prepare()` string that *also* concatenates a user-controlled identifier or hand-escaped fragment is **not** safe under emulated prepares (see "PDO Emulated Prepared-Statement Parser Confusion")
 
 ### Ruby on Rails
 

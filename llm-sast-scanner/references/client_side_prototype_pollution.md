@@ -184,6 +184,29 @@ Object.defineProperty(target, userKey, { value: userValue });
 
 Beware: `Object.defineProperty` can set non-enumerable / non-configurable descriptors, which makes the pollution *harder to clean up* than a plain assignment — a frozen-after-pollution prototype is effectively permanent for the realm lifetime.
 
+### `Object.defineProperty(obj, key, descriptor)` with an omitted `value`/`get` — descriptor-inheritance gadget (defeats a `defineProperty` "lock")
+
+A common (flawed) mitigation is to "lock" a sensitive property with `Object.defineProperty(config, 'transportUrl', { configurable: false, writable: false })` so attacker merges can't overwrite it. But the **descriptor object is itself a plain object** — when it omits `value` (and `get`), `defineProperty` reads those attributes through the prototype chain. Polluting `Object.prototype.value` therefore supplies the value the developer thought they had pinned to `undefined`, so the "locked" property silently takes the attacker's value:
+
+```javascript
+// VULN — descriptor omits `value`; defineProperty reads `value` via the prototype
+function loadConfig() {
+  const config = { params: parseQuery(location.search) };
+  // developer intends transportUrl to stay falsy / locked:
+  Object.defineProperty(config, 'transportUrl', { configurable: false, writable: false });
+  if (config.transportUrl) {                 // gadget read
+    const s = document.createElement('script');
+    s.src = config.transportUrl;             // DOM sink → script load / XSS
+    document.body.appendChild(s);
+  }
+}
+// pollution payload: ?__proto__[value]=data:,alert(1)
+//   defineProperty's descriptor has no own `value` → inherits Object.prototype.value
+//   → config.transportUrl === "data:,alert(1)" despite the "lock"
+```
+
+Treat any `Object.defineProperty(obj, key, descriptor)` / `Object.defineProperties(obj, descs)` where the descriptor literal does **not** explicitly set `value` (or `get`) as a gadget when `obj`/`key` later drives an HTML/URL/script/auth read — pollution of `Object.prototype.value` (or `Object.prototype.get`) is the trigger. The same applies to `Reflect.defineProperty`. Grep `Object\.define(Propert(y|ies))` and confirm each descriptor sets its own `value`/`get`.
+
 ### `Object.setPrototypeOf(target, attackerObj)`
 
 Not a pollution write per se, but a related primitive: attacker controls what `target`'s prototype becomes. If `target` is a long-lived shared object, this is functionally equivalent to pollution for that object's consumers.
@@ -293,6 +316,7 @@ The presence of any of these libraries in a page's bundle is a high-confidence e
 | `new Worker(blob)` | `name` | JS execution inside the dedicated Worker |
 | `new Image()` | `src` | Traditional `onerror` XSS — the polluted `src` is dereferenced when the image errors |
 | `new URLSearchParams()` | `toString` | DOM-based open redirect via stringification in `location.assign(...)` paths |
+| `fetch(url, { method:'GET' })` (partial options) | `headers`; `method`; `body`; `referrer`; `integrity` | Request smuggling / CSRF-style state change from the browser — a `fetch` call that omits these reads them through the polluted prototype, so the request carries attacker-controlled headers/body. Often chained: the attacker-shaped response field is later read into an `innerHTML`/`src` app gadget → DOM XSS |
 
 A typical dynamic confirmation, harmless variant:
 

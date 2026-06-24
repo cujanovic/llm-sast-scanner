@@ -17,6 +17,7 @@ The core pattern: *unvalidated, user-controlled input reaches the destination ar
 - Remote-scheme file fetchers: `file_get_contents($user_url)`, `URI.open(url)` (OpenURI)
 - Webhooks, import-from-URL, image proxies, PDF/screenshot renderers — any feature that fetches a remote resource on behalf of the user
 - Stored destinations: a URL saved from user input at write time and later used for an outbound request without allowlist validation
+- **Inbound-message-derived URLs**: a destination parsed out of a received email or message and fetched server-side — e.g. a webmail "one-click unsubscribe" that issues a backend request to the URL in the `List-Unsubscribe` SMTP header (`List-Unsubscribe-Post: List-Unsubscribe=One-Click`), remote-image/link-preview prefetch, or a helpdesk/ticketing system that ingests email and fetches embedded links. The sender fully controls these headers/bodies, so they are untrusted even though they never arrive as an HTTP request parameter
 
 **What it is NOT**
 - **Open redirect** — HTTP 302 to a user URL redirects the *browser*, not a server-side outbound request (see `open_redirect.md`)
@@ -28,7 +29,7 @@ The core pattern: *unvalidated, user-controlled input reaches the destination ar
 
 ## Source -> Sink Pattern
 
-**Sources (remote flow sources)**: HTTP request parameters, headers, path segments, cookies, JSON/form body fields — anything modeled as remote user input that can carry a URL, hostname, IP, or URL fragment used to build an outbound request. Java excludes taint from `URLConnection.getInputStream()` responses (following a remote redirect is not worse than the remote server choosing the target).
+**Sources (remote flow sources)**: HTTP request parameters, headers, path segments, cookies, JSON/form body fields — anything modeled as remote user input that can carry a URL, hostname, IP, or URL fragment used to build an outbound request. Also treat **content extracted from received messages** (SMTP headers such as `List-Unsubscribe`, email/message bodies, parsed links) as remote sources when the server later fetches them — same allowlist/validation applies as for direct request input. Java excludes taint from `URLConnection.getInputStream()` responses (following a remote redirect is not worse than the remote server choosing the target).
 
 **Sinks (`request-forgery` kind)**:
 - `new URL(userInput).openConnection()`

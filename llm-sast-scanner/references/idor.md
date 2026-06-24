@@ -578,6 +578,38 @@ curl "https://app.example/api/profile?user_id=<USER_B_ID>&user_id=<USER_A_ID>" \
   -H "Authorization: Bearer <USER_B_TOKEN>"
 ```
 
+### Multi-Principal Response-Equivalence Matrix
+
+Generalizes the two-account swap to **N authenticated identities**: replay each captured request once per principal (each principal carries its own `Authorization` / `Cookie` / `X-User-Id` set), then compare responses pairwise. Two comparison modes:
+
+- **All-vs-Baseline** — pick one principal as the owner/baseline; test every other principal against it. Cheapest; catches "everyone sees the baseline's data."
+- **All-vs-All** — compare every principal pair (`i < j`). Catches asymmetric leaks (A sees B but B does not see A) and per-tenant gaps.
+
+**Equivalence oracle.** For each pair, the resource is principal-specific yet authorization is missing when the two responses are *equivalent*: **same status code AND same body** after normalization. Interpret:
+
+| Outcome | Meaning |
+|---------|---------|
+| **SAME** (all pairs equivalent) | Endpoint ignores identity entirely, or returns the owner's object to everyone → BAC/IDOR |
+| **MIXED** (some pairs equivalent, some not) | Partial enforcement — a specific record, verb, tenant, or alias is unguarded while siblings are guarded |
+| **DIFFERENT** (no pair equivalent) | Per-principal data — likely enforced (or naturally distinct) |
+
+**Normalize before comparing — or you get false negatives.** Identical underlying data still differs byte-for-byte because of per-response dynamic fields. Strip them before hashing/diffing: CSRF/anti-forgery tokens, CSP/script nonces, `csrfToken`/`_token`/`authenticity_token`, request/trace IDs (`X-Request-Id`, `traceparent`), timestamps/`Date`, ETags, session/cart IDs, signed-URL signatures, pagination cursors. Skipping this is the #1 reason a real leak reads as "different."
+
+```bash
+# Replay one request under two principals, normalize dynamic fields, compare body hashes.
+# Equal hash + equal status on an ID-bearing endpoint = candidate BAC/IDOR.
+norm() {                       # strip volatile fields before hashing
+  sed -E 's/"(csrf_?token|_token|authenticity_token|nonce|requestId|traceId|timestamp|createdAt|updatedAt|expiresAt|etag|cursor)":"[^"]*"/"\1":"X"/g'
+}
+A=$(curl -s -H "Authorization: Bearer <TOKEN_A>" "https://app.example/api/orders/<ID_A>" | norm | md5sum)
+B=$(curl -s -H "Authorization: Bearer <TOKEN_B>" "https://app.example/api/orders/<ID_A>" | norm | md5sum)
+[ "$A" = "$B" ] && echo "SAME -> B received A's order (IDOR)" || echo "different"
+```
+
+**Pre-filter to the requests worth replaying** (focus the matrix on likely object references): numeric or UUID segments in the path, query/body keys like `id|uid|user_id|account_id|order_id|invoice_id|ticket_id|customer_id|file_id|doc_id|record_id|item_id|resource_id`, self-reference endpoints (`/me`, `/self`, `/profile`, `/settings`), admin/internal paths, and any state-changing method (`POST|PUT|PATCH|DELETE`). Self-reference endpoints pair with an ID-taking sibling — swap `/api/me` → `/api/users/<other_id>`.
+
+**Caveat (don't over-report):** equivalence is only a leak when the endpoint is *supposed* to be principal-specific. Identical responses for genuinely public/shared/empty/static resources are expected — gate on the pre-filter above and confirm the body actually contains another principal's data.
+
 ## Common False Alarms
 
 - Resources that are public or anonymous by design

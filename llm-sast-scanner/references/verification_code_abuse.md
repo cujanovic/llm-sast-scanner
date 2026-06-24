@@ -1,6 +1,6 @@
 ---
 name: verification-code-abuse
-description: Detect OTP, captcha, and verification-code flaws such as predictable generation, disclosure, brute force, and shared state.
+description: Detect OTP, captcha, and verification-code flaws such as predictable generation, disclosure, brute force, weak TOTP config (short digits, wide acceptance/grace window), replay, and shared state.
 ---
 
 # Verification Code / OTP / Captcha Abuse
@@ -153,6 +153,34 @@ if replay_cache.seen(user.id, totp.timecode):
 replay_cache.mark(user.id, totp.timecode)
 ```
 
+## TOTP brute-force exposure (weak config)
+
+Distinct from replay: a TOTP verifier's resistance to **online guessing** is set by three code-visible knobs — digit count `D` (search space `10^D`), the acceptance/grace window `λ` (at any instant **`1 + λ` codes are valid**, so each extra accepted step *linearly* multiplies success odds), and whether the verify path has an attempt cap. Per-step success ≈ `attempts_per_step × (1+λ) / 10^D`; over many steps it compounds. A standard 6-digit code with **no rate limiting** reaches ~50% compromise in hours at only 20–30 req/s; shrinking to 4 digits (`10^4`) or widening the window makes it far faster.
+
+Flag the *combination* (any single knob may be acceptable alone, but together they are exploitable):
+- **Short codes** — `D < 6` (4-digit OTP/PIN) shrinks the space by 100×.
+- **Wide acceptance window** — `valid_window`/`window`/`skew`/grace `> 1` (each step adds a fully-valid code). Prefer `0`; `1` only if clock-drift truly requires it.
+- **No attempt cap on the verify endpoint** — no lockout/throttle/counter (the actual exploit enabler; see `brute_force.md`). Without it, the OTP is just a short number an attacker enumerates.
+
+```python
+# VULN — short code + wide window + no attempt cap = trivially brute-forceable
+#   4 digits → 10^4 space; window=5 → 6 codes valid at once; no lockout on this path
+totp = pyotp.TOTP(secret, digits=4)
+if totp.verify(code, valid_window=5):          # ~6/10000 acceptance per attempt
+    login(user)
+
+# SAFE — 6 digits, minimal window, per-account attempt cap + replay cache
+totp = pyotp.TOTP(secret, digits=6)
+if attempts.exceeded(user.id):                 # lockout/throttle (brute_force.md)
+    return deny()
+if not totp.verify(code, valid_window=0):      # 1 valid code (or =1 only if drift requires)
+    attempts.incr(user.id)
+    return deny()
+if replay_cache.seen(user.id, totp.timecode):  # block reuse within the step
+    return deny()
+replay_cache.mark(user.id, totp.timecode)
+```
+
 ## SAST grep indicators
 
 **Disclosure in responses / serializers:**
@@ -185,10 +213,13 @@ rg -n "Date\.now\(\)|System\.currentTimeMillis|Math\.random|java\.util\.Random|m
 rg -n "resetToken|reset_token|verification_token" . | rg "randomBytes|secrets\.|SecureRandom|token_urlsafe"
 ```
 
-**TOTP window / replay:**
+**TOTP window / replay / weak config:**
 ```bash
 rg -n "valid_window|window\s*[=:]\s*[2-9]|totp\.verify" .
 rg -n "lastUsedStep|replay.*totp|totp.*cache" .
+# short codes + wide grace/skew (brute-force amplifiers)
+rg -n "digits\s*[=:]\s*[1-5]\b|TOTP\([^)]*digits\s*=\s*[1-5]" .
+rg -n "valid_window|grace|skew|drift|window" --glob "*.{py,js,ts,go,java,rb,php}" | rg -iv "window\s*[=:]\s*[01]\b"
 ```
 
 ## Evidence expectations
@@ -205,6 +236,7 @@ rg -n "lastUsedStep|replay.*totp|totp.*cache" .
 - FALSE POSITIVE guard: demo code-echo flows outside `/captcha`, `/sms`, `/otp`, `/verify`, password-reset, or login-protection paths should not emit `verification_code` unless the benchmark explicitly scores that module as verification abuse.
 - Missing rate limiting alone on OTP endpoints is primarily `brute_force` — pair with `verification_code` only when the code logic itself is flawed (disclosure, reuse, weak generation, missing binding).
 - TOTP libraries with `valid_window=1` and documented replay protection are not findings unless replay cache is absent and demonstrably exploitable.
+- A wide TOTP window (`> 1`), short digit count, or grace period is only a brute-force finding when the verify endpoint **also** lacks an attempt cap/lockout — a correct 6-digit code with `window<=1` behind rate limiting is not a finding. Pair the config weakness with the missing control (`brute_force.md`).
 
 ## Related references
 

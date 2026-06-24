@@ -1,6 +1,6 @@
 ---
 name: graphql_injection
-description: Detect GraphQL security issues including document injection, resolver-layer taint to SQL/NoSQL/RCE/SSRF/XSS sinks, introspection and information disclosure, authorization gaps, CSRF/request forgery, WebSocket transport parity, and operation-name injection — structural DoS covered in graphql_dos.md.
+description: Detect GraphQL security issues including document injection, resolver-layer taint to SQL/NoSQL/RCE/SSRF/XSS sinks, schema-level input validation (weak/over-permissive argument typing, custom-scalar coercion, missing semantic validation), introspection and information disclosure, authorization gaps, CSRF/request forgery, WebSocket transport parity, and operation-name injection — structural DoS covered in graphql_dos.md.
 ---
 
 # GraphQL Security Issues
@@ -10,13 +10,13 @@ GraphQL APIs present a distinct attack surface that differs significantly from R
 1. **GraphQL document injection** — user input embedded into the operation string (query/mutation text), not only the `variables` map.
 2. **Resolver taint** — every argument surface (field args, directives, variables map, input objects, JSON scalars, Upload) reaching injection sinks without sanitization.
 3. **Introspection / information disclosure** — schema leakage, field suggestions / error-oracle schema reconstruction (field/type stuffing), union/interface `__typename` + inline-fragment enumeration, input-object field-name guessing, partial introspection disable, tracing/cost extensions, GraphiQL in prod (incl. client-only IDE gates), static SDL/docs routes, collection/list filter-operator exfiltration, sensitive SDL/PII field heuristics, engine-fingerprint errors, ORM errors in responses, GET variable logging.
-4. **Authorization gaps** — gateway-only auth (incl. federation/stitching, Mutation-only resolver wrapping), BFLA on privileged mutations, miswired `@auth` directives (incl. interface vs implementing types), graphql-shield allow-by-default (incl. contextual rule-cache warming), multi-path inconsistency (incl. Relay `node(id:)` alternate path), null-coercion auth bypass, enum sort/order exposure, JWT-as-argument, IP allowlist as sole gate, optional-arg auth bypass, deprecated/stub operations unauthenticated, auth-exempt operation Sets, soft-fail auth returns, header-derived identity in context.
+4. **Authorization gaps** — gateway-only auth (incl. federation/stitching, Mutation-only resolver wrapping), BFLA on privileged mutations, mutation return-type field over-exposure (read vs mutation-return auth divergence), miswired `@auth` directives (incl. interface vs implementing types), graphql-shield allow-by-default (incl. contextual rule-cache warming), multi-path inconsistency (incl. Relay `node(id:)` alternate path), null-coercion auth bypass, enum sort/order exposure, JWT-as-argument, IP allowlist as sole gate, optional-arg auth bypass, deprecated/stub operations unauthenticated, auth-exempt operation Sets, soft-fail auth returns, header-derived identity in context.
 5. **Request forgery** — GET mutations (incl. Sangria), form-urlencoded/`text/plain` POST, CSRF on cookie-auth endpoints, side effects / state-changing operations on Query type.
 6. **WebSocket transport parity** — subscriptions without Origin check; queries/mutations/subscriptions over WS must share HTTP validationRules/auth/introspection config.
 7. **Operation-name injection** — client-controlled `operationName` persisted to logs/SQL unsanitized (distinct from allowlist bypass).
 8. **Operation-name allowlist bypass / APQ not enforced** — enforcement keyed on `operationName` without document hashing; operation-name enumeration/fuzzing when execution or error responses differ for known vs unknown names; or `persistedQueries`/`AutomaticPersistedQueries` enabled but ad-hoc `query` bodies still execute; or sensitive operations/fields gated by a deny-list/WAF string-match on query text, bypassable via alias, operation rename, or whitespace.
 9. **Unauthenticated GraphQL endpoint / alternate mount paths** — no auth middleware on `/graphql`; hardening applied only to primary route while `/gql`, `/v1/graphql`, `/playground`, etc. remain exposed; dev/staging/test mounts with weaker config than production.
-10. **Custom scalar / directive handler gaps** — pass-through scalar coercion; directive handlers executing string templates with user-controlled args.
+10. **Custom scalar / directive handler gaps & weak input typing** — pass-through scalar coercion; directive handlers executing string templates with user-controlled args; over-permissive argument typing (`String`/`ID`/`JSON` where enum/validated-scalar/input-type fits) and missing semantic validation that push input validation downstream.
 11. **ReDoS in resolvers** — GraphQL arguments passed into server-side regex without bounds (cross-ref `graphql_dos.md` for search-arg amplification).
 12. **Structural DoS** — depth/complexity/alias/batch/pagination/timeouts — see `graphql_dos.md`.
 
@@ -122,9 +122,9 @@ In GraphQL, **every argument surface is a taint source** at the resolver layer. 
 | Top-level operation args | `query($id: ID!)`, mutation input args |
 | **Field args** (nested resolvers) | `username(capitalize: Boolean)`, `search(q: String)` on nested fields |
 | **Directive handler args** | Custom `@auth(role: String)`, `@computed(value: String)`, `@deprecated(reason:)` — handler may eval/format/template with user-controlled directive args |
-| **Built-in directive args** | User-controlled `@include(if: $flag)` / `@skip(if: $flag)` boolean variables and custom directive arguments — attacker-influenced inputs at validation/execution (see Custom Directive Handlers; do not duplicate that section) |
+| **Built-in directive args** | User-controlled `@include(if: $flag)` / `@skip(if: $flag)` boolean variables and custom directive arguments — attacker-influenced inputs at validation/execution (see Custom Directive Handlers; do not duplicate that section). Client-supplied `@include`/`@skip` let the caller toggle which fields resolve at will: dangerous when **authorization or side-effects are wrongly assumed to follow the static/expected query shape** (e.g. a field guarded only by "it's not in our official client's query"), and they create **response-differential oracles** (flip `if:` true/false to confirm a field/branch exists). Real injection lives in *custom* directive argument handlers; built-ins are an authz/exfiltration-shaping surface |
 | **`variables` map** | `info.variableValues`, `context.variables` — taint at resolver, not document-safe |
-| **Input object fields** | `CreateUserInput { email, profile { bio } }` — **deeply nested** input-object subfields are taint sources reaching injection sinks (IDOR variant when nested IDs select other users' records — cross-ref `idor.md`) |
+| **Input object fields** | `CreateUserInput { email, profile { bio } }` — **deeply nested** input-object subfields are taint sources reaching injection sinks (IDOR variant when nested IDs select other users' records — cross-ref `idor.md`). **Nested-input injection bypass**: validation/sanitization or key-allowlists that only inspect **top-level** input keys miss payloads buried in nested objects, lists of inputs, and list-of-list inputs (`filter: { OR: [{ name_contains: "<inj>" }] }`, `items: [{ meta: { q: "<inj>" } }]`). Resolvers that spread/merge the whole nested input into an ORM/NoSQL filter (`Object.assign`, `**input`, `prisma.findMany({ where: input })`) let deep keys reach the sink unchecked — validate recursively and allowlist keys at every level |
 | **Custom scalars** | `JSON`, `JSONObject`, `AWSJSON` — opaque structured taint; `Email`, `IPAddress`, `UUID`, `DateTime` via `graphql-scalars` or `GraphQLScalarType` with weak `parse_value`/`parse_literal`/`serialize` |
 | **`Upload` scalar** | Filename and file content in multipart requests |
 | **Non-standard transport params** | Custom query-string/form params read by middleware or transport glue **outside** the standard `query`/`variables`/`operationName` (e.g. a connection/session pragma the handler concatenates into SQL such as `SET SESSION ...`) — same detection as resolver SQLi (`sql_injection.md`), but the taint enters at the transport layer, not a typed arg |
@@ -198,6 +198,54 @@ const IPAddress = new GraphQLScalarType({
 
 **SAFE**: use `graphql-scalars` with default validators; canonicalize IP/UUID/datetime before compare; reject non-canonical literals at parse time.
 
+## Schema-Level Input Validation (weak typing pushes validation downstream)
+
+The **schema is the first input-validation boundary**: a strict type rejects malformed input before any resolver runs (syntactic validation, for free). Over-permissive typing defeats this and forces validation into resolvers, where it is frequently forgotten — so loosely typed args are a high-signal place to look for injection/IDOR/DoS.
+
+**Vulnerable conditions (weak typing / missing validation)**:
+- Arguments typed as `String`, `ID`, or catch-all `JSON`/`JSONObject`/`AWSJSON` where a **narrow type fits** — an `enum` for a fixed set (status, role, sort key), a validated custom scalar (`EmailAddress`, `URL`, `UUID`, `PositiveInt`), or a defined **input object type** for a mutation instead of many loose scalar args. Loose typing means the only validation is whatever the resolver remembers to do.
+- Numeric/string/list args with **no bounds**: `Int`/`Float` without min/max range, `String` without max length, list args without size cap (list size also crosses into DoS — see `graphql_dos.md`).
+- **Syntactic-only validation**: relying on schema types alone and skipping **semantic** validation in the resolver (business-context rules: `startDate < endDate`, quantity within stock, value in allowed range, cross-field consistency). Schema typing cannot express these.
+- Mutation accepts a free-form `JSON`/map input that the resolver spreads into an ORM/CMS/filter (`where: input`, `Object.assign`, `**input`) without a per-field allowlist (see also Input object fields / nested-input injection above).
+
+**SAST signals**:
+```bash
+# loose argument/scalar typing in the SDL
+rg -n ":\s*(String|ID|JSON|JSONObject|AWSJSON)\b" --glob '*.{graphql,graphqls}'
+# mutations taking many scalar args instead of a defined Input type
+rg -n "type Mutation|input \w+Input" --glob '*.{graphql,graphqls}' -C1
+# resolver consuming args with no validate/parse/check between arg and sink
+rg -n "args\.(input|filter|where|data)\b" --glob '*.{js,ts,py,go,rb}' -C2
+```
+
+**VULN**:
+```graphql
+# status/role should be enums; amount has no range; free-form JSON bypasses typing
+type Mutation { updateOrder(id: ID!, status: String!, meta: JSON): Order }
+```
+```js
+// resolver does no semantic validation; status & meta reach the DB unchecked
+updateOrder: (_, { id, status, meta }) =>
+  db.orders.update(id, { status, ...meta })   // status not allowlisted; meta spreads arbitrary keys
+```
+
+**SAFE**:
+```graphql
+enum OrderStatus { PENDING PAID SHIPPED CANCELLED }
+input UpdateOrderInput { status: OrderStatus!, note: String }   # narrow types = syntactic validation
+type Mutation { updateOrder(id: ID!, input: UpdateOrderInput!): Order }
+```
+```js
+// schema already rejected bad status/extra keys; resolver adds SEMANTIC validation + authz
+updateOrder: (_, { id, input }, ctx) => {
+  if (input.note && input.note.length > 500) throw new GraphQLError('note too long');
+  assertCanEdit(ctx.user, id);                       // semantic/business rule, not expressible in schema
+  return db.orders.update(id, { status: input.status, note: input.note });
+}
+```
+
+General input-validation principles apply (allowlist over denylist; anchored, length-bounded, ReDoS-safe regex; canonicalize *before* validating; server-side is authoritative; validation is defense-in-depth, **not** the primary control for injection/XSS — see `regex_injection_redos.md`, `sql_injection.md`, `xss.md`, `arbitrary_file_upload.md`, and reject invalid input without leaking internals per `information_disclosure.md`).
+
 ## Custom Directive Handlers Executing String Templates
 
 Custom directive handlers that interpolate user-controlled directive arguments into templates, format strings, or dynamic expressions behave like resolvers — taint from directive args can reach SQL, shell, or eval sinks.
@@ -245,7 +293,13 @@ Beyond verbose stack traces — GraphQL-specific disclosure channels.
 
 graphql-js and graphene enable **field suggestion** on validation errors (`Did you mean "secretField"?`), leaking hidden field names when introspection is disabled.
 
+**Edit-distance mechanics (why a wordlist works)**: the suggestion engine (graphql-js `suggestionList`, graphene's `did_you_mean`) compares the invalid name to every real name using **Damerau-Levenshtein lexical distance** and emits a suggestion only when distance ≤ a threshold of roughly `floor(len(input)/2) + 1` (case-insensitive, capped at ~5 suggestions). Consequences an attacker exploits: (a) a near-miss guess (`secretFiel`, `Secre7Field`) reveals the real name; (b) names **≤2-3 chars** (`id`, `me`, `pk`) are below the threshold and never suggested, so they require **exact-match brute force** rather than fuzzy probing; (c) feeding a long candidate widens the threshold, surfacing more matches per request. The same algorithm leaks type, argument, and input-field names (see below).
+
 **Field/type stuffing — schema reconstruction via error oracle (introspection OFF)**: even with `introspection: false`, suggestion text on invalid fields/types leaks schema structure. An attacker seeds a **wordlist** of common field/type names, parses `Cannot query field 'X' on type 'Y'. Did you mean 'Z'?`, probes subfields recursively, and **brute-forces short names** (`id`, `pk`, `me`, `key`) too short for suggestions — reconstructing full SDL with zero introspection queries. **Type stuffing**: guess type names (e.g. `Admin`, `Config`, `Internal`, `Debug`, `Service`, `System`) via `Cannot query ... on type` / `Unknown type` oracles.
+
+**Wordlist sourcing (target-specific beats generic)**: high-hit-rate candidates come from (1) **client-side artifacts** — extract every GraphQL name with the spec regex `[_A-Za-z][_0-9A-Za-z]*` from JS/TS bundles, source maps, mobile app static files, and persisted-query manifests; (2) **observed traffic** — names seen in any legitimate query/response, plus `operationName` values; (3) **prior schemas / public dictionaries** for the same framework (Relay adds `node`/`nodes`/`edges`/`pageInfo`/`__typename`; common admin/debug names). Recursion: each recovered object field's type becomes the next probe root, so a small seed expands into the full graph. Detection note for SAST: the *server-side* enabler is suggestions/oracle errors being reachable in prod — the wordlist is the attacker's input, not a code signal.
+
+**Argument stuffing**: the validation error `Unknown argument "X" on field "Y" of type "Z". Did you mean "W"?` enumerates resolver **argument names** (e.g. discovering a hidden `asAdmin`, `internal`, `includeDeleted`, `debug`, or `tenantId` arg on an otherwise-known field) even with introspection disabled — a discovered argument is then a new auth/IDOR/injection probe surface. **Non-null structure oracle**: `Cannot return null for non-nullable field A.B` confirms a field exists, its parent type, and that it is `NonNull` — leaking schema shape from ordinary execution responses without any suggestion text. **Type-kind oracle**: the execution errors `Field "x" must not have a selection since type "String" has no subfields` (field is a leaf — scalar/enum) vs `Field "x" of type "Foo" must have a selection of subfields. Did you mean "x { ... }"?` (field is an object/abstract type, and the error even names the return type `Foo`) let an attacker classify every recovered field as leaf-vs-object and read its return type — reconstructing the full **type graph** (output usable by schema-visualizer/exporter tooling), not just field names, with introspection fully disabled.
 
 **Vulnerable conditions**:
 - Introspection disabled but validation errors still include `Did you mean` suggestions
@@ -255,7 +309,7 @@ graphql-js and graphene enable **field suggestion** on validation errors (`Did y
 **Grep seeds**:
 ```bash
 rg -n "did_you_mean|DidYouMean|suggestionList|MAX_LENGTH|hideSchemaDetailsFromClientErrors|customFormatErrorFn" --glob '*.{js,ts,py}'
-rg -n "Did you mean|Cannot query field|Unknown type" --glob '*.{js,ts,py}' -C1
+rg -n "Did you mean|Cannot query field|Unknown type|Unknown argument|Cannot return null for non-nullable|must have a selection of subfields|must not have a selection" --glob '*.{js,ts,py}' -C1
 ```
 
 **VULN**: introspection off but suggestions on in production; disabling introspection alone is insufficient.
@@ -490,6 +544,8 @@ type Query { user(id: ID!): User }  # no @auth; full ORM map
 
 SQLAlchemy, Prisma, TypeORM, JDBC exceptions passed through `formatError` / `format_error` into `errors[].message`.
 
+**ORM error signatures to grep for in responses/tests** (their presence in `errors[].message` or `extensions` confirms leakage and often fingerprints the DB + reveals table/column names → aids SQLi/IDOR mapping): Prisma `PrismaClientKnownRequestError` / `Invalid \`prisma.user.findUnique()\`` / codes `P2002`,`P2025`; Sequelize `SequelizeDatabaseError` / `SequelizeUniqueConstraintError`; TypeORM `QueryFailedError`; SQLAlchemy `sqlalchemy.exc.*` / `psycopg2.errors.*`; Django `ProgrammingError` / `IntegrityError` with `column "x" does not exist`; Hibernate `org.hibernate.exception.*` / `SQLGrammarException`; raw driver text `ER_DUP_ENTRY`, `ORA-`, `SQLSTATE[`, `duplicate key value violates unique constraint`. Treat any of these reaching the client as both information disclosure and a strong SQLi-surface signal (cross-ref `sql_injection.md`).
+
 **VULN**:
 ```js
 formatError: (err) => ({ message: err.originalError?.detail || err.message });
@@ -561,6 +617,37 @@ const resolvers = {
 rg -n "deleteAll|setRole|impersonate|withdraw|admin" --glob '*.{graphql,graphqls,js,ts,py,rb}'
 rg -n "graphql-shield|shield\(|fallbackRule|allowExternalErrors" --glob '*.{js,ts}'
 ```
+
+### Mutation return-type field over-exposure (read vs mutation-return auth divergence)
+
+A mutation's **return payload** is a read channel. When field-level authorization is enforced on the **Query** path but not re-checked on the objects/fields returned by a **Mutation** resolver, the response to a permitted write leaks data the caller could not read directly. Two shapes: (a) the mutation return type exposes nested/related objects and sensitive scalars (`updateProfile` returns `User { ssn apiKey orders { ... } }`) that query-side `@auth`/shield/projection would have stripped; (b) a data path/object is **reachable only via a mutation return** and is exposed for a role that no Query field exposes it to — an unguarded read surface that read-path review misses entirely.
+
+**Vulnerable conditions**:
+- Mutation resolver returns the full ORM entity / nested graph while the equivalent Query field applies field-level auth, projection, or a public DTO
+- `@auth` / `graphql-shield` / projection wired on `Query` (and root `Mutation` fields) but **not** on the **return object types' fields**, so post-write field resolution is unguarded
+- Mutation return type includes related collections (`{ ...; allUsers { email } }`, `{ ...; auditLog { ... } }`) not gated for the caller's role
+- A field/object appears in a mutation payload for a role but is absent from every query that role can run (read surface exclusive to the mutation path)
+
+**Grep seeds**:
+```bash
+# mutation resolvers returning entities/nested graphs; compare auth wiring to the read path
+rg -n "Mutation:\s*\{|@MutationMapping|type Mutation" --glob '*.{js,ts,py,java,go,rb,graphql,graphqls}' -C2
+rg -n "return\s+(user|account|order|customer|entity)\b|return\s+await\s+\w+\.(save|update|create)\(" --glob '*.{js,ts,py,java,go,rb}' -C2
+# mutation return types exposing sensitive/related fields in SDL
+rg -n "type\s+\w*Payload|): \w+(Payload|Result)\b" --glob '*.{graphql,graphqls}' -C2
+```
+
+**VULN**:
+```js
+// Query path strips sensitive fields; mutation returns the raw entity unfiltered
+Query: { me: (_, __, ctx) => projectPublic(db.user.find(ctx.user.id)) },     // safe DTO
+Mutation: {
+  updateProfile: async (_, { input }, ctx) =>
+    db.user.update(ctx.user.id, input),   // returns User { ssn apiKey role ... } — no projection/field auth on return type
+},
+```
+
+**SAFE**: apply the **same** field-level authorization/projection to mutation return types as to query reads — enforce auth on the return object's field resolvers (not just the root mutation), return narrow `*Payload` types instead of raw ORM entities, and verify no field/object is reachable via a mutation payload that the caller could not read via a query. Cross-ref `idor.md`, `information_disclosure.md`, `privilege_escalation.md`.
 
 ### Schema directive miswiring
 
@@ -1123,11 +1210,16 @@ GraphQL error formatters that serialize **exception stacks** into the response (
 - Custom `formatError` / `GraphQLError` handler appends `err.stack` or `originalError.stack` to JSON extensions
 - `debug: true`, `includeStacktraceInErrorResponses: true`, or env-un guarded stack traces in production Apollo/Yoga/Graphene config
 - `GRAPHQL_DEBUG=1` or query param enabling traceback in HTTP 200 error payloads
+- **Engine debug-mode flags left on in prod**: GraphQL Yoga `maskedErrors: false`; Hot Chocolate (.NET) `IncludeExceptionDetails = true`; Sangria `exceptionHandler` exposing messages; Strawberry/Ariadne `debug=True`; `graphql-go` returning raw resolver errors
+- **graphene-django `DjangoDebugMiddleware`**: registering it exposes a special `_debug` field — `{ _debug { sql { rawSql duration } exceptions { message stack } } }` returns **executed SQL and exception stacks** to the client. It is gated by Django `DEBUG=True`, so a prod deploy with `DEBUG` accidentally on (or the middleware always registered) leaks the full query log and schema relationships
+
+**Debug-mode detection (probe shapes)**: a `_debug`/`__debug` field resolving rather than erroring; `extensions.tracing`/`extensions.exception` present on a deliberately malformed query; verbose errors that flip to generic when a `?debug`/`X-Debug` toggle is removed.
 
 **Grep seeds**:
 ```bash
 rg -n "formatError|format_error|includeStacktrace|stacktrace|\.stack" --glob '*.{js,ts,py,java}'
-rg -n "debug:\s*true|DEBUG.*graphql|extensions\.exception" --glob '*.{js,ts,py}'
+rg -n "debug:\s*true|DEBUG.*graphql|extensions\.exception|maskedErrors:\s*false|IncludeExceptionDetails" --glob '*.{js,ts,py,cs}'
+rg -n "DjangoDebugMiddleware|graphene_django\.debug|_debug\s*\{|rawSql" --glob '*.{py,graphql,gql}'
 ```
 
 **VULN**:
@@ -1328,7 +1420,7 @@ public List<User> users(@Argument String filter) {
 2. **Resolver sink injection** — args/variables/directives/Upload → SQL/NoSQL/RCE/SSRF/XSS/file upload
 3. **Operation-name injection** — unsanitized `operationName` in logs/SQL
 4. **Introspection / information disclosure** — schema, suggestions/error-oracle reconstruction, union/interface `__typename` enumeration, input-object field guessing, tracing/cost extensions, GraphiQL, static SDL/docs, filter-operator exfiltration, sensitive SDL/PII heuristics, engine-fingerprint errors, ORM errors, GET variable logging
-5. **Authorization gaps** — gateway/federation (incl. Mutation-only wrapping), BFLA, miswired directives (incl. interface), shield fallback (incl. contextual cache), multi-path (`node(id:)`), null-coercion bypass, enum sort exposure, JWT-as-arg, IP allowlist, optional-arg auth bypass, deprecated/stub ops, auth-exempt Sets, soft-fail returns, header-derived context, alternate/non-prod mount paths
+5. **Authorization gaps** — gateway/federation (incl. Mutation-only wrapping), BFLA, mutation return-type over-exposure, miswired directives (incl. interface), shield fallback (incl. contextual cache), multi-path (`node(id:)`), null-coercion bypass, enum sort exposure, JWT-as-arg, IP allowlist, optional-arg auth bypass, deprecated/stub ops, auth-exempt Sets, soft-fail returns, header-derived context, alternate/non-prod mount paths
 6. **Request forgery** — GET/variables (incl. Sangria), Query-type side effects/mutations, text/plain POST, CSRF gaps
 7. **WebSocket transport parity** — CSWSH; queries/mutations/subscriptions over WS share HTTP validationRules/auth
 8. **Operation-name allowlist bypass / APQ not enforced / operation-name enumeration** — label or hash optional; ad-hoc documents still run; response oracle leaks registered names
@@ -1354,6 +1446,8 @@ public List<User> users(@Argument String filter) {
 - PII-named SDL fields on public types with 1:1 ORM mapping → **CONFIRM** (`graphql_injection` + `information_disclosure`)
 - Optional-arg auth bypass; deprecated/stub ops unauthenticated; auth-exempt operation Set; soft-fail `return {}` → **CONFIRM** (`graphql_injection` + `idor` / `privilege_escalation.md`)
 - Mutation-only auth wrapper; Query resolvers unwrapped → **CONFIRM** (`graphql_injection` + `privilege_escalation.md`)
+- Mutation return type exposes sensitive/nested fields not re-authorized on the read path, or a field/object reachable only via a mutation payload → **CONFIRM** (`graphql_injection` + `idor` / `information_disclosure.md`)
+- `Unknown argument` error oracle enumerates hidden resolver argument names (introspection off) → **CONFIRM** (`graphql_injection` + `information_disclosure`)
 - Header-derived context identity without verification → **CONFIRM** (`graphql_injection` + `trust_boundary.md`)
 - Query resolver side effects (writes, external state change) → **CONFIRM** (`graphql_injection` + `csrf.md` as applicable)
 - Custom scalar pass-through or directive template handler → **CONFIRM** (`graphql_injection` + sink skill as applicable)
