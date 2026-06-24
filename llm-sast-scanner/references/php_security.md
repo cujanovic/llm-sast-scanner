@@ -1,6 +1,6 @@
 ---
 name: php_security
-description: PHP-specific vulnerability detection — dangerous functions, type juggling, file inclusion, object injection, framework sinks, and configuration weaknesses
+description: PHP-specific vulnerability detection — dangerous functions, type juggling, file inclusion, object injection, framework sinks, configuration weaknesses, variable injection (extract/parse_str/variable variables), dynamic function and method calls, stream-wrapper and Phar deserialization, php://filter chains, and second-order/stored taint via $_SESSION and database reads
 ---
 
 # PHP Security
@@ -66,6 +66,70 @@ copy($_FILES['upload']['tmp_name'], $_GET['destination']);
 
 // VULNERABLE: SSRF via file_get_contents with URL
 $data = file_get_contents($_GET['url']);    // supports http://, ftp://
+```
+
+### Stream-wrapper & Phar sinks (filesystem ops are deserialization/LFI sinks)
+
+Any filesystem function that accepts an attacker-controlled path is more than path traversal — PHP **stream wrappers** turn it into an LFI/RCE/deserialization sink:
+
+```php
+// VULNERABLE: php://filter CHAIN RCE — chaining convert.iconv.* filters generates
+//   arbitrary bytes from no file, turning any file-read sink into RCE-capable output
+//   (no allow_url_include needed). Treat php://filter reaching include/eval-class sinks as RCE.
+include($_GET['page']);   // attacker: php://filter/convert.iconv.<...long chain...>/resource=/etc/passwd
+
+// VULNERABLE: data:// / expect:// wrappers
+include("data://text/plain;base64," . $b64);     // RCE if allow_url_include=On
+$x = file_get_contents($_GET['p']);              // expect://id, http://… (SSRF)
+
+// VULNERABLE: Phar deserialization — ANY filesystem op on a phar:// path (or attacker-controlled
+//   path that can be set to phar://) deserializes Phar metadata → triggers POP gadget chain,
+//   even without a literal unserialize() call. file_exists / is_file / fopen / include / getimagesize…
+file_exists($_GET['path']);                      // attacker: phar://uploaded.jpg/test
+```
+
+See `path_traversal_lfi_rfi.md` (wrapper/LFI detail) and `insecure_deserialization.md` (Phar/POP gadget chains).
+
+### Variable Injection (user keys become local variables)
+
+Functions that materialize variables from a user-controlled array/string let an attacker **set or overwrite arbitrary local variables** — a notorious source of auth bypass and uninitialized-variable abuse:
+
+```php
+// VULNERABLE: every key in $_POST becomes a local variable (e.g. $isAdmin, $authenticated)
+extract($_POST);                                 // attacker: ?isAdmin=1 → $isAdmin = 1
+extract($_GET, EXTR_OVERWRITE);                  // can overwrite already-set trusted vars
+
+// VULNERABLE: parse_str into local scope (no second arg) — same effect as extract
+parse_str($_SERVER['QUERY_STRING']);             // creates locals from the query string
+mb_parse_str($input);                            // same footgun
+import_request_variables('gpc');                 // PHP < 5.4 — register_globals on demand
+
+// VULNERABLE: variable variables driven by user keys
+foreach ($_GET as $k => $v) { $$k = $v; }        // $$k sets arbitrary variable names
+
+// SAFE: parse into an explicit array, never the local scope
+parse_str($qs, $out);                            // values land in $out['...'], no locals created
+// SAFE: extract only allowlisted keys with a prefix, EXTR_SKIP to not overwrite
+extract($data, EXTR_PREFIX_ALL | EXTR_SKIP, 'u');
+```
+
+### Dynamic / Variable Function & Method Calls (code-exec sinks)
+
+When the **callable name** (not just its arguments) is user-controlled, the attacker picks which function/method runs — reachable RCE or auth-logic bypass:
+
+```php
+// VULNERABLE: variable function / method / static call with user-controlled name
+$fn = $_GET['action']; $fn($arg);                // $fn = 'system' → system($arg)
+$obj->{$_GET['method']}($arg);                   // attacker selects the method
+call_user_func($_GET['cb'], $arg);               // cb = 'system' / 'exec' / 'assert'
+call_user_func_array($_POST['fn'], $_POST['args']);  // name AND args attacker-controlled
+$class::{$_GET['m']}();                           // dynamic static method
+new $_GET['class']($arg);                         // dynamic instantiation → __construct gadget
+
+// SAFE: allowlist the callable; never derive the function/method name from input
+$allowed = ['list' => 'listItems', 'view' => 'viewItem'];
+$method = $allowed[$_GET['action']] ?? abort(400);
+$this->$method($arg);
 ```
 
 ## PHP Type Juggling Vulnerabilities
@@ -233,6 +297,17 @@ All of the following are attacker-controlled sources:
 
 **Note**: `$_SERVER['PHP_SELF']` is often used in HTML forms and is XSS-injectable.
 
+## Second-Order & Stored Taint (PHP)
+
+The dangerous flow often does not start at a superglobal on *this* request. When tracing PHP, treat these as **tainted roots** too:
+
+- **`$_SESSION` values are second-order tainted.** If any request anywhere writes user input into the session (`$_SESSION['x'] = $_POST['x'];`), then `$_SESSION['x']` is attacker-influenced on every later request. Grep the whole project for `$_SESSION['x'] =` to find the writer before clearing a finding as safe.
+- **Database reads echo prior writes.** A value read back from the DB (`$row['name']`) is tainted if that column was ever populated from user input without sanitization at write time → stored XSS (`echo $row['name']`) or second-order SQLi (the read value re-concatenated into another raw query). Grep for `INSERT`/`UPDATE` touching the column.
+- **Scope-merging propagates taint.** `include`/`require` merge the caller's and includee's variable scope; a tainted variable set before the include is visible inside it (and vice-versa). Follow includes when tracing.
+- **`extract()` / `parse_str()` rename taint.** After `extract($_POST)`, every resulting local (`$username`, …) carries the taint of the corresponding key — trace those new variable names, not just `$_POST`.
+- **Framework route/request binding are entry points.** Laravel/Symfony controller method parameters bound from `/user/{id}` or `Request` injection are tainted sources even though no superglobal appears.
+- **Composer autoload widens the gadget pool.** For deserialization/Phar findings, every class under `vendor/` with `__wakeup`/`__destruct`/`__toString` is a candidate POP gadget — autoload makes them all reachable.
+
 ## PHP-Specific Detection Rules
 
 ### TRUE POSITIVE
@@ -245,6 +320,11 @@ All of the following are attacker-controlled sources:
 - `exec/system/passthru/shell_exec/popen/proc_open/pcntl_exec(` + user input → **CONFIRM** (OS command injection)
 - `file_get_contents($_GET['url'])` or similar → **CONFIRM** (SSRF or LFI)
 - `DB::select("...'" . $request->x . "'...")` in Laravel → **CONFIRM** (SQL injection)
+- `extract(`/`parse_str($x)` (no 2nd arg)/`mb_parse_str(`/`import_request_variables(` on user data → **CONFIRM** (variable injection)
+- `$$var`, `$fn(`, `$obj->$method(`, `call_user_func(`/`call_user_func_array(`, `new $class(` with user-controlled name → **CONFIRM** (dynamic call → RCE / logic bypass)
+- `php://filter` reaching `include`/`require`/eval-class sink → **CONFIRM** (filter-chain RCE); `data://`/`expect://` with `allow_url_include=On` → **CONFIRM**
+- filesystem op (`file_exists`/`is_file`/`fopen`/`include`/`getimagesize`) on a path that can be `phar://` → **CONFIRM** + trace POP gadget chain
+- `echo $row['col']` / raw query using a DB value whose column is populated from user input → **CONFIRM** (stored XSS / second-order SQLi)
 
 ### FALSE POSITIVE
 

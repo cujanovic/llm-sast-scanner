@@ -1,6 +1,6 @@
 ---
 name: client-side-path-traversal
-description: Client Side Path Traversal (CSPT) and secondary-context path traversal across frontend frameworks (React Router, Next.js, Vue Router, Angular, SvelteKit, Nuxt, Ember, SolidStart)
+description: Client Side Path Traversal (CSPT) and secondary-context path traversal across frontend frameworks (React Router, Next.js, Vue Router, Angular, SvelteKit, Nuxt, Ember, SolidStart), including second-order/native deep-link CSPT and WAF/encoding-level (depth) bypass analysis
 ---
 
 # Client Side Path Traversal (CSPT)
@@ -672,6 +672,48 @@ Detection rule: flag any state-changing (`POST`/`PUT`/`PATCH`/`DELETE`) `fetch` 
 
 Representative CVEs (CSPT2CSRF): **CVE-2023-45316** (Mattermost, POST sink), **CVE-2023-6458** (Mattermost, GET-sink chained to POST via the file gadget), and a 1-click POST-sink CSPT2CSRF in Rocket.Chat — all driven by a decoded path/query value reflected into a subsequent request path.
 
+## Second-Order CSPT (stored payload / native deep-link source)
+
+CSPT is not only a web-router primitive. The decoded value that lands in a request path can arrive **second-order** — stored by the attacker earlier and fetched back later — and the consuming app can be a **native mobile app**, not a browser. The source taxonomy above is web-centric; this section covers the mobile/stored variant.
+
+**The chain** (native app + trusted storage/redirect service):
+1. The app embeds an API key for a helper service it trusts — e.g. a **link shortener**. The attacker extracts that key from the app binary/traffic (see `mobile_security.md` — hardcoded secrets) and uses it to create a short link with an **arbitrary JSON parameter blob** attached; the service stores the blob for that link.
+2. The victim opens the link. The app's **registered deep-link / universal-link / intent-filter handler** catches it, **fetches the JSON back** from the shortener, and **dispatches one of its internal actions** based on the blob's content.
+3. That internal action builds an **authenticated** request (the app attaches the victim's session/token) and **concatenates a blob field into the URL path**. `#` truncation (`%23`) drops the intended trailing path, and `../` (`%2e%2e%2f`) climbs — so the field rewrites the destination into an **arbitrary authenticated request to any endpoint of the API, as the victim** (same primitive as CSPT→CSRF, but the source is stored JSON delivered via a deep link).
+
+**Why it's "second-order"**: the path-controlling value is not in the inbound URL — it is attacker-stored content the app round-trips into a request builder while trusting it. Generalizes to any client (mobile or web) that fetches remote/stored JSON and interpolates a field into a later request path: push-notification payloads, server-driven UI / "action" descriptors, QR/NFC deep links, saved drafts, webhook-echo blobs.
+
+**Landing impact when only the path/query is yours** (the forged request's body usually isn't controllable, but you control the path and can append `?k=v&`): some backends **parse query-string params as body params** (framework param binding — see `api_security.md`), which makes a path-only primitive reach body-bound handlers. Three gadgets to complete impact:
+- **Same-named params via query string** — a state-changing endpoint that accepts its parameters from the query string as readily as the body; the appended `?k=v&` supplies them.
+- **No-body endpoints that ignore the auto-sent params** — target an action that needs no body and simply disregards whatever params the forged request already carries, so the inherited body/headers don't break it.
+- **Partial JSON injection on a different endpoint, chained in to mask the response** — route through an endpoint where you can inject into a JSON response to shape/suppress what the app then parses, hiding errors or steering the next internal action.
+
+**SAST signals**:
+```bash
+# deep-link/intent handler -> fetch remote JSON -> internal action builds a request path from a field
+rg -n "openURLContexts|application\(.*open url|ACTION_VIEW|getData\(\)|onNewIntent|addEventListener\('url'|Linking\.addEventListener" --glob '*.{swift,kt,java,js,ts,dart}'
+rg -n "shorten|short\.link|deeplink|universal.?link|app.?link" --glob '*.{swift,kt,java,js,ts,dart}' -i
+# a field from fetched JSON interpolated into a request URL path with no allowlist
+rg -n "\$\{[^}]*\}/|\"\s*\+\s*\w+\s*\+\s*\"/|path\s*=\s*.*\+|URL\(string:\s*\".*\\\(" --glob '*.{swift,kt,java,js,ts,dart}' -C2
+```
+
+**SAFE**: treat deep-link-delivered and remotely-fetched content as untrusted input, not configuration; **allowlist** the action and validate any field bound to a request path against a strict pattern (reject `..`, `/`, `\`, `#`, `?`, and their `%`-encodings) before building the URL; never embed third-party service API keys in the client (proxy through your backend); bind state-changing params **explicitly to the body** and do not let query params merge into body for those routes (see `api_security.md`); canonicalize then re-validate the resolved request path.
+
+## WAF / Filter Bypass via Encoding-Level Mismatch
+
+A depth-checking WAF (or any pre-sink filter) and the application frequently URL-decode the value a **different number of times** before they act on it. That mismatch is a reliable bypass, and it is also the reason a single-pass decode-then-check guard is **not** a real barrier. Define three quantities:
+
+- **depth** of a URL path = number of directory segments − number of `../` sequences (e.g. `/a/../../c` → depth −1). Depth-based WAFs block requests whose depth goes negative.
+- **encoding level** of a string = how many times you must URL-decode it to reach the literal value (e.g. `b%252561` → `b%2561` → `b%61` → `ba` is level 3).
+- **WAF level** / **app level** = how many times the WAF (resp. the app, before the value reaches the `fetch` sink) decodes the value. You learn the app level empirically: navigate to `…/%2561` and see whether the issued request contains `a` (decoded once) or `%61`.
+
+**The three bypass cases** (target: keep WAF-computed depth ≥ 0 while the value the browser/app resolves still has negative depth):
+- **WAF level < app level** → over-encode the payload so the WAF can't see the `../`s but the app decodes them out: WAF level 1, app level 2 → `..%252f..%252f..%252fasdf` (WAF sees inert `%2f`; app decodes twice to `../../../asdf`).
+- **WAF level > app level** → pad with encoded `a%2fa` segments the WAF decodes (raising its directory count) but the app does not, keeping WAF depth ≥ 0 while the app still traverses: WAF level 2, app level 1 → `a%252fa%252fa%252fa%2f..%2f..%2f..%2f..%2fasdf` (WAF reads `a/a/a/a/../../../../asdf`, depth 0; app passes `a%2fa%2fa%2fa/../../../../asdf` ≡ `../../../asdf`).
+- **WAF level = app level** → exploit that **the browser treats `%2e%2e/` (encoded dots, literal slash) exactly like `../`**. A payload decoding (in both WAF and app) to `%2e%2e/%2e%2e/%2e%2e/asdf` has positive WAF depth (the WAF counts `%2e%2e` as a normal segment, not a climb) yet the browser still resolves the traversal. This is the most broadly useful nugget: **encoded dots still climb in the browser even though depth/regex filters that match literal `..` miss them.**
+
+**SAST / barrier implication**: a decode-or-normalize-then-validate guard is only sound when it **canonicalizes to a fixpoint** (decode repeatedly until the string stops changing) **before** the depth/charset check, AND the value is not decoded again afterward on the way to the sink. Flag as bypassable: single-pass `decodeURIComponent`-then-check; depth/`..`-regex filters that don't also reject `%2e`/`%252e`/`%2f`/`%252f` forms; and any "a WAF handles path traversal" assumption. SAFE remains an **allowlist/numeric coercion of the segment** (not a decode-count-sensitive denylist) before it reaches the request builder.
+
 ## Tooling for Triage
 
 These are dynamic-testing capabilities, useful when the user explicitly asks for runtime verification.
@@ -681,6 +723,10 @@ These are dynamic-testing capabilities, useful when the user explicitly asks for
 - **CSPT-to-CSRF tooling** enumerates reachable state-changing endpoints from a CSPT source and generates a working CSRF PoC link.
 - **Intercepting-proxy workflow**: match-and-replace rules and response highlighting make it straightforward to trace decoded-param → fetch flows.
 - Manual confirmation: open DevTools → Network, set a breakpoint on `fetch`/`XMLHttpRequest.open`, navigate to the crafted URL, and check the *resolved* request URL after the browser collapses `../`.
+
+**Discovery heuristics (dynamic):**
+- **The `undefined` / `null` path-segment tell.** An outbound request that contains a literal `undefined` or `null` in its path on a normal page load (e.g. the homepage fetches `/category/undefined`) is a strong signal of a **hidden CSPT source**: the frontend is interpolating a currently-unset variable (often a query param like `?category=`) into a request path. Supplying the missing param (`?category=anything`) reveals the reflection. Standard param-miners miss this because adding the param produces **no visible change in the rendered page** — only the outbound request changes — so diff-based discovery returns nothing. Grep app JS for request templates fed by optional/possibly-undefined values, and watch the Network tab for `undefined`/`null`/`NaN` path segments.
+- **Partial / substring matching, not exact match, when correlating source→request.** A source value is frequently **transformed** before it lands in the path (`category=news` → `/api/news.json`, `/api/news-category`, lowercased, slugified). Exact-string comparison of a URL part against outbound request URLs yields false negatives; match on substring/normalized containment (accept more false positives to avoid missing real sinks), then confirm manually. The `referer`-header approach is unreliable for the same correlation because cross-origin requests strip path/query from `Referer`.
 
 ## Detection Rules
 

@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework. Covers 91 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework.   Covers 92 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.36.0"
+  version: "1.38.0"
   domain: application-security
-  references: 91 vulnerability knowledge bases
+  references: 92 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,13 +22,13 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 91 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 92 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
 |----------|----------------|
 | **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, Server-Side Include (SSI) Injection, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
-| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, OAuth 2.0 / OIDC Misconfiguration, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Session Puzzling, Reverse-Proxy Access Bypass, Email Parser Differential, Mass Assignment |
+| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, OAuth 2.0 / OIDC Misconfiguration, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Session Puzzling, Reverse-Proxy Access Bypass, Email Parser Differential, Mass Assignment, BaaS Client-Side Authorization (Supabase RLS / Firebase Security Rules) |
 | **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
 | **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, Correlation/Tracing Header Injection, CORS Misconfiguration, WebSocket Security (CSWSH), postMessage Security, XSSI / JSONP, Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, GraphQL Denial of Service, Regex Injection/ReDoS, CVE Patterns |
@@ -212,6 +212,7 @@ references/correlation_header_injection.md — Correlation/tracing headers (X-Re
 references/certificate_validation.md     — TLS certificate / hostname / pinning / revocation failures (CWE-295/297/299/322)
 references/cleartext_transmission.md     — Cleartext transmission, missing TLS (CWE-319/311)
 references/mass_assignment.md            — Mass assignment / autobinding of privileged fields (CWE-915)
+references/baas_security.md              — BaaS client-side authorization: Supabase/Postgres RLS disabled or `true` policies, Firebase/Firestore/RTDB/Storage rules allowing public read/write, service_role/admin keys in client bundles, anon writes, over-broad realtime (CWE-862/863/732/798)
 references/regex_injection_redos.md      — Regex injection, ReDoS, incomplete regex/URL validation (CWE-730/1333/020/625/116)
 references/csv_injection.md              — CSV / formula injection on spreadsheet export (CWE-1236)
 references/prompt_injection.md           — LLM prompt injection (CWE-1427)
@@ -261,6 +262,7 @@ sanitizers/barriers that neutralize it. Prefer those recognized barriers when ru
   context window, fall back to lens-grouped batches (injection → auth/access → crypto & data-exposure →
   server-side → protocol/infra → supply-chain), running one batch at a time.
 - For any code using a **shared/singleton client, cache, request de-duplicator, connection pool, thread-local, or module global** that returns per-user/per-tenant data, load `shared_client_cache_leak.md`.
+- For any **Backend-as-a-Service** stack where the client talks directly to the data layer (Supabase, Firebase/Firestore/RTDB, AWS Amplify/AppSync, Hasura, Appwrite, Nhost, PocketBase, Parse — signals: `@supabase/*`, `firebase`/`firebase-admin`, `createClient(`, `*.rules`/`firestore.rules`/`storage.rules`, `ENABLE ROW LEVEL SECURITY`/`CREATE POLICY`, `service_role`, `x-hasura-admin-secret`), load `baas_security.md`.
 - Always load references for the top OWASP risks even if not explicitly requested.
 
 ---
@@ -537,6 +539,18 @@ Adversarial Verdict: STANDING / DOWNGRADED / DISPUTED / WITHDRAWN — <rationale
 
 ### Step 7: Report Findings
 
+#### Citation & Evidence Verification (mandatory pre-report gate)
+
+Before writing any finding to the report, re-verify its evidence **against the source** — this is a factual-accuracy gate distinct from the Judge (validity) and the Adversarial pass (impact). For EVERY finding that will be reported, re-open each cited location and confirm:
+
+- [ ] The cited **file path exists** and each `file:line` in `File:` and `Flow:` **matches the described code** (line not drifted; snippet appears verbatim).
+- [ ] The **function/scope name** around each cited line is correct.
+- [ ] The **route/method + parameter** and any payload in the attack scenario are real (the endpoint exists, the HTTP method matches, the input would reach the sink as described).
+- [ ] **Preconditions are complete** — no required auth/config/state the finding silently assumes.
+- [ ] The remediation actually prevents the cited attack without contradicting the verified flow.
+
+On any mismatch: correct the citation if the real evidence is found, or **downgrade to NEEDS CONTEXT / drop** the finding — never ship an unverified `file:line`. **Independence:** in multi-agent runs this verification SHOULD be performed by an agent that did **not** produce the finding (the author re-checking their own work misses their own blind spots); see the full-scan-loop's consolidation gate. This operationalizes the **No fabricated evidence** principle below into a required action.
+
 #### Severity Classification
 
 | Severity | Criteria |
@@ -604,7 +618,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.31.0
+Analyzer: llm-sast-scanner v1.38.0
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>
@@ -617,6 +631,12 @@ Analyzer: llm-sast-scanner v1.31.0
 ## Chained / Compound Risks
 <confirmed multi-finding attack paths with escalated combined severity; omit if none>
 ## Unverifiable Findings
+
+## Hardening Notes (defense-in-depth — NOT findings)
+<missing-but-not-exploitable controls: a gap behind an already-effective layer is a hardening note, not a finding, and must not be assigned a severity; omit if none>
+
+## Positive Patterns (what the codebase does well)
+<concrete controls observed working: parameterized queries throughout, output auto-escaping, centralized authz, per-request client scoping, etc. — calibrates trust in the findings and helps the team prioritize; omit only if nothing notable>
 
 ## Remediation Priority
 <ordered fix list>

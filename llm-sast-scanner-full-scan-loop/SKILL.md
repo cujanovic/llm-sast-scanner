@@ -6,11 +6,12 @@ description: >
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
   By DEFAULT (mode=parallel) it dispatches one subagent per vulnerability lens — each runs the convergence loop
   (Steps 1-5) constrained to its lens until convergence with 100% line coverage — then a consolidation subagent
-  merges results, runs Adversarial Impact Validation (Step 6) once, and writes a timestamped consolidated report.
+  merges results, runs Adversarial Impact Validation (Step 6) once, independently verifies every finding's
+  citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.6.0"
+  version: "1.8.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -54,7 +55,7 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 
 Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-scanner/SKILL.md). Load
 reference files from its `references/` directory ON DEMAND, per pass — only the subset relevant to the
-current pass's analysis lens (see LOOP CONTROL), rather than all 91 at once. As the lens rotates across
+current pass's analysis lens (see LOOP CONTROL), rather than all 92 at once. As the lens rotates across
 passes, every vulnerability class gets covered, without holding all references in context simultaneously.
 Following the base skill's read-once discipline, keep the current pass's lens references loaded while you read
 each file so all of that pass's classes are evaluated in a single read. All step numbers (Step 1-6), the Judge
@@ -116,7 +117,7 @@ subagents share one cacheable prefix:
 | Lens | Deep results file | Vulnerability classes (reference lenses) |
 |------|-------------------|------------------------------------------|
 | injection | `.llm-sast-scanner-cache/deep-injection-results.md` | SQLi, XSS, client-side prototype pollution, SSTI, SSI injection, NoSQLi, GraphQL injection, XXE, RCE/command injection, expression-language injection, LDAP injection, XPath/XQuery injection, CSV/formula injection, log injection, prompt injection (LLM01), insecure output handling (LLM05), DOM clobbering |
-| access-auth | `.llm-sast-scanner-cache/deep-access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, OAuth 2.0 / OIDC misconfiguration, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, session puzzling, reverse-proxy access bypass, email parser differential, mass assignment, excessive agency (LLM06), RAG / vector & embedding security (LLM08), API / REST / web-service security, webhook / integration security, MCP (Model Context Protocol) security |
+| access-auth | `.llm-sast-scanner-cache/deep-access-auth-results.md` | IDOR, privilege escalation / missing auth (BFLA), authentication & JWT, OAuth 2.0 / OIDC misconfiguration, default credentials, brute force, business logic, HTTP method tampering, verification code abuse, session fixation, session puzzling, reverse-proxy access bypass, email parser differential, mass assignment, BaaS client-side authorization (Supabase RLS / Firebase Security Rules), excessive agency (LLM06), RAG / vector & embedding security (LLM08), API / REST / web-service security, webhook / integration security, MCP (Model Context Protocol) security |
 | crypto-data | `.llm-sast-scanner-cache/deep-crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07), privacy / data protection (PII) |
 | server-side | `.llm-sast-scanner-cache/deep-server-side-results.md` | SSRF, path traversal/LFI/RFI, client-side path traversal, server-side prototype pollution, insecure deserialization, arbitrary file upload, JNDI injection, race conditions, insecure temp file, file permissions, batch/ETL/mainframe data-pipeline security |
 | protocol-infra | `.llm-sast-scanner-cache/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, correlation/tracing header injection, CORS misconfiguration, WebSocket security (CSWSH), postMessage security, XSSI / JSONP, clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), GraphQL denial of service, regex injection/ReDoS, CVE patterns, Content Security Policy (CSP) weaknesses, XS-Leaks |
@@ -136,10 +137,14 @@ Launch one subagent:
 > `.llm-sast-scanner-cache/deep-*-results.md` files and `.llm-sast-scanner-cache/architecture.md`. Merge and de-duplicate findings across
 > lenses (same `file:line` + vuln class = one finding). Run the base `llm-sast-scanner` skill's **Step 6
 > (Adversarial Impact Validation)** ONCE over the full consolidated set with the `adv` value (default
-> `adv=critical,high,medium`), apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts, then write a
+> `adv=critical,high,medium`), apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts. Then, as an
+> **independent gate** (you did NOT author these per-lens findings), run the base skill's **Citation & Evidence
+> Verification** over every surviving finding: re-open each cited `file:line` and confirm the path exists, the
+> line/snippet and function scope match, and the route/method + payload + preconditions are accurate — correct
+> mismatches, or downgrade to NEEDS CONTEXT / drop any finding whose evidence does not verify. Then write a
 > single timestamped report `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) using the
 > base skill's report structure (Executive Summary; Critical/High/Medium/Low/Informational; Unverifiable;
-> Remediation Priority). Also print a combined coverage summary and a per-lens pass log. Finally, as the
+> Hardening Notes; Positive Patterns; Remediation Priority). Also print a combined coverage summary and a per-lens pass log. Finally, as the
 > **single writer**, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project Memory Protocol**
 > (append newly CONFIRMED findings with current `git rev-parse HEAD`; record DOWNGRADED/DISPUTED/WITHDRAWN as
 > false-positive patterns with the rationale that defeated them; refresh primitives/hotspots; bump
@@ -219,6 +224,7 @@ GROUND RULES
       * kubernetes_cloud_security ← k8s manifests (kind: …) / Helm Chart.yaml
       * cicd_container_security ← Dockerfile / .github/workflows/* / .gitlab-ci.yml / Jenkinsfile / *compose*.y*ml
       * nginx_security ← nginx.conf / conf.d/*.conf / *.nginx / sites-available/* / sites-enabled/* / snippets/* (these last three are usually **extensionless** — match by path, not extension) / files containing `server {` / `location ` / `proxy_pass` / `worker_processes` / `ssl_protocols` / `ssl_certificate`
+      * baas_security ← Backend-as-a-Service markers: `@supabase/*` / `firebase` / `firebase-admin` deps, `createClient(`, `*.rules` / `firestore.rules` / `storage.rules` / `database.rules.json`, SQL containing `ENABLE ROW LEVEL SECURITY` / `CREATE POLICY` / `auth.uid()`, `service_role`, `x-hasura-admin-secret`, `aws_appsync_*` / `amplify`
       * prompt_injection, insecure_output_handling, excessive_agency, system_prompt_leakage,
         rag_vector_security, ml_supply_chain_poisoning, mcp_security, ai_editor_config_poisoning ←
         AI/LLM/agent markers (openai / anthropic / langchain / llama / transformers deps, *.ipynb,
@@ -262,7 +268,7 @@ cap of 10; NO adv inside the loop)
   crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
   passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
 supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
-pass's lens (not all 91 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
+pass's lens (not all 92 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
 applicable class — every class on the stack-gated allowlist (see REFERENCE LOADING) — in all six lens groups
 from the Step D2 table, including the cloud/infrastructure and web-platform classes (IaC, Kubernetes/cloud,
 CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-chain) whenever their files
@@ -293,12 +299,16 @@ FINAL ADVERSARIAL PASS (run ONCE, after the loop is fully done)
   100%, take the FULL consolidated set of Judge-passed findings and run Adversarial Impact Validation (Step 6)
   ONE TIME over all of them with the `adv` value (default adv=critical,high,medium).
 - Apply the adversarial verdicts (STANDING / DOWNGRADED / DISPUTED / WITHDRAWN) to finalize severities.
+- Then run the base skill's **Citation & Evidence Verification** over every surviving finding: re-open each
+  cited `file:line` and confirm path/line/scope/route/payload/preconditions match the source; correct
+  mismatches, or downgrade to NEEDS CONTEXT / drop any finding whose evidence does not verify. (Single-agent
+  mode is self-review — be deliberately adversarial toward your own citations here.)
 OUTPUT (single-agent mode)
 - After the final adversarial pass, write a single consolidated report to the current dir named
   `sast_report-<timestamp>.md`, where `<timestamp>` is the output of `date +%Y-%m-%d_%H-%M-%S`
   (e.g., `sast_report-2026-06-11_14-30-05.md`). Use the skill's report structure (Executive Summary;
-  Critical/High/Medium/Low/Informational; Unverifiable; Remediation Priority), with exact file paths +
-  line numbers and concrete remediations.
+  Critical/High/Medium/Low/Informational; Unverifiable; Hardening Notes; Positive Patterns; Remediation
+  Priority), with exact file paths + line numbers and concrete remediations.
 - Also print a short loop log: how many passes ran, what NEW finding (if any) each pass added, the reason the
   loop stopped (converged with no new bug, reached the pass-5 ceiling, or hit the 10-pass cap), the final
   line-coverage result (100% of N in-scope files / M lines, with the per-file checklist), and the adversarial

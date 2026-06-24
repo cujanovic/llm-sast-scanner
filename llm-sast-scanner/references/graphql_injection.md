@@ -10,7 +10,7 @@ GraphQL APIs present a distinct attack surface that differs significantly from R
 1. **GraphQL document injection** — user input embedded into the operation string (query/mutation text), not only the `variables` map.
 2. **Resolver taint** — every argument surface (field args, directives, variables map, input objects, JSON scalars, Upload) reaching injection sinks without sanitization.
 3. **Introspection / information disclosure** — schema leakage, field suggestions / error-oracle schema reconstruction (field/type stuffing), union/interface `__typename` + inline-fragment enumeration, input-object field-name guessing, partial introspection disable, tracing/cost extensions, GraphiQL in prod (incl. client-only IDE gates), static SDL/docs routes, collection/list filter-operator exfiltration, sensitive SDL/PII field heuristics, engine-fingerprint errors, ORM errors in responses, GET variable logging.
-4. **Authorization gaps** — gateway-only auth (incl. federation/stitching, Mutation-only resolver wrapping), BFLA on privileged mutations, mutation return-type field over-exposure (read vs mutation-return auth divergence), miswired `@auth` directives (incl. interface vs implementing types), graphql-shield allow-by-default (incl. contextual rule-cache warming), multi-path inconsistency (incl. Relay `node(id:)` alternate path), null-coercion auth bypass, enum sort/order exposure, JWT-as-argument, IP allowlist as sole gate, optional-arg auth bypass, deprecated/stub operations unauthenticated, auth-exempt operation Sets, soft-fail auth returns, header-derived identity in context.
+4. **Authorization gaps** — gateway-only auth (incl. federation/stitching, Mutation-only resolver wrapping), BFLA on privileged mutations, mutation return-type field over-exposure (read vs mutation-return auth divergence), miswired `@auth` directives (incl. interface vs implementing types), graphql-shield allow-by-default (incl. contextual rule-cache warming), multi-path inconsistency (incl. Relay `node(id:)` alternate path), nested/relationship-traversal auth (root-only checks, unchecked nested resolvers pivoting to other users' data), null-coercion auth bypass, enum sort/order exposure, JWT-as-argument, IP allowlist as sole gate, optional-arg auth bypass, deprecated/stub operations unauthenticated, auth-exempt operation Sets, soft-fail auth returns, header-derived identity in context.
 5. **Request forgery** — GET mutations (incl. Sangria), form-urlencoded/`text/plain` POST, CSRF on cookie-auth endpoints, side effects / state-changing operations on Query type.
 6. **WebSocket transport parity** — subscriptions without Origin check; queries/mutations/subscriptions over WS must share HTTP validationRules/auth/introspection config.
 7. **Operation-name injection** — client-controlled `operationName` persisted to logs/SQL unsanitized (distinct from allowlist bypass).
@@ -734,6 +734,60 @@ shield({ Query: { orders: rule() } }, { cache: 'contextual' }); // batch warms c
 ```
 
 **SAFE**: enforce authz in **every** resolver including `node` / `nodes` / interface field resolvers; ownership via `parent.id === ctx.user.id`; graphql-shield `cache: 'strict'`; test alias and fragment paths. Cross-ref `idor.md` (Relay `node(id:)` alternate-path bypass, e.g. CVE-2025-31481).
+
+### Nested / relationship-traversal authorization (root-only auth, unchecked nested resolvers)
+
+The defining GraphQL BOLA: authorization is enforced (or implicitly satisfied) **only at the root field**, and the nested resolvers reached by **walking object relationships** run unchecked — on the false assumption that "you had to go through an authorized object to get here." Every resolver is independent and executes with the **graph position**, not the caller's permissions; a relation that resolves for display (e.g. `Post.author` for a byline) becomes a pivot into that author's private fields. Because the entry point is **public or low-privilege**, this is easy to miss in review that only checks top-level queries.
+
+**Vulnerable conditions**:
+- A **public / low-priv root** (e.g. `publicPost(id:)`, `search`, `feed`) exposes a relation to a **sensitive type**, and that type's field/object resolvers don't re-authorize: `publicPost(id:123){ author { email draftPosts{body} linkedPaymentMethod{ last4 } } }` returns another user's private data even though `me{ email }` is locked down.
+- **Bidirectional relationship pivoting**: `Post → author → posts → author …` (or `User → orders → user`) lets you loop back into *arbitrary* other users' objects from one public node — the relationship edges form an unbounded BOLA traversal graph (also a DoS shape — see `graphql_dos.md`).
+- **Field-level sensitivity ignored**: object-level access to the parent is treated as access to *all* its scalars (`email`, `phone`, `ssn`, `apiKey`, tokens) and child collections (`draftPosts`, `messages`, `paymentMethods`) with no per-field/per-object owner-or-role check.
+- Sensitive types reachable through **union/interface fragments** that the normal typed path would not surface (see Union / Interface `__typename` introspection bypass).
+
+**Recon**: use introspection (or field-suggestion/error-oracle recovery when it is disabled — see Field suggestions) to map which **sensitive types are reachable from public entry points**, then probe each relation hop for missing authz.
+
+**Grep seeds**:
+```bash
+# nested resolvers on related/sensitive types returning private fields with no ctx/owner check
+rg -n "(author|owner|user|account|customer|profile)\s*:\s*(async\s*)?\(.*parent" --glob '*.{js,ts}' -C2
+rg -n "(email|phone|ssn|apiKey|token|secret|paymentMethod|draft|message)s?\s*:\s*(async\s*)?\(.*parent" --glob '*.{js,ts}' -C2
+# resolver maps where only Query.* has guards but type resolvers (User/Post/...) do not
+rg -n "type Query|Query:\s*\{|User:\s*\{|Post:\s*\{" --glob '*.{js,ts}' -C1
+rg -n "parent\.userId|parent\.ownerId|ctx\.user\.id|context\.user" --glob '*.{js,ts,py,java,go,rb}' -C1
+```
+
+**VULN**:
+```js
+// Root is public; nested resolvers trust the parent and never check the caller
+Query: { publicPost: (_, { id }) => db.posts.find(id) },           // public on purpose
+Post:  { author: (post) => db.users.find(post.authorId) },         // resolves for the byline
+User:  {
+  email:             (u) => u.email,                               // no owner/role check
+  draftPosts:        (u) => db.posts.where({ authorId: u.id, published: false }),
+  linkedPaymentMethod:(u) => db.payments.forUser(u.id),            // cross-user private data
+}
+```
+
+**SAFE**:
+```js
+// Authorize at EVERY resolver against the caller, not the graph position
+User: {
+  email: (u, _a, ctx) => (ctx.user?.id === u.id || isAdmin(ctx)) ? u.email : null,
+  draftPosts: (u, _a, ctx) => {
+    if (ctx.user?.id !== u.id) throw new GraphQLError('forbidden');   // owner-only
+    return db.posts.where({ authorId: u.id, published: false });
+  },
+  linkedPaymentMethod: (u, _a, ctx) => {
+    if (ctx.user?.id !== u.id) throw new GraphQLError('forbidden');
+    return db.payments.forUser(u.id);
+  },
+}
+// Prefer field-level @auth directives / shield rules / projection that apply on the
+// NESTED type regardless of entry path; mark sensitive fields owner/role-scoped centrally.
+```
+
+Detection rule: a relation from a public/low-priv root to a type carrying private scalars or child collections, where the **nested type's resolvers contain no `ctx.user`/owner/role check**, is a CONFIRMED nested-authz BOLA — not informational. Cross-ref `idor.md` and `information_disclosure.md`.
 
 ### Null coercion authorization bypass
 

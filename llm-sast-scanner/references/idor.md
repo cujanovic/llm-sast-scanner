@@ -73,8 +73,14 @@ IDOR occurs when an authenticated user changes a user-supplied identifier (path 
 - Path traversal-like in virtual file systems: `/files/user_123/../../user_456/report.csv`
 
 ### UUID/Opaque ID Sources
-- Logs, exports, JS bundles, analytics endpoints, emails, public activity
-- Time-based IDs (UUIDv1, ULID) may be predictable within a time window
+An "unpredictable" ID (UUID/ULID/opaque blob) is not secret — it leaks through many channels, so a missing ownership check is still exploitable. Sources:
+- **In-app exposure**: list/search/export endpoints, notifications, emails, webhooks, analytics endpoints, JS bundles, GraphQL responses; any read-only user in the same org who can *view* the ID (an IDOR then becomes privilege escalation)
+- **URL/referrer leakage**: IDs in paths or query strings leak via the `Referer` header to third-party hosts, browser history, and shared/streamed/screen-shared URLs; OAuth/SSO "sign in with" buttons often embed the org/tenant UUID in the generated URL
+- **External archives & search**: web archives and crawl datasets (Wayback-style archives, Common Crawl), URL/sandbox scanners and threat-intel feeds, search-engine indexes/caches, and public code-search (repos/issues with pasted requests or hardcoded IDs)
+- **Infrastructure logs**: HTTP access logs held by IT, reverse proxies, CDNs, VPNs, and ISPs capture IDs in paths/query strings
+- **Insider / offline**: ex-employees who saved IDs from local storage/logs before access revocation
+- **Weak randomness**: "random" IDs with a design flaw (sequential within a shard, embedded timestamp, low entropy) — time-based IDs (UUIDv1, ULID) may be predictable within a window
+- **Lower-exposure case**: an ID that only ever travels in a POST/JSON **body** (never in a URL/path) leaks through fewer of the above — this lowers likelihood/severity but does **not** make the missing check safe
 
 ### Static Code Indicators
 
@@ -93,6 +99,8 @@ Grep for resource lookups by user-supplied ID **without** an ownership or tenant
 - Tenant scoping: all queries bound to `get_current_tenant(request)` or org context
 
 **Not a fix**: UUIDs, ULIDs, or other non-guessable IDs — they only obscure identifiers; authorization must still bind the object to the caller. Indirect reference maps (session-stored ID → object) help only when paired with ownership validation on lookup.
+
+**Triage guard — ID opacity is not grounds to dismiss the finding.** Do not WITHDRAW or downgrade a confirmed missing object-level authorization check to "not exploitable" solely because the identifier is a UUID/random/opaque value. Unpredictable IDs leak (see UUID/Opaque ID Sources), so the auth gap is real; opacity affects only *likelihood* (it raises attack complexity → may lower severity one band), not *validity*. The only genuine downgrades are: the resource is public/shared by design, or the value is a true secret-capability token (a session/bearer token or unguessable single-use share link that rotates and is never shown to other principals) rather than a stable object identifier. A stable object ID that other users/endpoints can see is **not** a capability token.
 
 ## Vulnerability Patterns
 

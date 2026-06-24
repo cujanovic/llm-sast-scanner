@@ -823,6 +823,18 @@ func application(_ app: UIApplication, open url: URL,
 
 ---
 
+#### Deep Link → Internal Action → API Request Path (second-order CSPT)
+
+Beyond WebView/navigation sinks, a deep-link handler that **fetches remote/stored JSON and dispatches an internal action which builds an authenticated API request** is a second-order Client-Side Path Traversal source: if the action concatenates a field from that JSON into the request **URL path**, `#`/`%23` truncation and `../`/`%2e%2e%2f` traversal in the field rewrite the call into an **arbitrary authenticated request to any API endpoint, as the victim**. A common enabler is a **hardcoded third-party service API key** (e.g. a link shortener) extracted from the app, letting the attacker store the JSON blob the app later trusts.
+
+**TRUE POSITIVE**: a value parsed from `application(_:open:options:)` / `ACTION_VIEW` / `onNewIntent` / RN `Linking` (directly, or fetched back from a service keyed by the link) flows into an internal action that interpolates it into an authenticated `URLRequest`/`fetch`/HTTP-client **path** without an allowlist.
+
+**FALSE POSITIVE**: the deep-link/JSON field selects an action by exact match against a fixed route map and the request path is hardcoded per action (the field never concatenates into the URL).
+
+See `client_side_path_traversal.md` (Second-Order CSPT) for the full chain, the query-only impact gadgets, and SAFE patterns.
+
+---
+
 #### WKWebView Loading Unvalidated External URL
 
 **VULN**:
