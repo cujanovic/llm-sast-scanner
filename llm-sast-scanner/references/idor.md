@@ -126,6 +126,35 @@ Grep for resource lookups by user-supplied ID **without** an ownership or tenant
 - Access job/task IDs from one user and attempt to retrieve results belonging to another (`export/{jobId}/download`, `reports/{taskId}`)
 - Try cancelling or approving another user's queued jobs by referencing their task IDs
 
+### Authorization-Layer Mismatch (app checks authz, storage serves the object with none)
+
+A very common real-world IDOR: the **application** enforces ownership correctly, but the object is then delivered by a **separate storage layer** (public S3/GCS/Azure Blob bucket, CDN, static file host) that has no concept of app users and performs **no** per-request authorization. The correct app-layer check is moot because the attacker fetches the object's storage URL directly. Switching the object key from a sequential integer to a **UUID does not add authorization** — it only obscures the key, which still leaks (see UUID/Opaque ID Sources) and remains enumerable/guessable in the integer case.
+
+**SAST signal**: an ownership/authz check (or `@login_required`-style gate) followed by construction of a **direct, publicly reachable storage URL** built from the object id/key, returned to the client — instead of streaming the bytes through an app endpoint that re-checks authz, or minting a short-lived scoped pre-signed URL *after* the check.
+
+```python
+# VULN — app authz is correct, but the returned URL points at a public bucket with no authz.
+#        Attacker hits bill-101 directly; UUID keys only obscure, they don't authorize.
+@login_required
+def view_latest_bill(request):
+    bill = Bill.objects.filter(owner=request.user).latest("date")   # correct ownership check
+    url = f"https://my-bucket.s3.amazonaws.com/bill-{bill.id}"        # public object, guessable/leakable key
+    return render(request, "bill.html", {"url": url})
+
+# SAFE (A) — stream through the app so authz is enforced on every fetch
+@login_required
+def download_bill(request, bill_id):
+    bill = get_object_or_404(Bill, id=bill_id, owner=request.user)    # ownership re-checked on the fetch path
+    return FileResponse(storage.open(bill.key))                       # bytes proxied; storage never public
+
+# SAFE (B) — private bucket + short-lived, single-object pre-signed URL minted AFTER the check
+    bill = get_object_or_404(Bill, id=bill_id, owner=request.user)
+    url = s3.generate_presigned_url("get_object",
+            Params={"Bucket": "private", "Key": bill.key}, ExpiresIn=60)  # expiring, scoped to one object
+```
+
+**Capability-URL hygiene** — if an unguessable URL is *deliberately* the access control (capability-URL / "secret link" pattern), it is a secret and must be treated like one: short expiry, **rotatable/revocable**, ideally single-use, and kept out of anything that records URLs — access logs, `Referer` to third parties, browser history, analytics, error trackers. A permanent public link keyed by a UUID is **not** a capability token (a leaked or logged URL is then a standing compromise with no rotation path). Cross-ref `information_disclosure.md` (secrets in logs) and `open_redirect.md` (`Referer` leakage).
+
 ### File/Object Storage
 
 - Test direct object paths or weakly scoped signed URLs
