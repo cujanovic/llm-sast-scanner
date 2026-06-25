@@ -233,7 +233,8 @@ The host the **validator** parses differs from the host the **HTTP client** conn
 ### JavaScript (Node.js)
 - **VULN**: `axios.get(req.body.url)` — URL fully controlled by request body
 - **VULN**: `fetch(req.query.url)`, `http.get(userUrl, ...)`
-- **SAFE**: Fixed base URL with only the path portion user-controlled and validated
+- **VULN**: `new URL(userPath, "http://localhost:3000")` then fetched — an **absolute** (`https://evil.com`) or **protocol-relative** (`//evil.com`) `userPath` discards the base origin (see *Base-Relative URL Resolution Override*)
+- **SAFE**: Fixed base URL with only the path portion user-controlled, **and** the input is rejected if it parses as absolute or starts with `//`, **and** the resolved `origin` is re-checked against the intended base (a bare `startsWith("/")` path check is insufficient — `//evil.com` also starts with `/`)
 
 ### PHP
 - **VULN**: `file_get_contents($_GET['url'])` — PHP wrappers support `file://`, `http://`, `php://`
@@ -326,6 +327,29 @@ restTemplate.getForObject(url, String.class);  // no IP allowlist check
 - IP blocklist that includes `169.254.169.254`, `metadata.google.internal`, `169.254.170.2`
 - Scheme allowlist restricting to `https://` only on specific domains
 - Host/IP validation against an allowlist
+
+## Base-Relative URL Resolution Override (absolute / protocol-relative first arg discards the base)
+
+A very common "safe-looking" pattern resolves user input **against a fixed base** intending the input to be only a *path* appended to a trusted origin (`new URL(userPath, "http://localhost:3000")`). Per the WHATWG URL spec (and the equivalent rule in every major language's resolver), **if the first argument is already an absolute URL, the base is silently discarded** — and a **protocol-relative** value (`//evil.com/x`) overrides the host while keeping the base's scheme. So `userPath = "https://evil.com"` or `"//evil.com"` makes the "localhost" fetch go to `evil.com` (SSRF), and the same primitive is an open-redirect when the resolved URL is sent in a `Location` header. This is **not** a parser differential — a single parser produces the attacker origin; the bug is trusting base-relative resolution without forcing the input to be relative.
+
+```javascript
+// VULN: base is discarded when userPath parses as absolute / protocol-relative
+const target = new URL(userPath, "http://localhost:3000");
+// userPath="https://evil.com"  -> https://evil.com/   (full override)
+// userPath="//evil.com/x"      -> http://evil.com/x   (protocol-relative override)
+http.get(target.href, ...);
+
+// SAFE: reject anything that parses as absolute, then resolve as a pure path,
+// and re-check the resolved origin against the intended one.
+if (/^[a-z][a-z0-9+.-]*:/i.test(userPath) || userPath.startsWith("//")) {
+  throw new Error("absolute/protocol-relative path not allowed");
+}
+const base = new URL("http://localhost:3000");
+const target = new URL(userPath.replace(/^\/+/, "/"), base);
+if (target.origin !== base.origin) throw new Error("origin escaped");
+```
+
+Equivalent base-discard resolvers to flag across languages (same "absolute first arg wins" rule): Python `urllib.parse.urljoin(base, userInput)`; Java `new URL(URL base, String spec)` / `URI.resolve`; Go `base.ResolveReference(ref)` / `base.Parse(ref)`; .NET `new Uri(Uri base, string relative)`; Ruby `URI.join`. **SAST signal**: any base+relative join where the relative component is user-controlled and is not first validated to be a path (no scheme, not starting with `//`, optionally not containing `\`), *and* the resolved `origin`/`host` is not re-compared to the intended base before the outbound fetch / redirect. A path-only allowlist or `startsWith("/")` check is insufficient because `//evil.com` also starts with `/`.
 
 ## SSRF via URL Parser Differentials
 

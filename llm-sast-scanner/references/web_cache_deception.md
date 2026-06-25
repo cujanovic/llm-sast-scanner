@@ -50,6 +50,9 @@ export const dynamic = 'force-dynamic';           // or Cache-Control: private, 
 
 - An **unkeyed input** influences the response body/headers but is NOT part of the cache key: `X-Forwarded-Host`, `X-Forwarded-Scheme`, `X-Forwarded-For`, `X-Host`, `X-Original-URL`, custom headers, or specific query params the cache strips from the key.
 - The reflected unkeyed input reaches a sink: absolute URL / link / redirect built from `Host`/`X-Forwarded-Host` (see `ssrf.md` Host-header class), or reflected into HTML/JS (see `xss.md`).
+- **Non-authentication cookie reflected into the body** while the cache keys only on the session/auth cookie: locale/language, currency, theme, A/B-test/feature-flag, and tracking cookies are very commonly reflected into HTML (or used to pick a rendered string) yet excluded from the cache key, so a malicious cookie value (`locale="><script>…`) gets cached and served to everyone — the standard way **self-XSS via a cookie is escalated to stored XSS via cache**. Even when a non-guessable cookie *is* keyed, the response served to **first-time visitors (no cookie set)** can still be poisoned. Treat every cookie that influences the body but is absent from the cache key as a poisoning source.
+- **Cache-key bypass via header-name mutation (parser/normalization discrepancy)**: the cache keys on the *literal* header name, but the origin/runtime collapses several spellings to one variable — e.g. CGI/WSGI-style exposure uppercases and maps dashes to underscores (`X-Forwarded-Host` → `HTTP_X_FORWARDED_HOST`), so `X_Forwarded_Host` (underscores), and in some stacks `X.Forwarded.Host` (dots), are read by the backend as the same header but look like a *different, unkeyed* header to the cache. This bypasses a cache key that was built around the dashed name (or even lets a normally-keyed header be smuggled unkeyed). Requires the front end to forward underscore/dot headers (many proxies drop underscores by default). Same idea as path key-confusion below but applied to header names.
+- **Validation that is *present but bypassable* on a reflected header (assumed-safe trap)**: an `X-Forwarded-Host` allowlist/regex that only checks the expected domain as a *suffix* (`www.example.com.attacker.com`) or only at the second level (ignoring subdomains, `non-existent.example.com`) passes attacker-influenced values into the reflected/cached sink — see `open_redirect.md`/`host_header_poisoning.md` for the host-validation bypass shapes.
 - Cache-key normalization differs from origin parsing (`//`, `/%2e/`, case, trailing chars) → "cache key confusion" lets an attacker poison the key that victims request.
 
 ### Unkeyed-input catalog (cache key omits dimension)
@@ -57,8 +60,12 @@ export const dynamic = 'force-dynamic';           // or Cache-Control: private, 
 | Input | Typical effect if unkeyed |
 |-------|---------------------------|
 | `X-Forwarded-Host`, `X-Forwarded-Scheme`, `X-Host`, `X-Original-URL` | Absolute URLs, redirects, canonical links poisoned (cross-ref `trust_boundary.md` when header drives auth/routing) |
-| `utm_*`, `_method`, tracking/marketing query params | Response body or routing differs but query stripped from CDN cache key |
-| `Accept`, `Accept-Encoding` (when `Vary` missing) | Wrong representation served to victims |
+| Non-auth cookies — `locale`, `lang`, `currency`, `theme`, A/B-test / feature-flag, tracking IDs | Reflected into HTML body but keyed only on the auth cookie → self-XSS escalated to stored XSS via cache |
+| `X-HTTP-Method-Override`, `X-Method-Override`, `_method` | Override turns `GET` into an unsupported method → cacheable `405`/`501`; aim at static JS/CSS chunks for CPDoS |
+| Mutated header-name spellings — `X_Forwarded_Host` (underscore), `X.Forwarded.Host` (dot) | Read as `X-Forwarded-Host` by origin but unkeyed at the cache → cache-key bypass |
+| `utm_*`, tracking/marketing query params | Response body or routing differs but query stripped from CDN cache key |
+| Reflected business params — `ref`/affiliate/coupon/`lang` into a hidden form field or default | Logic-flaw poisoning: attacker's value (e.g. referral code) auto-applied for every cached visitor |
+| `Accept`, `Accept-Encoding` (when `Vary` missing or not honored by the CDN) | Wrong representation served to victims |
 
 Flag when application code reads/processes the input but CDN/proxy cache key config does not include it.
 
@@ -68,6 +75,12 @@ Attacker seeds a **shared cache entry** with a broken body — empty `{}`, trunc
 
 - `Cache-Control: public` or `s-maxage` on error handlers, middleware short-circuits, or JSON data routes that return `{}` under attacker-controlled headers.
 - Framework internal routes that return minimal/empty JSON when probed with prefetch or internal headers, yet responses are edge-cacheable.
+- **Method-override → cacheable error on static assets (CPDoS "HMO")**: an unkeyed `X-HTTP-Method-Override`/`X-HTTP-Method`/`X-Method-Override`/`_method` makes the origin treat a benign `GET` as `POST`/`DELETE`/`PUT`; the app has no handler for that method on the path and returns a cacheable `404`/`405`/`5xx`. Pointed at a long-TTL static bundle (`/_next/static/chunks/*.js`, `/static/js/*.js`), the cached error replaces the JavaScript for **all** users → the app fails to boot until the entry expires. The most damaging CPDoS targets exactly these high-TTL chunks. SAST/config signal: CDN that caches `4xx`/`5xx` by status (or doesn't restrict cacheable statuses) **and** an origin that honors method-override or other unkeyed request-shaping headers on asset paths.
+- **Oversized request header (CPDoS "HHO")**: a **semantic gap in header-size limits** — the cache accepts a larger total request-header size than the origin (e.g. an edge that permits ~20 KB forwarding to an origin/proxy capped at ~8 KB). An attacker pads the request with many junk headers (or one header with an oversized key/value) that passes the cache but trips the origin's limit, which returns a cacheable error (often the *wrong* status: `400 Bad Request`, sometimes `404`) that the cache then stores for everyone. SAST/config signal: cache `large_client_header_buffers` / max-header config **larger** than the origin's, error pages on the oversize path lacking `Cache-Control: no-store`, and the origin returning a *cacheable-by-default* status instead of `431 Request Header Fields Too Large`.
+- **Meta/control characters in a request header (CPDoS "HMC")**: a header value containing control characters — `\n`, `\r`, bell `\a`, `\0`, or other illegal bytes — passes an unaware cache unsanitized but causes the origin/WAF to reject the request with a cacheable error. Same outcome as HHO: a malformed-but-forwarded header poisons the entry with an error page. SAST/config signal: caches that neither strip nor key on non-standard/control-char-bearing request headers, plus error responses that are cacheable; related to the request-side of `http_response_splitting.md` (CR/LF in headers).
+- **Other unkeyed request-shaping headers**: `Origin`/CORS request headers and hop-by-hop headers (`Connection`, and the headers it names) have all been used to provoke a cacheable origin error while remaining outside the cache key — treat any header the origin *acts on* but the cache *ignores* as a CPDoS source, not only method-override.
+- **Root cause — caches storing non-cacheable error codes**: per HTTP caching rules only `404`, `405`, `410`, `501` are heuristically cacheable; `400`/`431`/`5xx` are **not**. Most CPDoS variants depend on a cache that stores a status it shouldn't, *or* an origin that emits a heuristically-cacheable/`200`-with-error-body response on the failure path. Mitigation signals to expect (flag their absence): error responses carry `Cache-Control: no-store`; the origin uses the *correct, non-cached* status (`431` for oversized headers); the CDN restricts cacheable statuses to the RFC-allowed set; and a WAF (if relied on) sits **in front of** the cache, not behind it.
+- **`Vary` not honored**: if the response varies by a header the CDN ignores despite listing it in `Vary` (observed with some framework-internal headers), the "negotiated" variant is poisonable — don't assume a `Vary`-listed header is safe.
 
 ```http
 # VULN — empty JSON cached publicly after middleware short-circuit
@@ -226,6 +239,15 @@ rg -n "utm_|_method|req\.query\." . | rg -v "cache|key|vary"
 **Cacheable empty/error responses (DoS class):**
 ```bash
 rg -n "Cache-Control.*public|s-maxage" . | rg -n "json\(\{\}\)|status\s*\(\s*(4|5)\d\d\s*\)|NextResponse\.json\(\{\}\)"
+```
+
+**CPDoS (HHO/HMC/HMO) — error-page caching + header-size gap:**
+```bash
+# Error handlers / pages missing no-store (poisonable on failure path)
+rg -n "errorhandler|error_page|@app\.errorhandler|res\.status\((4|5)\d\d\)|abort\(" . | rg -v "no-store|no-cache|private"
+# Header-size limits that may exceed the origin (HHO) and method-override trust (HMO)
+rg -n "large_client_header_buffers|client_header_buffer_size|maxHeaderSize|max-http-header-size|LimitRequestFieldSize|MaxRequestBytes" .
+rg -n "X-HTTP-Method-Override|X-HTTP-Method|X-Method-Override|methodOverride|_method" .
 ```
 
 ## Related references

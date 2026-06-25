@@ -218,8 +218,10 @@ GROUND RULES
       * jndi_injection, expression_language_injection ← JVM sources *.java / *.kt / *.scala (+ pom.xml / build.gradle)
       * server_side_prototype_pollution ← Node backend (*.js / *.ts + package.json)
       * client_side_prototype_pollution, dom_clobbering, xs_leaks, client_side_path_traversal,
-        content_security_policy, clickjacking ← browser frontend / server-rendered HTML
-        (*.html / *.jsx / *.tsx / *.vue / *.svelte)
+        content_security_policy, clickjacking, postmessage_security, reverse_tabnabbing ← browser frontend /
+        server-rendered HTML (*.html / *.js / *.ts / *.jsx / *.tsx / *.vue / *.svelte). NOTE: postMessage
+        handlers (`addEventListener('message'`) and `target="_blank"` links also appear in plain *.js / *.ts,
+        not only JSX/HTML — include those extensions so frontend logic in vanilla JS isn't skipped.
       * iac_security ← *.tf / *.bicep / CloudFormation / ARM / Pulumi
       * subdomain_takeover ← DNS records in IaC/zone files (`aws_route53_record` / `azurerm_dns_*record` / `google_dns_record_set` / `cloudflare_record` / `AWS::Route53::RecordSet` / `Microsoft.Network/dnsZones` / BIND `*.zone` / CNAME/ALIAS lines)
       * kubernetes_cloud_security ← k8s manifests (kind: …) / Helm Chart.yaml
@@ -230,7 +232,28 @@ GROUND RULES
         rag_vector_security, ml_supply_chain_poisoning, mcp_security, ai_editor_config_poisoning ←
         AI/LLM/agent markers (openai / anthropic / langchain / llama / transformers deps, *.ipynb,
         .cursorrules, CLAUDE.md / AGENTS.md, *.mcp.json)
-  - ALL OTHER classes are language-agnostic — ALWAYS load them (never gated).
+      * grpc_security ← gRPC/gRPC-Web/Connect: *.proto / deps·imports `io.grpc`·`grpc-java`·`grpcio`·`grpc`·`@grpc/`·`grpc-web`·`Grpc.Net`·`connectrpc`·`google.golang.org/grpc` / `ServerInterceptor`·`ManagedChannel`·`StreamObserver`·`grpc.server(`·`mustEmbedUnimplemented` / grpc-gateway / grpc transcoding. (A custom/in-house binary RPC that is NOT gRPC does NOT count — require a gRPC signal.)
+      * graphql_injection, graphql_dos ← GraphQL: *.graphql / *.gql / deps `graphql`·`apollo-server`·`graphql-java`·`graphene`·`gqlgen`·`hotchocolate`·`strawberry` / `type Query`·`buildSchema(`·`makeExecutableSchema`·`@Resolver`·`/graphql` endpoint
+      * nosql_injection ← NoSQL drivers/usage: `mongodb`·`mongoose`·`pymongo`·`spring-data-mongodb`·DynamoDB/Couchbase/Cassandra/CosmosDB SDKs / Mongo query operators from input (`$where`·`$ne`·`$gt`·`$regex`)
+      * ldap_injection ← LDAP: `javax.naming.directory`·`LdapContext`·`InitialDirContext`·`DirContext.search` / `ldapjs`·`python-ldap`·`ldap3`·`spring-ldap` deps / `ldap://`·`ldaps://`
+      * xpath_injection ← XPath/XQuery: `XPath`·`XPathFactory`·`XPathExpression`·`selectNodes`·`selectSingleNode`·`compile(` over XML / `lxml ... .xpath(`
+      * xxe ← an XML parser is instantiated on attacker-reachable input: (JVM) `DocumentBuilderFactory`·`SAXParser`·`XMLReader`·`XMLInputFactory`·`Unmarshaller`·`SAXReader`·`SAXBuilder` / (Python) `lxml`·`xml.etree`·`xml.dom`·`xml.sax`·`libxml` / (PHP) `DOMParser`·`simplexml_load`·`libxml_*`·`DOMDocument` / (.NET) `XmlDocument`·`XmlReader`·`XmlTextReader`·`XmlReaderSettings`·`XDocument`·`XPathDocument` / (Go) `encoding/xml`·`xml.Unmarshal`·`xml.NewDecoder` / (Ruby) `Nokogiri`·`REXML`·`Ox` / (Node) `libxmljs`·`xml2js`·`fast-xml-parser`·`@xmldom/xmldom`
+      * websocket_security ← WebSockets: `javax.websocket`·`@ServerEndpoint`·`WebSocketHandler`·`TextWebSocketHandler` / `ws`·`socket.io`·`SignalR`·`STOMP`·`@stomp` / server-side `new WebSocketServer(`·`websockets.serve`
+      * batch_etl_pipeline_security ← batch/ETL/mainframe: Spring Batch (`ItemReader`·`ItemWriter`·`@StepScope`·`JobLauncher`) / *.jcl·*.cbl·copybooks / fixed-width·EBCDIC·COMP-3 parsing / landing-dir watchers
+      * format_string_injection ← a format/template function can receive a NON-literal (user-influenced) format argument: (C/C++) *.c·*.cc·*.cpp·*.h·*.hpp with `printf`·`fprintf`·`sprintf`·`snprintf`·`vprintf`·`vsnprintf`·`syslog(`·`err(`/`warn(` / (Python) `%`-formatting or `.format(` / `logging`·`logger` calls whose format string is a variable / `f"{...}"` built from input / (Java) `String.format`·`Formatter`·`MessageFormat`·`printf`·`String.formatted` / (C#) `String.Format`·`$"..."`·`Console.Write*` with a non-literal format / (Go) `fmt.Printf`/`fmt.Sprintf`/`fmt.Errorf` with a non-constant format verb. (A constant/literal format string is NOT a finding — require the format arg to be variable/attacker-influenced.)
+      * ssi_injection ← Server-Side Includes enabled or SSI-parsed templates: *.shtml·*.shtm·*.stm files / Apache `Options +Includes`·`Options +IncludesNOEXEC`·`mod_include`·`AddType text/html .shtml`·`AddOutputFilter INCLUDES`·`XBitHack on` / nginx `ssi on;` / SSI directives in templates (`<!--#include`·`<!--#exec`·`<!--#echo`·`<!--#config`·`<!--#set`). (Plain HTML with no SSI-enabled server/filter does NOT count.)
+  - ALL OTHER classes are language-agnostic — ALWAYS load them (never gated). The always-load set is genuinely
+    cross-stack: sqli, xss, ssrf, rce/command_injection, ssti, path_traversal_lfi_rfi, insecure_deserialization,
+    arbitrary_file_upload, idor, privilege_escalation, authentication_jwt/oauth/session/brute_force/default_credentials,
+    business_logic, mass_assignment, weak_crypto_hash, information_disclosure, insecure_cookie, csrf, open_redirect,
+    smuggling_desync, http_response_splitting, host_header_poisoning, cors_misconfiguration, web_cache_deception,
+    denial_of_service, regex_injection_redos, log_injection, file_permissions, output_encoding, api_security, etc.
+  - MAINTENANCE INVARIANT (keep this gate in sync with references/): EVERY platform/language/stack/protocol-bound
+    reference MUST have a gate entry above. When a new ecosystem-specific reference is added to references/, add
+    its detection signal here in the SAME change — otherwise it silently falls into "ALL OTHER / ALWAYS load" and
+    gets scanned against stacks where it cannot apply (e.g. hunting gRPC flaws in a repo with no gRPC). Gating a
+    provably-absent stack is coverage-safe; the COVERAGE VERIFICATION step records each skipped class as
+    "excluded — not in stack", which is NOT a coverage gap.
   - DEFAULT TO LOAD: if a signal is ambiguous or you are unsure a class applies, LOAD the reference. Gating
     may drop a reference ONLY when its ecosystem is provably absent — coverage wins over tokens.
   - LOAD ONCE PER RUN: load each needed reference at most once; keep its key sources/sinks/sanitizers in
