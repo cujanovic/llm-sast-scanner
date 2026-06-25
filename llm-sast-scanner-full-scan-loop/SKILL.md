@@ -55,7 +55,7 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 
 Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-scanner/SKILL.md). Load
 reference files from its `references/` directory ON DEMAND, per pass — only the subset relevant to the
-current pass's analysis lens (see LOOP CONTROL), rather than all 92 at once. As the lens rotates across
+current pass's analysis lens (see LOOP CONTROL), rather than all 94 at once. As the lens rotates across
 passes, every vulnerability class gets covered, without holding all references in context simultaneously.
 Following the base skill's read-once discipline, keep the current pass's lens references loaded while you read
 each file so all of that pass's classes are evaluated in a single read. All step numbers (Step 1-6), the Judge
@@ -269,7 +269,7 @@ cap of 10; NO adv inside the loop)
   crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
   passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
 supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
-pass's lens (not all 92 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
+pass's lens (not all 94 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
 applicable class — every class on the stack-gated allowlist (see REFERENCE LOADING) — in all six lens groups
 from the Step D2 table, including the cloud/infrastructure and web-platform classes (IaC, Kubernetes/cloud,
 CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-chain) whenever their files
