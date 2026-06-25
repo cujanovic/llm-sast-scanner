@@ -1,6 +1,6 @@
 ---
 name: trust-boundary
-description: Trust boundary violation detection (CWE-501)
+description: Trust boundary violation detection (CWE-501), header-based identity/origin spoofing, and network-origin / IP-range trust bypass via shared multi-tenant cloud, CI/CD, and serverless egress (CWE-290/291)
 ---
 
 # Trust Boundary Violation (CWE-501)
@@ -132,6 +132,39 @@ Commonly affected languages: Java, Python.
 - **Sanitizer**: Using the **last** (appended) entry in a comma-separated `X-Forwarded-For` chain when behind a trusted reverse proxy; validating IP against a server-side session; ignoring client-supplied headers entirely.
 
 **VULN**: `String ip = request.getHeader("X-Forwarded-For").split(",")[0]; if (blocked.contains(ip)) deny();` — first XFF entry is attacker-controlled.
-**SAFE**: Take the last XFF hop added by the trusted proxy, or derive client IP from the TCP connection at the edge.
+**SAFE**: Take the last XFF hop added by the trusted proxy, or derive client IP from the TCP connection at the edge. **Caveat**: a correctly-derived connection IP still is not an identity — see Network-Origin / IP-Range Trust Bypass below.
 
 Relates to header-based trust patterns above — prefer `xff_spoofing` when the sole issue is IP spoofing; use `trust_boundary` when spoofed IP crosses into session state or privileged configuration.
+
+## Network-Origin / IP-Range Trust Bypass (shared multi-tenant egress, CWE-290/291)
+
+A separate class from header spoofing: the application determines the source IP **correctly** (from the TCP connection, not a client header) but grants trust because that IP falls in a **"trusted" network range** — and that range is actually **multi-tenant**, so any attacker can originate requests from inside it. Membership in the range proves *where* the packet came from, never *who* sent it. Taking the "real" connection IP (the usual fix for header spoofing) does **not** mitigate this.
+
+**Over-trusted origins (all rentable/shared by anyone)**:
+- **Cloud provider published CIDRs** — allowlisting AWS/GCP/Azure/Cloudflare IP ranges; an attacker simply runs from the same provider and lands in the same ranges.
+- **CI/CD runner egress** — GitHub Actions, GitLab CI, Bitbucket Pipelines shared runners share an egress pool; anyone with a free account sends traffic from those IPs.
+- **Serverless / managed-proxy egress** — Cloudflare Workers, AWS Lambda / API Gateway, other FaaS egress IPs are shared across all tenants; an attacker deploys their own function to borrow the origin.
+- **"Same datacenter / region / VPC / internal"** — rules like `allow if src in same-region` or `allow if src in 10.0.0.0/8` trust co-tenants or anyone who gains a foothold in the shared network.
+
+**Why it's weak**: these boundaries assume the trusted range is *yours alone*. On shared cloud/CI/serverless infrastructure it is not — the egress is pooled across every customer, so "from our datacenter / our cloud / our CI" is satisfiable by an external attacker at near-zero cost.
+
+**SAST signals**:
+```bash
+# allowlists / firewall configs keyed on cloud-provider or shared ranges
+rg -ni "aws.*ip.?ranges|ip-ranges\.json|cloudflare.*ips|googleusercontent|amazonaws|azure.*service.?tags" --glob '*.{tf,yaml,yml,json,py,js,ts,go,rb,java}'
+# "internal/same region/same datacenter" origin trust, or provider CIDR allow rules
+rg -ni "same.?region|same.?datacenter|internal traffic|trusted (range|cidr|subnet)|allow.*from (aws|gcp|azure|cloudflare|datacenter)" -C2
+# code comparing source IP against a provider/internal CIDR set as an auth/authz gate
+rg -ni "ip_address\(.*\) in |ipaddress\.ip_network|cidr.*contains|InRange.*ip|net\.ParseCIDR" -C2
+```
+
+**VULN** (Python — access gated on cloud/CI egress range; attacker rents the same origin):
+```python
+# rule trips an SSRF/ssrf-prevention rule too: trusting network origin as identity
+TRUSTED = [ipaddress.ip_network(c) for c in load_aws_ranges() + CI_EGRESS_CIDRS]
+def is_internal(req):
+    ip = ipaddress.ip_address(req.transport_peer_ip)   # correctly derived, still not identity
+    return any(ip in net for net in TRUSTED)            # VULN: range is multi-tenant
+```
+
+**SAFE**: authenticate the *caller*, not the network. Use mutual TLS, signed/short-lived service tokens, HMAC request signing, or cloud workload identity (OIDC) for service-to-service and "internal" calls. Never use cloud-provider/CI/serverless/datacenter/region membership as an authn or authz control. If IP allowlisting is genuinely required, restrict to **dedicated single-tenant egress you own** (e.g., a NAT gateway with a static IP under your control) **and** still layer real authentication on top. Cross-ref `ssrf.md` (server-side request origin), `privilege_escalation.md`, `reverse_proxy_access_bypass.md`.

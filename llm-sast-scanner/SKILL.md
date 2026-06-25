@@ -230,6 +230,7 @@ references/supply_chain_security.md      — Supply chain: unpinned deps, missin
 references/api_security.md               — API / REST / web-service layer: excessive data exposure, rate limits, endpoint inventory, misconfig
 references/webhook_integration_security.md — Webhook/integration surface: outbound test/ping SSRF, webhook CRUD IDOR/BFLA, unallowlisted delivery + redirects, inbound signature/replay failures, signing-secret disclosure (CWE-918/639/352)
 references/mcp_security.md               — MCP (Model Context Protocol): tool poisoning, injection via tool output, over-broad/unauth servers
+references/grpc_security.md               — gRPC/gRPC-Web/Connect server-side: reflection in prod, plaintext/h2c, missing auth interceptor (per-method authz), proxy-injected identity metadata trust, -bin metadata bypass, transcoder re-exposure (CWE-306/287/319/863)
 references/iac_security.md               — Infrastructure-as-Code misconfig (Terraform/CloudFormation/ARM/Bicep/Pulumi)
 references/kubernetes_cloud_security.md  — Kubernetes / cloud orchestration: privileged pods, RBAC, securityContext, secrets, NetworkPolicy
 references/cicd_container_security.md     — CI/CD pipeline + container/Docker security (PPE, untrusted inputs, root images, unpinned tags)

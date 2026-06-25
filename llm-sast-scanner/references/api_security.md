@@ -272,6 +272,9 @@ public User getUser(@PathVariable Long id) {
 
 // VULN — actuator exposed on same application
 management.endpoints.web.exposure.include=*
+// High-impact endpoints to flag specifically: /actuator/heapdump (full memory dump → tokens,
+// credentials, secrets), /actuator/env & /actuator/configprops (config + secrets),
+// /actuator/jolokia (MBean access → RCE), /actuator/threaddump, /actuator/mappings (route inventory)
 ```
 
 ### Go

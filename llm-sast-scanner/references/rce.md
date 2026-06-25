@@ -148,8 +148,11 @@ pop graphic-context
 **ExifTool**
 - Crafted metadata that invokes external tools or triggers library-level bugs
 
-**LaTeX**
-- `\write18`/`--shell-escape`, `\input` piping; pandoc filter chains
+**LaTeX** (user input compiled to PDF: invoice/resume/certificate/report generators, formula/markdown editors)
+- **RCE**: `\write18{cmd}` / `\immediate\write18{cmd}` when compiled with `--shell-escape` (or `\ShellEscape`); pandoc filter chains
+- **Arbitrary file read** (works even without shell-escape): `\input{/etc/passwd}`, `\include{file}`, `\lstinputlisting{/etc/passwd}`, or `\newread\f\openin\f=/etc/passwd \read\f to\line` — content is typeset into the output PDF
+- **SAST signal**: user-controlled string concatenated into a `.tex` document then handed to `pdflatex`/`xelatex`/`lualatex`/`tectonic` (or libs `node-latex`, `pylatex`, `latexmk`); look for `-shell-escape`/`--shell-escape`/`shell_escape=t` and the absence of `-no-shell-escape` or a restricted/`openin_any=p`/`openout_any=p` `texmf.cnf`
+- **SAFE**: compile with `-no-shell-escape` in a sandbox/container with no network and a read-only minimal FS; escape LaTeX special chars (`\ { } $ & # ^ _ ~ %`) and reject `\input`/`\include`/`\write`/`\open*`/`\csname` in user fields; prefer a non-`\write18` engine build
 
 **ffmpeg**
 - concat/protocol tricks gated by compile-time flag configuration

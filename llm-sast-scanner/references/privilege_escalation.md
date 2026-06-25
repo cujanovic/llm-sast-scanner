@@ -44,6 +44,7 @@ Function-level access control failures at the **endpoint** layer — distinct fr
 1. **Unauthenticated sensitive endpoint** — modifies data, returns private info, or performs admin actions with no auth gate.
 2. **Authenticated, missing role check** — `@login_required` / `[Authorize]` present but no admin/permission verification on a privileged route.
 3. **Incomplete or bypassable authorization** — role check on GET but not DELETE; check conditional on attacker-controlled header/param; route mounted before auth middleware applies; `except:` list excludes a sensitive action.
+4. **Token/RPC-dispatched handlers that bypass route guards** — frameworks that dispatch by an identifier rather than the URL path, so path/middleware-based guards never apply and auth must live **inside** the handler. Notably **Next.js Server Actions** (`"use server"` functions dispatched via the `Next-Action` header; the request path is ignored): a Server Action with no in-function `auth()`/role/object-ownership check is invocable by anyone who replays the POST + action token — including **unused/unreferenced** actions still present in the bundle (zombie endpoints). Same pattern applies to other RPC/action-router styles. Cross-ref `csrf.md` (Server Actions) for the CSRF angle.
 
 ### Recon Indicators
 

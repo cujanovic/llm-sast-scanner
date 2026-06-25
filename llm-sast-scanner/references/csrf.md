@@ -87,6 +87,8 @@ Automated checks flag **framework CSRF protection disabled or weakened**, not pe
 
 - When a server parses JSON from `text/plain` or form-encoded bodies, craft parameters that reconstruct the expected JSON structure
 - Some frameworks accept JSON keys expressed as form fields (e.g., `data[foo]=bar`) or handle duplicate keys permissively
+- **Trailing-`=` form artifact + non-strict deserialization.** An auto-submitting HTML form with `enctype="text/plain"` forces a preflightless `text/plain` body, but the browser serializes inputs as `name=value`, so a single field appends a stray `=`: the body becomes `{"email":"x@a.test"}=` → **invalid JSON**, and a strict parser rejects it. The reliable bypass splits a valid JSON payload across the field **name and value** so the `=` lands *inside a throwaway string*: form `name={"x":"y` + value `","email":"x@a.test"}` serializes to `{"x":"y=","email":"x@a.test"}` — **valid JSON**. This works **only if the backend tolerates unknown/extra keys** (lenient deserialization). Therefore a JSON endpoint that (a) parses simple-content-type bodies and (b) **ignores unknown properties** is reliably CSRF-forgeable from a plain HTML form with no JS/CORS.
+- **SAST signal**: lenient deserialization on a cookie-authed state-changing JSON handler is the enabler — Jackson default / `FAIL_ON_UNKNOWN_PROPERTIES=false` or `@JsonIgnoreProperties(ignoreUnknown=true)`; Go `json.Unmarshal` / `Decoder` without `DisallowUnknownFields()`; Python `pydantic` `extra="allow"`/`extra="ignore"`, plain `json.loads`, DRF serializers ignoring unexpected keys; .NET `System.Text.Json` default (unknown members ignored); Express/`body-parser` accepting any type. Strict schema validation (reject unknown keys) removes the *reliability* of the form-based PoC but is **not** a CSRF control on its own — still require a token/Origin check.
 
 ### Content-Type is not a CSRF defense (parse-as-JSON-regardless bypasses)
 
@@ -105,7 +107,7 @@ A `Content-Type: application/json` body normally triggers a CORS preflight, so m
 
 **SAFE**: never rely on content-type checks alone. Require an anti-CSRF token (or a custom header that *forces* a preflight, e.g. `X-Requested-With` validated server-side), validate `Origin`/`Referer` against an allowlist, and set `SameSite=Lax/Strict` cookies. Treat any "we only parse JSON" comment near a state-changing handler with a permissive/declared-type-ignoring parser as a **VULN**.
 
-**Grep seeds**: `express\.json\(\{\s*type:` (`() => true`, `'\*/\*'`); `if not content_type`/`if (!content-?type)` followed by JSON parse; CSRF middleware built as an allow/deny list of content types (`text/plain`, `urlencoded`, `multipart`) with no token/Origin check; `request.json()` reached without a token gate.
+**Grep seeds**: `express\.json\(\{\s*type:` (`() => true`, `'\*/\*'`); `if not content_type`/`if (!content-?type)` followed by JSON parse; CSRF middleware built as an allow/deny list of content types (`text/plain`, `urlencoded`, `multipart`) with no token/Origin check; `request.json()` reached without a token gate. Lenient deserialization enabling the form-PoC: `FAIL_ON_UNKNOWN_PROPERTIES`, `@JsonIgnoreProperties\(ignoreUnknown\s*=\s*true`, `DisallowUnknownFields` (absence), `extra\s*=\s*[\"'](allow|ignore)`.
 
 ### Login/Logout CSRF
 
@@ -290,6 +292,39 @@ res.setHeader('X-Content-Type-Options', 'nosniff');
 
 - Webhooks and back-office management tools occasionally expose state-changing GET endpoints intended only for internal staff use
 - Verify CSRF protections are consistently applied to these surfaces as well
+
+### Next.js Server Actions (`"use server"`)
+
+Server Actions are server-side mutation functions (marked `"use server"`) invoked by POSTing to an internal Next.js endpoint with a `Next-Action: <hash>` header that selects which function runs — **the request path is ignored**, so the action token, not the route, is the real dispatch key. This shape has two SAST-relevant pitfalls:
+
+- **CSRF**: because they are POST mutations reachable on cookie-authenticated origins, a Server Action relying on ambient cookie auth without an anti-CSRF control is forgeable. Modern Next.js adds an Origin/Host same-origin check by default, but it can be weakened by a permissive `allowedOrigins` / `serverActions.allowedOrigins` config, by trusting a forwarded `Host`/`X-Forwarded-Host`, or on older versions — verify a real origin check exists.
+- **Missing per-action authorization (primary risk)**: since dispatch is by token and ignores the path, **every Server Action must enforce its own authentication and authorization inside the function** — middleware/route guards do not protect it. An action that mutates data with no in-function identity/role check is invocable by anyone who can craft the POST + `Next-Action` token. Tokens are discoverable from client bundles (and trivially when `productionBrowserSourceMaps` is on), including **unused/unreferenced actions** that no UI calls but remain dispatchable (zombie endpoints — cross-ref `privilege_escalation.md`).
+
+```js
+// VULN — "use server" mutation with no auth check; dispatched by Next-Action token, path ignored
+"use server";
+export async function deleteUser(formData) {
+  await db.users.delete(formData.get("id"));   // anyone who replays the POST + Next-Action runs this
+}
+
+// SAFE — authenticate AND authorize inside the action itself; validate input
+"use server";
+export async function deleteUser(formData) {
+  const session = await auth();                 // server-trusted identity
+  if (!session) throw new Error("unauthenticated");
+  const id = String(formData.get("id"));
+  if (!canDelete(session.user, id)) throw new Error("forbidden");  // object-level authz
+  await db.users.delete(id);
+}
+```
+
+**Grep seeds**:
+```bash
+rg -n '"use server"|^\s*'\''use server'\''' --glob '*.{js,jsx,ts,tsx}'
+rg -n "serverActions|allowedOrigins|X-Forwarded-Host" --glob 'next.config.*'
+# "use server" functions whose body has no auth()/getSession()/authorize()/role check
+rg -n "use server" -A15 --glob '*.{ts,tsx,js,jsx}' | rg -i "auth|session|getServerSession|authorize|can[A-Z]|role" -L
+```
 
 ## Chaining Attacks
 

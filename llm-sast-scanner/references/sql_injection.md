@@ -1,6 +1,6 @@
 ---
 name: sql-injection
-description: SQL injection testing covering union, blind, error-based, and ORM bypass techniques
+description: SQL injection testing covering union, blind, error-based, ORM bypass, and database-side dynamic SQL (PostgreSQL PL/pgSQL EXECUTE/format unquoted-identifier injection, dollar-quote denylist bypass, SECURITY DEFINER search_path) techniques
 ---
 
 # SQL Injection
@@ -353,6 +353,41 @@ query = f"SELECT * FROM products ORDER BY {sort_col}"
 ```
 
 Custom escaping (`mysql_real_escape_string`, `addslashes`, homegrown sanitizers) is not equivalent to parameterization — still treat as likely vulnerable when taint is present.
+
+### PostgreSQL PL/pgSQL dynamic SQL — unquoted-identifier injection & dollar-quote denylist bypass
+
+Stored functions/procedures (`LANGUAGE plpgsql`) that build SQL with `EXECUTE` are an injection surface the application-layer review often misses because the flaw lives in the **database**, not the app code. Two compounding mistakes:
+
+1. **Value quoted, identifier not.** `quote_literal(val)` / `format('... %L', val)` protects only the *value* side; a column/table name (or any expression position) concatenated unquoted — `where_clause := col_name || ' = ' || quote_literal(val)` — is a full injection point. The attacker controls the **left** side of the comparison and can inject a scalar subquery (`(SELECT substr(secret,1,1) FROM vault.k WHERE svc LIKE $_$x$_$)`) read through a boolean oracle. `format()` with `%s` (no escaping) for an identifier is the same bug; `%I` is the only identifier-safe spec.
+2. **Dollar-quoting defeats regex denylists.** A hand-rolled sanitizer that strips `'` `;` `\` `-` (`regexp_replace(p, '['';\-]', '', 'g')`) does **not** strip `$`, so PostgreSQL dollar-quoted literals (`$$x$$`, `$tag$x$tag$`, `$_$x$_$`) carry attacker strings through untouched — no single quote, semicolon, comment, stacked query, or `UNION` needed. This is why denylist sanitization in front of Postgres dynamic SQL is never sufficient (allowlist/parameterize instead). Amplifier: `SECURITY DEFINER` **without** `SET search_path` runs the function with the owner's privileges and lets injected subqueries cross schema boundaries (`information_schema`, other schemas).
+
+**SAST signals**:
+```bash
+# plpgsql dynamic SQL + the value-only-quoting / unquoted-identifier shape
+rg -n "LANGUAGE\s+plpgsql|EXECUTE\b" --glob '*.{sql,pgsql,psql,pg}'
+rg -n "quote_literal\(|format\(.*%(s|L)" --glob '*.{sql,pgsql,psql}' -C2   # %s for identifiers, or %L value but identifier concatenated
+rg -n "EXECUTE.*\|\|" --glob '*.{sql,pgsql,psql}'                          # string-concatenated dynamic SQL
+# denylist sanitizer that misses '$' (dollar-quoting bypass)
+rg -n "regexp_replace\(.*\[.*\].*,\s*''" --glob '*.{sql,pgsql,psql,js,ts,py}'
+# SECURITY DEFINER missing a search_path lock
+rg -n "SECURITY DEFINER" --glob '*.{sql,pgsql,psql}' -C3 | rg -v "SET search_path" || true
+```
+
+**VULN**:
+```sql
+-- identifier unquoted; quote_literal only guards the value; denylist misses '$'
+where_clause := regexp_replace(part, '['';\-]', '', 'g');         -- '$' survives
+EXECUTE 'SELECT ... WHERE ' || col_name || ' = ' || quote_literal(val);  -- col_name is the sink
+```
+
+**SAFE**:
+```sql
+-- %I double-quotes identifiers, %L quotes/escapes literals; bind values with USING
+EXECUTE format('SELECT ... WHERE %I = %L', col_name, val);
+-- or parameterize the value and allowlist the identifier:
+EXECUTE format('SELECT ... WHERE %I = $1', assert_allowed(col_name)) USING val;
+```
+Definitive fixes: `%I`/`quote_ident()` for every identifier (or an allowlist when names vary), `%L`/`USING $n` for values, **never** rely on a character-stripping denylist, and `SET search_path = pg_catalog, pg_temp` on `SECURITY DEFINER` functions. Cross-ref "Allowlist for dynamic identifiers" above and `information_disclosure.md` (return generic responses to remove the boolean oracle).
 
 ## Common False Alarms
 

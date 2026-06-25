@@ -1,6 +1,6 @@
 ---
 name: oauth-oidc-misconfiguration
-description: OAuth 2.0 / OpenID Connect flow misconfiguration — weak redirect_uri validation, missing state/PKCE, authorization-code reuse, token-exchange and refresh-token rotation race conditions, incomplete revocation (persistent access after revoke, silent re-approval), cross-client token acceptance, unverified email linking, scope manipulation (dropping email scope → absent/undefined email claim → ORM match-all wrong-user login), implicit/ROPC grants, dynamic registration SSRF, and client-secret exposure (CWE-287 / CWE-346 / CWE-362 / CWE-601 / CWE-613)
+description: OAuth 2.0 / OpenID Connect flow misconfiguration — weak redirect_uri validation, missing state/PKCE, authorization-code reuse, token-exchange and refresh-token rotation race conditions, incomplete revocation (persistent access after revoke, silent re-approval), cross-client token acceptance, unverified email linking, multi-tenant / enterprise SSO with customer-controlled IdP (missing verified-domain binding, global vs tenant-scoped identity, blind JIT provisioning → cross-tenant account takeover), scope manipulation (dropping email scope → absent/undefined email claim → ORM match-all wrong-user login), implicit/ROPC grants, dynamic registration SSRF, and client-secret exposure (CWE-287 / CWE-346 / CWE-362 / CWE-601 / CWE-613)
 ---
 
 # OAuth 2.0 / OIDC Misconfiguration (CWE-287 / CWE-346 / CWE-601)
@@ -11,7 +11,7 @@ OAuth 2.0 and OpenID Connect delegate authentication and authorization to an ide
 
 - **Is**: server-side OAuth/OIDC **protocol enforcement** gaps — redirect URI accepted by prefix/regex instead of exact match; `state` absent or not verified; PKCE missing or `plain` accepted; authorization codes reusable or not time-bound; access/ID tokens accepted without `aud`/`azp`/`client_id` binding; account create/link from IdP `email` without `email_verified`; implicit/`response_type=token` delivering tokens in URL; ROPC/password grant enabled; client secret in frontend bundle; dynamic registration fetching attacker `logo_uri`/`client_uri`; callback pages without `Referrer-Policy: no-referrer`.
 - **Is not**: JWT signature bypass, algorithm confusion, `kid`/`jku` header abuse, or missing `exp`/`iss` claim crypto — see `authentication_jwt.md`. Generic open redirect without OAuth context — see `open_redirect.md`. Browser CSRF on non-OAuth forms — see `csrf.md`. Outbound fetch SSRF in non-OAuth features — see `ssrf.md`.
-- **Highest signal** at `/authorize`, `/callback`, `/token`, `/oauth/token`, account-linking handlers, and OIDC dynamic client registration endpoints.
+- **Highest signal** at `/authorize`, `/callback`, `/token`, `/oauth/token`, account-linking handlers, OIDC dynamic client registration endpoints, and **enterprise/multi-tenant SSO connection config + JIT-provisioning handlers** (SAML/OIDC where each tenant brings its own IdP).
 
 ## Source -> Sink Pattern
 
@@ -61,6 +61,12 @@ rg -ni 'verify_signature.*False|jwt\.decode\(|decode.*id_token' .
 # OAuth libraries / middleware
 rg -ni 'passport|authlib|spring-security-oauth|oauth2-server|oidc-provider|@okta/|openid-client|goth\.|oauth2\.Config' .
 
+# Multi-tenant / enterprise SSO — domain binding & JIT provisioning (bring-your-own-IdP ATO)
+rg -ni 'saml|samlify|passport-saml|@node-saml|wsfed|sso_connection|ssoConnection|idp_metadata|connection\.id' --glob '*.{js,ts,py,java,go,rb,php,cs}'
+rg -ni 'jit|justInTime|auto.?provision|provisionUser|verified_domain|verifiedDomains|domain.*ownership|allowedDomains' .
+# global vs tenant-scoped identity: SSO email lookup with no tenant/domain guard
+rg -n 'findOne\(\{\s*email|findFirst.*email|User\.(find|create).*email' --glob '*.{js,ts,py}' -C1 | rg -i 'sso|saml|assertion|profile|connection'
+
 # Callback page referrer leakage
 rg -ni 'Referrer-Policy|referrerPolicy|referrer-policy' --glob '*.{js,ts,html,tsx,jsx}'
 rg -ni 'location\.hash|window\.hash|fragment.*access_token|query\.code' --glob '*.{js,ts,jsx,tsx,vue,svelte}'
@@ -86,6 +92,8 @@ Then trace each hit: does redirect validation compare **full strings** against a
 14. **`response_type`/`response_mode` manipulation to derail into a non-happy path**: swapping `response_type=code` → `id_token`, `token`, or a multi-value `code,id_token` (comma) pushes the app into an alternate/error branch where credentials land in the **URL fragment** or where the app falls back to redirecting by `Referer`. Combined with `prompt=none` (skips the account-chooser/consent that would reset the referrer) and an opener + 3xx hop (so the final hop's `Referer` is the attacker origin), the `code`/`token` leaks cross-origin. Indicators: callback handles multiple `response_type`/`response_mode` values; error/fallback branch redirects to `document.referrer`/`Referer`; no exact-match enforcement that the returned artifact type equals the one requested; client-side fragment forwarding (`location.hash` → `fetch`).
 15. **Incomplete revocation (persistence after revoke)**: when a user revokes an app's access, the server fails to invalidate the *full* set of artifacts, so the client keeps access. Three concrete shapes: (a) **race-minted tokens not all revoked** — only one of the access/refresh tokens issued from a single code is revoked, the others stay valid; (b) **outstanding authorization codes not invalidated** — an unredeemed (or silently re-obtained) code can still be exchanged for a new token *after* revocation; (c) **silent re-approval** — auto-approve / `prompt=none` / `approval_prompt` lets a malicious client mint a fresh code+token immediately after revoke (e.g. a hidden `<img src=".../authorize?...response_type=code">` re-issuing codes), defeating the revocation entirely. Revocation must cascade across the whole grant, not a single token row.
 16. **Scope manipulation → absent email claim → wrong-user login (ATO)**: the callback identifies the user by looking up the `email` returned in the IdP profile/ID token, but **`email` is attacker-removable from the requested `scope`** (drop `email`/`openid email` on the authorize URL). The provider then returns no email and the app receives `undefined`/`null`/`""`, which it passes straight into the user lookup. Two failure modes: (a) **ORM null/undefined coercion** — `prisma.user.findFirst({ where: { email: undefined } })` treats `undefined` as *no filter* and returns the **first user in the table** (TypeORM `findOne({ where: { email: undefined } })` and several query builders behave the same); (b) **empty-string match** — `where: { email: "" }` matches any account whose email column is blank (common when signup allows phone-only/SSO-only accounts). Either way the attacker is logged into an account they do not own; combined with profile-email-edit or account switching it generalizes to arbitrary takeover. Indicators: OAuth/OIDC callback that (i) does not assert the email claim is **present and non-empty** before lookup, (ii) does not require `email_verified === true`, and (iii) feeds a possibly-`undefined` value into an ORM `where`/`findFirst`/`findOne` that coerces undefined to "match-all". Fix: fail closed when the claim is missing/empty; validate the requested scope server-side; never let `undefined` reach a query filter (guard the value, or use APIs that reject undefined filters).
+
+17. **Multi-tenant SSO with customer-controlled IdP — missing domain/tenant binding (enterprise "bring-your-own-IdP" ATO)**: in B2B/multi-tenant apps each tenant/organization can configure its **own** enterprise SSO connection (SAML or OIDC via any provider). Because the *customer* controls that IdP, **every claim it asserts — `email`, `email_verified`, groups — is attacker-controlled for any tenant the attacker can create**. Two compounding failures: (a) **no verified-domain binding** — a tenant's SSO connection may assert / JIT-provision identities for email domains the tenant never proved it owns (attacker's org asserts `victim@example.com`); (b) **global identity instead of tenant-scoped** — the identity proven via the attacker's connection resolves to the *same global user record* as the victim, so after login the attacker switches into the victim's organization and inherits its data. Crucially, **`email_verified === true` does NOT mitigate this** — the attacker's own IdP sets that flag — so the nOAuth fix (condition 6) is insufficient for enterprise connections. Indicators: SSO/SAML/OIDC connection config with no verified-domain allowlist; JIT provisioning that creates/links a user from any asserted email; a single global users table keyed on email that org-membership/org-switch reads, with membership grantable by *invite + SSO login*; `email_verified` (or "trusted IdP") treated as sufficient for tenant-configured connections; auto-linking an SSO login to a pre-existing account that belongs to other tenants. Controls: bind each SSO connection to **DNS/email domains the tenant has verified ownership of** and reject assertions for emails outside them; make the SSO-established identity **tenant-scoped** (do not auto-merge into a global account that confers cross-org access); require real email-ownership verification before linking an SSO identity to an existing cross-tenant account.
 
 ## Vulnerable vs Safe Code Examples
 
@@ -253,6 +261,33 @@ async function loginWithOAuth(profile) {
 }
 ```
 
+```javascript
+// VULN: multi-tenant SSO — trusts the tenant-configured IdP's email claim and
+//       resolves it to a GLOBAL user, so an attacker's own org/IdP can assert a
+//       victim's email and pivot into the victim's org. email_verified is useless
+//       here because the attacker controls the asserting IdP.
+async function onEnterpriseSSO(connection, assertion) {
+  // assertion.email = "victim@example.com", assertion.email_verified = true (attacker-set)
+  let user = await User.findOne({ email: assertion.email });        // global lookup
+  if (!user) user = await User.create({ email: assertion.email });  // blind JIT provision
+  return user;                                                      // now usable across all orgs
+}
+
+// SAFE: bind the connection to domains the tenant verified, reject out-of-domain
+//       assertions, and scope the identity to THIS tenant (no global auto-merge).
+async function onEnterpriseSSO(connection, assertion) {
+  const domain = (assertion.email || '').split('@')[1]?.toLowerCase();
+  if (!assertion.email || !connection.verifiedDomains.includes(domain)) {
+    throw new Error('IdP asserted an email outside the tenant\'s verified domains');
+  }
+  // identity is keyed by (tenantId, email); linking to any pre-existing cross-tenant
+  // account requires proven email ownership + step-up, never silent merge.
+  let user = await User.findOne({ tenantId: connection.tenantId, email: assertion.email });
+  if (!user) user = await User.create({ tenantId: connection.tenantId, email: assertion.email });
+  return user;
+}
+```
+
 ```python
 # VULN: ROPC / password grant enabled
 OAUTH_GRANT_TYPES = ["authorization_code", "refresh_token", "password"]
@@ -286,6 +321,7 @@ def register_client(body):
 - **Revocation completeness**: revoke by **grant**, not by single token row — cascade to all access *and* refresh tokens derived from the grant, plus any unredeemed authorization codes; set the grant to require fresh consent so `prompt=none`/auto-approve cannot silently re-mint a code+token. (The RFC requires that detecting code/refresh reuse SHOULD revoke all tokens issued from it.)
 - **Token binding**: enforce `aud`/`azp`/`client_id` match app registration on every token acceptance path; reject tokens from other OAuth clients even if signature valid.
 - **Account linking**: require `email_verified === true`; block local signup with IdP-managed domains when SSO is offered; on link, require step-up auth and rotate sessions.
+- **Multi-tenant / enterprise SSO**: bind each tenant's SSO connection to **domains the tenant has verified ownership of** and reject assertions for emails outside them; treat claims from a *customer-controlled* IdP (including `email_verified`) as untrusted for cross-tenant identity; make the SSO identity **tenant-scoped** rather than auto-merging into a global account; require proven email ownership + step-up before linking an SSO login to any pre-existing account from another tenant; do not blindly JIT-provision/auto-link arbitrary invited emails.
 - **Flows**: authorization code only; no implicit; no ROPC for user authentication; confidential secrets only on server.
 - **Callback UX**: `Referrer-Policy: no-referrer` on pages handling `?code=` or `#access_token=`; prefer POST callback or backend-only code exchange.
 - **Dynamic registration**: disable or restrict; never fetch `logo_uri`/`client_uri`; validate HTTPS and same policy as SSRF allowlists — see `ssrf.md`.
@@ -303,6 +339,7 @@ def register_client(body):
 | Incomplete revocation — race-minted tokens or outstanding codes survive revoke; silent re-approval | **High** — persistent access after user revokes |
 | Cross-client token acceptance (`aud`/`azp` not checked) | **High** |
 | Account create/link without `email_verified` | **High** — account takeover |
+| Multi-tenant SSO without domain binding / global identity (customer-controlled IdP) | **High–Critical** — cross-tenant account takeover; `email_verified` does not mitigate |
 | Pre-registration stub + social link merge | **High** |
 | Implicit flow / token in URL fragment | **Medium–High** |
 | Client secret in frontend | **High** |
@@ -322,7 +359,8 @@ Downgrade when: exact redirect list enforced, state/PKCE/nonce verified, codes s
 - Refresh tokens redeemed atomically and rotated with reuse detection (presenting a rotated token revokes the family).
 - Revocation cascades by grant id over all access/refresh tokens and outstanding codes, and forces re-consent (the OAuth library/IdP — e.g. a managed provider — handles this; confirm the custom revoke handler isn't a single-row delete before flagging).
 - `aud`/`client_id` checked after proper JWT verification.
-- `email_verified` explicitly required before link/create.
+- `email_verified` explicitly required before link/create — sufficient **only** for a single trusted first-party IdP, not for tenant/customer-controlled enterprise connections (see condition 17).
+- Single-tenant app or SSO connection controlled solely by the application operator (no untrusted party can register an IdP) — domain-binding/tenant-scoping concerns of condition 17 do not apply; SSO connection bound to a verified-domain allowlist and identity keyed by tenant.
 - `client_secret` referenced only in server-side config (not bundled).
 - ID token verified via library with pinned algorithms and required claims — see `authentication_jwt.md`.
 - OAuth library defaults (Spring Security OAuth2 Resource Server, Authlib with strict config) already enforce exact redirect and PKCE — confirm config, do not flag library presence alone.
@@ -338,6 +376,8 @@ Downgrade when: exact redirect list enforced, state/PKCE/nonce verified, codes s
 - `host_header_poisoning.md` — poisoned host affecting redirect URI construction.
 - `insecure_cookie.md` — session cookie flags on OAuth-established sessions.
 - `default_credentials.md` — hardcoded `client_secret` patterns in repo scans.
+- `idor.md` / `business_logic.md` — cross-tenant org-switching and membership checks an SSO identity can abuse once established; multi-principal access testing.
+- `authentication_jwt.md` — nOAuth-style unverified-claim linking (the single-IdP variant); for customer-controlled IdPs, `email_verified` alone is insufficient (see condition 17).
 
 ## Core Principle
 
