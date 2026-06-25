@@ -124,6 +124,19 @@ if ipaddress.ip_address(ip).is_private or ip.startswith("169.254."):
 # on manual redirect: re-parse Location, re-resolve, re-validate (no reuse of first IP)
 ```
 
+**Resolution-failure fail-open (empty/errored DNS skips the block)** — a guard that only *rejects* when resolution returns a private IP will **allow** the request when resolution returns **zero addresses** or **raises**. Patterns: `if resolved.any?(&:private?)` / `if any(is_private(a) for a in addrs)` over an empty list is `false` → fetch proceeds; `begin resolve; rescue; end` that swallows the error and continues; a resolver returning `[]` on `SERVFAIL`/timeout. An attacker uses a domain that fails the validator's lookup but succeeds (or rebinds) at connect time. **SAST takeaway**: the safe default is **fail-closed** — block when the resolved set is empty or resolution errors, and require the validator to assert "at least one address AND every address public" rather than "no address is private".
+
+```ruby
+# VULN: empty/errored resolution → any? is false → request allowed (fail-open)
+addrs = Resolv.getaddresses(host) rescue []
+raise "blocked" if addrs.any? { |a| private?(a) }
+http_get(url)
+
+# SAFE: fail closed on empty/error; require all-public
+addrs = Resolv.getaddresses(host)
+raise "blocked" if addrs.empty? || addrs.any? { |a| private?(a) }
+```
+
 **Other safe shapes**
 - User input used exclusively as a query parameter on a hardcoded host, never as authority
 - URL assembled from a hardcoded base with user input confined to an encoded path segment

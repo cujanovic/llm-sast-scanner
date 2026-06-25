@@ -379,6 +379,26 @@ rg -n "html:\s*true|allowDangerousHtml|dangerouslySetInnerHTML|UNSAFE|skipHtml:\
 rg -n "DOMPurify\.sanitize|sanitize-html|nh3|bleach\.clean|ALLOWED_URI_REGEXP" --glob '*.{js,jsx,ts,tsx,py}'
 ```
 
+### Client-side diagram / charting renderers (Mermaid, chart libs)
+
+Markdown platforms and dashboards increasingly render fenced ` ```mermaid `/diagram/chart blocks **client-side**, turning the diagram library into its own injection sink that the HTML sanitizer on the *Markdown* path never sees. These libraries build SVG/HTML from attacker text and accept an `init`/config directive in the source, which adds several distinct sinks:
+- **HTML labels rendered without (or with bypassable) sanitization** — many chart libs render node/label text as HTML. A config such as `securityLevel`/`htmlLabels` controls sanitization, and a **string-vs-boolean type confusion** (the lib treats the *string* `"false"`/`"loose"` as enabling HTML while a check expected a boolean) re-enables raw HTML labels → XSS.
+- **`init` directive merged into render options → prototype pollution** — an attacker `%%{init: { ... "__proto__": {...} }}%%` (or JSON config) is deep-merged into the library's options, polluting `Object.prototype` and reaching a downstream gadget/template (stored XSS). Cross-ref `client_side_prototype_pollution.md`.
+- **Config JSON written into `<style>.innerHTML`** — theme/`init` values flow into generated CSS assigned via `style.innerHTML`; an attacker closes the `<style>` and injects markup (CSS-context breakout). Cross-ref the `<style>` exfil note above.
+- **Injected class names hijack delegated handlers** — diagram output can set arbitrary `class`/`id`; if the app wires delegated listeners (`$(root).on('click', '.btn-…')`), attacker-chosen classes trigger authenticated actions on click (a CSRF/clickjacking-adjacent sink). 
+- **Parser DoS** — pathological diagram syntax hangs the client renderer (cross-ref `denial_of_service.md`, client-side parser complexity).
+
+**SAST signal**: user-controlled text reaches a diagram/chart renderer (`mermaid.render`/`mermaid.init`/`.initialize`, chart `init`/`directive`/`mergeConfig`) with `securityLevel` set to `loose`/`antiscript` (or absent), `htmlLabels`/`html:true`, or where the source `%%{init}%%`/config is not stripped before rendering. Treat the diagram library as an HTML sink independent of the Markdown sanitizer.
+
+```javascript
+// VULN: loose security + attacker init directive → HTML labels + __proto__ merge
+mermaid.initialize({ securityLevel: 'loose', htmlLabels: true });
+mermaid.render('id', userDiagramSource);   // source may contain %%{init: ...}%%
+
+// SAFE: strict security level, no HTML labels, strip/ignore inline init from untrusted source
+mermaid.initialize({ securityLevel: 'strict', htmlLabels: false, secure: ['securityLevel','htmlLabels'] });
+```
+
 ## Blind XSS (Out-of-Band Stored)
 
 Blind XSS is **stored XSS where the payload executes in a different, often privileged, viewing context the attacker never directly sees** — and the attacker gets **no reflected response** at injection time. The input is persisted/logged at a low-trust (frequently unauthenticated) entry point and rendered raw later in an internal tool. Severity is usually high: it fires in the session of a staff/admin user.

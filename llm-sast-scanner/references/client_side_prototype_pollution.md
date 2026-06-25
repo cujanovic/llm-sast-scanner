@@ -33,6 +33,7 @@ For the **server-side variant** (Node.js / Deno / NPM-package gadgets, RCE/SSRF 
 - WebSocket / SSE / shared-worker messages merged into a state store.
 - File uploads parsed into FormData with attacker-controlled field names.
 - Cookies decoded as JSON then merged.
+- Diagram/charting library config: an inline `init`/`directive` block in user content (e.g. ` ```mermaid ` with `%%{init: {...}}%%`, or a chart `init` JSON) deep-merged into the renderer's options — `__proto__` in that config pollutes the prototype and reaches a render/template gadget (stored XSS). Cross-ref `xss.md` (client-side diagram/charting renderers).
 
 **Pollution sinks (browser-resident merges/parsers)**
 - Parser-catalog URL/hash parsers that walk `__proto__` / `constructor[prototype]`:

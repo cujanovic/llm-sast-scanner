@@ -201,6 +201,23 @@ ignore-scripts=true
 <script src="https://cdn.example.com/analytics.js"></script>
 ```
 
+### SRI/integrity present but unenforced (fail-open verification)
+
+Worse than a *missing* `integrity=` is one that is **present but never actually enforced** — reviewers see the attribute and assume the control works. Treat the verifier itself as suspect:
+- **Malformed/unparseable hash → load proceeds**: a custom integrity check (or a fetch wrapper) that, on a hash it cannot parse (wrong prefix, truncated, unknown algorithm), logs and continues instead of rejecting. The defender ships a valid-looking `sha384-…`; an attacker who can influence the hash string makes it unparseable to *disable* the check rather than fail the load.
+- **Empty/absent algorithm treated as "no check required"**: `if (expected) verify(...)` where `expected` is empty/`null` for the very entry an attacker controls.
+- **SRI without `crossorigin`**: the resource loads opaque and the integrity check is silently skipped by the browser.
+
+```javascript
+// VULN: unknown/empty hash format → verification skipped, content trusted
+const ok = expectedHash ? sriMatches(expectedHash, body) : true; // fail-open
+if (ok) execute(body);
+
+// SAFE: require a well-formed hash and a successful match; otherwise reject
+if (!isWellFormedSri(expectedHash) || !sriMatches(expectedHash, body)) throw new Error('integrity check failed');
+execute(body);
+```
+
 ### Untrusted HTTP registry
 
 ```ini

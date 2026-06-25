@@ -163,6 +163,27 @@ Prefix cookies enforce attribute floors at the browser:
 res.cookie('__Host-session', id, { secure: true, httpOnly: true, sameSite: 'strict', path: '/' });
 ```
 
+### Cookie-Name Parser Differentials (prefix spoofing / smuggling)
+
+Prefix protection is enforced **by the browser on the raw name**. A server-side cookie parser that **transforms the name before comparison** re-opens the hole — the attacker submits a name that the browser treats as un-prefixed (so it sets it) but the server canonicalizes into the protected name. Flag custom/hand-rolled cookie parsing (and frameworks known to deviate from RFC 6265):
+- **Percent/URL-decoding the cookie *name*** — `%5F_Host-session` or `__Host%2Dsession` decodes to a `__Host-`/`__Secure-` name server-side, shadowing or overwriting the genuine prefix cookie with an attacker value. Names must be compared **byte-for-byte without decoding**.
+- **Non-RFC delimiter parsing** — splitting the `Cookie:` header on spaces (or `,`) instead of `;` lets one cookie's *value* smuggle a second `name=value` pair the attacker controls.
+- **Control/invalid characters retained** in names/values (no charset validation before store/replay) — enables cookie-jar poisoning and parser disagreement between tiers.
+- **Last-wins vs first-wins on duplicate names** — when the genuine prefix cookie and an attacker duplicate both arrive, which one the app reads is parser-dependent.
+
+**Detection indicators:**
+- Cookie parser calls `decodeURIComponent`/`unquote`/`urldecode` on the **name** (not just the value)
+- Manual header splitting on `' '`/`,` rather than `;`
+- Name comparisons via normalized/case-folded/decoded forms instead of exact bytes
+
+```javascript
+// VULN: decoding the name lets "__Host%2Dsession" become "__Host-session" server-side
+const name = decodeURIComponent(rawName);
+
+// SAFE: compare the raw name bytes; never decode the cookie name
+const name = rawName; // and split the header strictly on ';'
+```
+
 ### Path and Domain Scoping
 
 - Scope `Path` to the application root, not parent paths shared with untrusted apps on same host

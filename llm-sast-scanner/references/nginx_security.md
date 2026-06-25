@@ -166,6 +166,27 @@ location /admin/ {
 }
 ```
 
+### Trusting `X-Accel-Redirect` / `X-Sendfile` from an untrusted upstream — VULN vs SAFE
+
+`X-Accel-Redirect` lets a backend tell nginx to internally serve an arbitrary `internal` location (the X-Sendfile pattern). If the upstream behind `proxy_pass` is **not fully trusted** — a third-party app, a multi-tenant backend, or anything that reflects user input into response headers — the backend (or an attacker who can set that response header) can make nginx return **any internal file/location**, bypassing auth on `internal` routes. The same applies to `X-Accel-*` family headers.
+
+**VULN** — external/untrusted upstream, response `X-Accel-Redirect` honored:
+```nginx
+location / { proxy_pass http://untrusted_app; }   # app can emit X-Accel-Redirect: /internal/secret
+location /internal/ { internal; alias /var/secrets/; }
+```
+
+**SAFE** — strip the headers from untrusted upstreams so only trusted backends can use the feature:
+```nginx
+location / {
+    proxy_pass http://untrusted_app;
+    proxy_hide_header X-Accel-Redirect;     # and X-Accel-Buffering, X-Accel-Charset, etc.
+    proxy_ignore_headers X-Accel-Redirect X-Accel-Buffering X-Accel-Charset X-Accel-Expires X-Accel-Limit-Rate;
+}
+```
+
+**Recon**: `proxy_pass` to a non-local/third-party upstream **without** a matching `proxy_hide_header`/`proxy_ignore_headers X-Accel-Redirect`; an `internal` location holding sensitive files reachable via `X-Accel-Redirect`.
+
 ## Cross-References (enrich these classes with the nginx signal)
 
 - **Path traversal** → `path_traversal_lfi_rfi.md` (alias/`location` mismatch)

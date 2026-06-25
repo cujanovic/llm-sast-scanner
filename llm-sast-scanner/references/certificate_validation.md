@@ -159,6 +159,24 @@ params.setRevocationEnabled(false); // no addCertPathChecker replacement
 
 Distinguish test-only usage (`_test.go`, `*Test.java`, mock servers) from production client initialization.
 
+## Fail-Open / Silent No-Op Verification (verification present but skipped)
+
+More dangerous than an explicit `verify=false` is a verification path that **silently degrades to no checking** for a non-obvious input — code review and the table above both miss it because the call *looks* enabled. Treat any of these as disabled verification:
+
+- **Tri-state / falsy option that isn't a strict boolean**: Node treats `rejectUnauthorized: undefined` (and any non-`true` value produced when an options object is built dynamically, e.g. `{ rejectUnauthorized: opts.strict }` where `opts.strict` is missing) the same as `false`. Flag TLS option objects where the verify flag can be `undefined`/`null`/`""` at runtime rather than a literal `true`.
+- **Length/empty-argument no-op across crypto libraries**: `X509_VERIFY_PARAM_set1_host(param, host, 0)` — passing `namelen = 0` means "use strlen" on OpenSSL but is a **no-op (hostname check disabled)** on LibreSSL/BoringSSL. Any verify-setup call where a name/length/option argument can be empty or zero needs an explicit non-empty assertion; do not assume cross-library parity.
+- **Backend silently ignores an unsupported option**: setting issuer/CRL/curve/hostname options on a TLS backend that does not implement them returns success while the control is inert. Require the code to verify the option took effect (or fail closed) instead of trusting the setter's return.
+- **Opportunistic-TLS / STARTTLS continues in cleartext on negotiation failure**: a mandatory-TLS flag (e.g. `--ssl-reqd`, "require TLS") that proceeds when the `STARTTLS`/upgrade command returns a non-OK status (or when the server omits the capability) downgrades to plaintext, and pipelined data sent before the handshake can be injected by a MITM. Opportunistic-upgrade paths must hard-fail on any non-OK negotiation response.
+- **Unknown host key accepted (`accept-new`) before secret is sent**: SSH/SFTP clients configured with `accept-new` (or that auto-add when `known_hosts` lacks an entry) authenticate to an unverified host on first contact — if a password/key is sent before the trust prompt, a MITM on first connection captures it. Treat "missing known_hosts entry ⇒ trust" as fail-open (same category as Paramiko `AutoAddPolicy`).
+
+```javascript
+// VULN: dynamically-built options — rejectUnauthorized is undefined when cfg.strict is unset → cert check OFF
+const agent = new https.Agent({ rejectUnauthorized: cfg.strict });
+
+// SAFE: coerce to a strict boolean and default to secure
+const agent = new https.Agent({ rejectUnauthorized: cfg.strict !== false });
+```
+
 ## Safe Patterns
 
 - Default JVM / platform trust store with standard HTTPS APIs and no custom trust-all manager.

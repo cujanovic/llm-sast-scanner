@@ -249,6 +249,43 @@ CWE-326 (insufficient key size), CWE-780 (RSA without OAEP), CWE-1204 (static IV
 
 ---
 
+## Signature/Key-Operation Result Misuse (fail-open crypto)
+
+A correct algorithm is worthless if the *result* of a verify/generate call is interpreted wrong. These are silent fail-opens: the verify call is present, so reviews and the algorithm-focused checks above pass it.
+
+- **Tri-state verify return treated as boolean** — `openssl_verify()` (PHP) and several C/OpenSSL wrappers return **1 = valid, 0 = invalid, -1 = error**. A truthy test (`if (openssl_verify(...))`), `!= 0`, or a cast-to-bool accepts the **-1 error path as a valid signature**, so any input that makes verification *error* (malformed key, wrong algo) authenticates. Require an explicit `=== 1` (or `== 1`) comparison; flag any signature/MAC verify whose return is consumed by a loose/boolean test rather than compared to the exact success constant. Same shape: functions that return a status code where only one value means "verified."
+
+```php
+// VULN: -1 (error) is truthy → forged/malformed signature passes
+if (openssl_verify($data, $sig, $pubKey)) { grantAccess(); }
+
+// SAFE: only the exact success value authorizes
+if (openssl_verify($data, $sig, $pubKey) === 1) { grantAccess(); }
+```
+
+- **Key-generation/rotation that silently no-ops when material already exists** — `DiffieHellman.generateKeys()` (Node `crypto`) and similar APIs **do not regenerate** when a private key was already set via `setPrivateKey()`; the call returns normally but reuses attacker-influenced/static material, so the "fresh" ephemeral key never rotates. Flag any `generateKeys()`/`generateKeyPair`/key-rotation call that can run *after* a `setPrivateKey()`/preset on the same object, and any rotate routine whose success is assumed rather than verified to have produced new material.
+
+- **Signature/MAC over ambiguously concatenated fields (canonicalization / field-splitting forgery)** — when a request signature is computed by **concatenating field names and values with no unambiguous delimiter or length prefix** (`hash(secret + name1 + value1 + name2 + value2 …)`), an attacker who controls *any one* field can shift the `=`/`&`/separator characters between adjacent fields so the **concatenated byte string is unchanged while the parsed key/value pairs differ** — forging a valid signature for a different logical message. Classic payment-tampering shape: `Amount=2000` rewritten to `Amount2=000`, with the freed `2000` re-introduced through an attacker-controlled `CustomerEmail`/`Description` field that injects `&amount=100`; the digest input is byte-identical so the signature still verifies, but the upstream parser now reads a different (lower) amount. The same flaw lets an attacker append/override authorization-relevant fields (currency, recipient, role). SAST signal: a signing/verifying routine that builds its message by string concatenation or naive sort-and-join of params (`"".join(f"{k}{v}" …)`, `query.replace("&","")`, `implode('', $fields)`) instead of a **canonical, injective encoding** — length-prefixed/TLV, JSON/CBOR of a fixed schema, or percent-encoded `k=v` pairs with reserved-char escaping — *and* where at least one signed field is free-form user input. Fix: sign a canonical serialization with unambiguous, escaped delimiters (or per-field length prefixes), pin the exact field set, and reject unknown/duplicate keys before verifying.
+
+```python
+# VULN: signature input is just concatenated names+values — no delimiters.
+# Moving '=' across fields (Amount=2000 -> Amount2=000) keeps this string
+# identical, so a forged amount still verifies.
+sig_input = "".join(f"{k}{v}" for k, v in sorted(params.items()))
+if hmac.compare_digest(sign(secret, sig_input), provided_sig):
+    process_payment(params["Amount"])
+
+# SAFE: canonical, injective encoding (escaped k=v) + fixed allowed field set
+allowed = ("MerchantID", "Amount", "Currency", "MerchantTransactionID")
+if params.keys() - set(allowed):
+    raise ValueError("unexpected signed field")
+canonical = "&".join(f"{quote(k, safe='')}={quote(str(params[k]), safe='')}" for k in allowed)
+if hmac.compare_digest(sign(secret, canonical), provided_sig):
+    process_payment(params["Amount"])
+```
+
+---
+
 ## Password Storage (Slow Hashing)
 
 Presence/config check — flag weak or misconfigured password hashing; no Source→Sink taint required when algorithm or parameters are evident.

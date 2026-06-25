@@ -90,6 +90,13 @@ Grep for query execution calls where the SQL string argument is built dynamicall
 - Time: `SLEEP(n)`, `BENCHMARK`
 - JSON: `JSON_EXTRACT`/`JSON_SEARCH` with crafted paths; GIS functions sometimes expose side channels
 
+#### `LOCAL INFILE` rogue-server client-side file read (reverse direction)
+
+Not query injection — a **client-connection configuration** flaw. When the MySQL/MariaDB client enables `LOCAL INFILE`, a **malicious or compromised database server** (or one reached via MITM / SSRF-style "connect to attacker DB") can answer *any* query with a `LOCAL INFILE` request packet, forcing the connecting client to read and upload a file from the **app server's** filesystem (`/etc/passwd`, app secrets, cloud creds). This is exploitable whenever the DB host/credentials are attacker-influenced or the network path is untrusted, and needs **no SQLi at all**.
+
+- **SAST signals (enabled local-infile on the client)**: PHP `PDO::MYSQL_ATTR_LOCAL_INFILE => true` / `mysqli_options($c, MYSQLI_OPT_LOCAL_INFILE, true)` / `mysqli.allow_local_infile=On`; Node `mysql`/`mysql2` `{ flags: ['LOCAL_FILES'] }` or `infileStreamFactory`; JDBC `allowLoadLocalInfile=true` / `allowLoadLocalInfileInPath`; Python `mysqlclient`/`PyMySQL` `local_infile=1`; Go `RegisterLocalFile` / `?allowAllFiles=true`.
+- **SAFE**: leave `LOCAL INFILE` **disabled** on the client (default) unless required; if required, pin the allowed path and only connect to trusted, authenticated DB hosts over TLS. Treat any client that enables it while the server endpoint is user-influenced as vulnerable.
+
 ### PostgreSQL
 
 - Version/user/db: `version()`, `current_user`, `current_database()`

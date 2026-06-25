@@ -138,6 +138,22 @@ function isAdmin(req) {
 
 Distinguish from a non-security `try`/`catch`: only flag when the guarded call participates in a security decision and the error path widens access. The same fail-open shape in TLS/certificate verification is covered in `certificate_validation.md`; sensitive data leaked in the error response itself is `information_disclosure.md`.
 
+### Loose Boolean Coercion & ACL Predicate Ordering (fail-open without an exception)
+
+A guard can fail open even when nothing throws — through how the flag is *parsed* or the order predicates are *evaluated*:
+
+- **Loose boolean coercion of an authz flag** — a restriction modeled as an "optional" boolean param that defaults to permissive when **absent, empty, or mistyped**. Examples: a check that only restricts when `restricted == 1` (so omitting the param, or sending `restricted=` / `restricted[]` / `restricted=anything`, yields unrestricted/privileged behavior); PHP/loose-typed comparisons where `"0"`, `""`, `"false"`, `[]`, or an array coerce to an unexpected truthiness; "enable protection" flags read from user-controlled form/body/query. **SAST signal**: an authorization/visibility decision keyed on a single optional request field with no strict type/value validation and a permissive default. **SAFE**: default-deny (`is_restricted = field === 'true'` and require the field), validate type, and derive privilege from server-side identity — never from an optional client flag.
+- **ACL predicate ordering / short-circuit** — an access decision that ORs a **broad** predicate before a **narrow** one, so a feature flag / "public" path / early `return true` is evaluated first and the specific per-object permission check is never reached. Same family: `if (isFeatureEnabled() || hasPermission(obj))`, or a policy list whose first matching broad rule wins. **SAST signal**: authorization expressions where a coarse/global condition can satisfy the whole check ahead of the object-level check. **SAFE**: evaluate the narrowest required permission, combine with AND not OR, and put deny rules first.
+
+```php
+// VULN: restriction only applies when flag is exactly 1; omit/empty/array → unrestricted
+if ($_POST['restricted'] == 1) { requireOwner(); }
+doPrivilegedAction();
+
+// SAFE: default-deny, strict parse, server-derived authority
+if (($_POST['restricted'] ?? '1') !== '0' ) { requireOwner(); } // and validate input type
+```
+
 ### Vulnerable vs. Secure — Additional Frameworks
 
 Frameworks with dedicated detection rules below (Python, JavaScript, PHP, Java) are omitted here.
