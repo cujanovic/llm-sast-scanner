@@ -149,6 +149,7 @@ Track taint from resolver sources above into sinks. Emit GraphQL tag **plus** th
 | **OS command** | `systemDebug(cmd: String)` → `os.system(args.cmd)`, `subprocess`, `exec` | `rce.md` |
 | **NoSQL** | `args` / JSON scalar → `collection.find(args)`, Mongo query doc built from input | `nosql_injection.md` |
 | **SSRF** | `importUrl`, `fetchUrl`, `download`, decomposed `scheme`/`host`/`port`/`path` args → outbound HTTP client | `ssrf.md` |
+| **SSRF (gateway/data-source)** | declarative upstream URL: admin/metadata-settable URL (`add_remote_schema`, action `handler`, datasource `url`/`baseURL`), URL templates interpolating args/session/headers into host/first-segment (`{{.arguments`, `{{$base_url}}`, `:param`, `@rest(endpoint:`, AppSync `resourcePath` + `$ctx.args`, Apollo `@connect(http:{GET:"…{$args}…"})`, Dgraph `@custom(http:{url:"…$id…"})`), stitching executors from a non-literal URL (`buildHTTPExecutor`/`loadSchema`/`AddRemoteSchema`), or client-header forwarding to a user-influenced upstream | `ssrf.md` (GraphQL gateway / data-source frameworks) |
 | **Reflected XSS** | Resolver returns HTML string built from args without encoding | `xss.md` |
 | **Stored XSS** | Mutation persists arg → later server render of user content | `xss.md` |
 | **File upload** | `Upload` scalar — filename path traversal, dangerous MIME, write outside intended dir | `arbitrary_file_upload.md` |
@@ -1013,6 +1014,53 @@ GET / graphql ? query = mutation { updateEmail(email: "x") { ok } }
 ```
 
 **SAFE**: disable GET for mutations; POST + `Content-Type: application/json` only; reject mutation operations on GET at route layer.
+
+### GET-mutation restriction bypasses (string op-type checks & URL-param precedence)
+
+Servers that *do* try to block mutations over GET frequently get the **detection** wrong, re-opening the GET-CSRF surface. Two SAST-detectable mistakes:
+
+**(1) Operation type decided by string matching instead of parsing the AST.** A guard like `query.trim().startsWith("mutation")` (or a regex `/^\s*mutation/`) is trivially defeated because a valid GraphQL document need not begin with the literal keyword:
+- **Leading comment**: `# x\nmutation { … }` — the document starts with `#`, not `mutation`.
+- **Leading newline / whitespace / BOM**: a single `%0a` (or `%09`/`%20`/`\uFEFF`) before `mutation` defeats `startsWith` and unanchored trims (`?query=%0amutation+{…}`).
+- **Case-jumbling**: GraphQL keywords are case-sensitive so `mUtaTiOn` is *not* a valid operation keyword — but a case-insensitive denylist that also accepts it (or a server that tolerates it) signals a broken, guessy gate; either way string-matching is the wrong oracle.
+- **Multi-operation documents**: a document containing **both** a `query` and a `mutation` (executed via `operationName`, or where the server runs the first/last) passes a "starts with query" check while still carrying a mutation.
+
+```js
+// VULN — operation type inferred from the raw string, not the parsed operation
+if (req.method === 'GET' && req.query.query.trim().startsWith('mutation')) {
+  throw new Error('mutations not allowed on GET');  // bypass: leading "#", "%0a", "mUtaTiOn", or query+mutation doc
+}
+```
+
+**SAFE**: parse the document and read the operation off the AST for the operation that will actually execute, then gate on that — never on the source string:
+```js
+const documentAST = parse(req.query.query);
+const op = getOperationAST(documentAST, req.query.operationName);
+if (req.method === 'GET' && op && op.operation !== 'query') {
+  throw httpError(405, 'Only query operations are allowed on GET', { headers: { Allow: 'POST' } });
+}
+```
+
+**(2) URL `?query=` takes precedence over the POST body while the op-type gate keys on `request.method`.** The official GraphQL-over-HTTP guidance says a `query` URL parameter on a POST "should be parsed and handled the same way as the HTTP GET case." Many servers (including the canonical `express-graphql`/`graphql-http` shape) therefore resolve the query as `urlParams.query ?? body.query` — **URL wins** — but enforce "only `query` operations on GET" with `if (request.method === 'GET')`. A **POST** request to `…/graphql?query=mutation{…}` then runs the mutation: the op-type gate never fires (method is POST) yet the executed document came from the URL. This:
+- bypasses the GET-only-query restriction entirely (CSRF: attacker controls just the URL — body, Content-Type irrelevant), and
+- **amplifies SSRF**: a server-side request primitive that can hit an internal GraphQL endpoint but can only control the **URL** (not the body) can still execute arbitrary operations via `?query=`. Cross-ref `ssrf.md`.
+
+```js
+// VULN — query source prefers the URL param, but the op-type check is keyed on HTTP method
+const query = urlData.get('query') ?? bodyData.query;          // URL wins
+if (request.method === 'GET') {                                 // never true for POST?query=mutation
+  if (getOperationAST(parse(query), opName)?.operation !== 'query') throw httpError(405, …);
+}
+```
+
+**SAFE**: apply the operation-type policy to the **resolved** query regardless of where it came from — if the executed document originates from a URL `query` parameter, enforce the same "query-only" rule as a real GET (or refuse URL-param queries on POST). Decide GET-vs-mutation by the *source of the query string*, not by `request.method`.
+
+**Grep seeds**:
+```bash
+rg -n "startsWith\(['\"]mutation|/\^\\\\s\*mutation|\.trim\(\)\s*\.\s*(startsWith|match|test)" --glob '*.{js,ts}'
+rg -n "URLSearchParams|url\.split\('\?'\)|req\.query\.query|urlData\.get\(['\"]query" --glob '*.{js,ts}' -A3 | rg -n "method\s*===|operationAST|getOperationAST"
+rg -n "getOperationAST|operationAST\.operation|operation\s*!==\s*['\"]query" --glob '*.{js,ts}' -B3 | rg -n "method"
+```
 
 ### Side effects in read (Query) resolvers
 

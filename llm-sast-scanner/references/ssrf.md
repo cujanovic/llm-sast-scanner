@@ -62,15 +62,24 @@ Flag any call where a non-hardcoded URL, host, IP, or port is passed as the dest
 
 | Stack | Grep targets (destination argument may be variable) |
 |-------|-----------------------------------------------------|
-| Python | `requests\.(get\|post\|put\|request)`, `urllib\.request\.urlopen`, `httpx\.`, `aiohttp\.ClientSession`, `socket\.(connect\|create_connection)`, `dns\.resolver\.resolve`, `subprocess\.(run\|Popen).*\b(curl\|wget)\b` |
-| Node.js | `\bfetch\(`, `axios\.(get\|post\|request)`, `http(s)?\.(get\|request)`, `got\(`, `net\.(connect\|createConnection)`, `dns\.(lookup\|resolve)`, `exec.*\b(curl\|wget)\b` |
-| Ruby | `Net::HTTP\.`, `URI\.open`, `\bopen\(`, `RestClient\.`, `HTTParty\.`, `Faraday\.` |
-| PHP | `curl_setopt.*CURLOPT_URL`, `curl_exec`, `file_get_contents\(`, `fopen\(.*http`, `Guzzle.*->(get\|request)`, `HttpClient.*->request` |
-| Java | `\.openConnection\(\)`, `RestTemplate\.`, `WebClient\.`, `OkHttpClient`, `HttpClients\.`, `HttpGet\(`, `Jsoup\.connect` |
-| Go | `http\.(Get\|Post\|NewRequest)`, `net\.Dial`, `net\.LookupHost`, `net\.ResolveTCPAddr` |
-| C# | `HttpClient\.(Get\|Post\|Send)Async`, `WebRequest\.Create`, `WebClient\.Download` |
+| Python | `requests\.(get\|post\|put\|request)`, `urllib\.request\.urlopen`, `httpx\.`, `aiohttp\.ClientSession`, `socket\.(connect\|create_connection)`, `dns\.resolver\.resolve`, `subprocess\.(run\|Popen).*\b(curl\|wget)\b`, `base_url=`, `urljoin\(` (configured-base override) |
+| Node.js | `\bfetch\(`, `axios\.(get\|post\|request)`, `http(s)?\.(get\|request)`, `got\(`, `net\.(connect\|createConnection)`, `dns\.(lookup\|resolve)`, `exec.*\b(curl\|wget)\b`, `RESTDataSource`, `datasource-rest`, `resolveURL\(`, `this\.(get\|post\|put\|delete\|patch)\(` with a variable `path` arg, `new URL\([^,]+,` (base-relative resolve then fetched), `baseURL`, `prefixUrl`, `allowAbsoluteUrls` (configured-base override) |
+| Ruby | `Net::HTTP\.`, `URI\.open`, `\bopen\(`, `RestClient\.`, `HTTParty\.`, `Faraday\.`, `Faraday\.new\(.*url:` (configured-base override), Her `include Her::Model`, `\.(get\|post\|put\|delete)\(` / `request\(_path:` with a non-literal absolute path |
+| PHP | `curl_setopt.*CURLOPT_URL`, `curl_exec`, `file_get_contents\(`, `fopen\(.*http`, `Guzzle.*->(get\|request)`, `HttpClient.*->request`, `base_uri` (Guzzle configured-base override) |
+| Java | `\.openConnection\(\)`, `RestTemplate\.`, `WebClient\.`, `OkHttpClient`, `HttpClients\.`, `HttpGet\(`, `Jsoup\.connect`, `baseUrl\(`, `@Url\b`, `HttpUrl.*\.resolve\(` (configured-base override), `@FeignClient`, `@RequestLine`, `@HttpExchange`, `\bURI\b.*@Param\|URI \w+\)` (Feign/HTTP-interface `URI`-arg base override), `@RegisterRestClient` |
+| Go | `http\.(Get\|Post\|NewRequest)`, `net\.Dial`, `net\.LookupHost`, `net\.ResolveTCPAddr`, `SetBaseURL\(` (resty configured-base override), `sling\.New\(`, `\.Base\(.*\.Path\(` (sling ResolveReference override) |
+| C# | `HttpClient\.(Get\|Post\|Send)Async`, `WebRequest\.Create`, `WebClient\.Download`, `BaseAddress\s*=` (configured-base override), `RestService\.For<`, `\[Get\("\{`, `new RestClient\(`, `RestRequest\(`, `AppendPathSegment\(` (Refit/RestSharp/Flurl) |
+| PHP | (in addition to above) `resolveEndpoint\(`, `resolveBaseUrl\(` (Saloon), `ScopingHttpClient`, `base_uri` |
+| Python | (in addition to above) `@get\(`/`@post\(` with `uplink`, `Url\b` typed arg, `slumber`/`tapioca` base-url clients |
 
 Skip fully hardcoded literals (`requests.get("https://api.example.com/data")`). Shell-outs to `curl`/`wget`/`nc` with a variable target are SSRF sinks.
+
+**Non-HTTP-client sinks** (the request is made by an auth library, the DB, or an AI loader — easy to miss):
+| Surface | Grep targets (URL/host/issuer argument may be non-literal or admin/token-derived) |
+|---------|-----------------------------------------------------------------------------------|
+| IdP fetch (OIDC/OAuth/SAML) | `Issuer\.discover`, `openid-configuration`, `jwks_uri`, `jwksClient\(`, `PyJWKClient\(`, `get_signing_key`, `MetadataAddress`, `request_uri`, `sector_identifier_uri`, `logo_uri`, saml `metadata.*url` |
+| Database remote-fetch | `dblink\(`, `postgres_fdw`, `FROM PROGRAM`, `OPENROWSET\(`, `OPENDATASOURCE`, `sp_addlinkedserver`, `xp_dirtree`, `UTL_HTTP`, `HTTPURITYPE`, `DBMS_LDAP`, `CONNECTION='`, `http_get\(`, ClickHouse `url\(`/`postgresql\(`/`mysql\(`, DuckDB `read_(csv\|parquet)\('https?` |
+| LLM/RAG loader & agent tool | `RecursiveUrlLoader`, `WebBaseLoader`, `UnstructuredURLLoader`, `SeleniumURLLoader`, `SimpleWebPageReader`, `BeautifulSoupWebReader`, `download_loader\(`, `RequestsGetTool`, `image_url`, agent `fetch\|browse\|http_request\|read_url\|scrape` tools |
 
 ## Vulnerable Conditions
 - User-supplied input reaches any HTTP or network client URL parameter with no prior validation
@@ -234,7 +243,8 @@ The host the **validator** parses differs from the host the **HTTP client** conn
 - **VULN**: `axios.get(req.body.url)` — URL fully controlled by request body
 - **VULN**: `fetch(req.query.url)`, `http.get(userUrl, ...)`
 - **VULN**: `new URL(userPath, "http://localhost:3000")` then fetched — an **absolute** (`https://evil.com`) or **protocol-relative** (`//evil.com`) `userPath` discards the base origin (see *Base-Relative URL Resolution Override*)
-- **SAFE**: Fixed base URL with only the path portion user-controlled, **and** the input is rejected if it parses as absolute or starts with `//`, **and** the resolved `origin` is re-checked against the intended base (a bare `startsWith("/")` path check is insufficient — `//evil.com` also starts with `/`)
+- **VULN**: Apollo `RESTDataSource` subclass calling `this.get(path)`/`this.post(path)` with user-influenced `path`, especially with a custom `resolveURL(path, req)` that does `new URL(path.slice(1)…, baseURL)` — single-slash strip does not block `https://evil.com` or `///evil.com` (see *Framework HTTP-client `resolveURL`/path overrides*)
+- **SAFE**: Fixed base URL with only the path portion user-controlled, **and** the input is rejected if it parses as absolute or starts with `//` (or `\\`), **and** the resolved `origin` is re-checked against the intended base (a bare `startsWith("/")` path check is insufficient — `//evil.com` also starts with `/`)
 
 ### PHP
 - **VULN**: `file_get_contents($_GET['url'])` — PHP wrappers support `file://`, `http://`, `php://`
@@ -350,6 +360,80 @@ if (target.origin !== base.origin) throw new Error("origin escaped");
 ```
 
 Equivalent base-discard resolvers to flag across languages (same "absolute first arg wins" rule): Python `urllib.parse.urljoin(base, userInput)`; Java `new URL(URL base, String spec)` / `URI.resolve`; Go `base.ResolveReference(ref)` / `base.Parse(ref)`; .NET `new Uri(Uri base, string relative)`; Ruby `URI.join`. **SAST signal**: any base+relative join where the relative component is user-controlled and is not first validated to be a path (no scheme, not starting with `//`, optionally not containing `\`), *and* the resolved `origin`/`host` is not re-compared to the intended base before the outbound fetch / redirect. A path-only allowlist or `startsWith("/")` check is insufficient because `//evil.com` also starts with `/`.
+
+**Custom path→URL resolvers / path overrides in HTTP-client base classes.** Any SDK/REST-client base class that exposes a path-based API (`this.get(path)`, `this.post(path, …)`, `this.put`, `this.delete`) and resolves `path` against a configured `baseURL` is in scope — typically via a single resolver method (an overridable hook or a private helper) that ends in `new URL(normalizedPath, base)` / a join. The canonical instance is **Apollo `RESTDataSource`'s overridable `resolveURL(path, request)`**, but the pattern is generic: a `baseURL`-bound client with a per-request `path`. When `path` is user-influenced (a route/query param, a GraphQL arg, an ID, or anything flowing in cross-module), an **absolute** (`https://evil.com`) value rebases off the trusted `baseURL` and the framework then fetches it → SSRF, even though the caller "only passes a path." A hand-rolled normalizer that **strips a single leading slash is NOT a fix**: `path.startsWith('/') ? path.slice(1) : path` leaves `https://evil.com` untouched (absolute override) and turns `///evil.com` into `//evil.com` (**protocol-relative** override → `http://evil.com/`). Treat any custom path→URL resolver / path-join in an HTTP-client class as an SSRF sink unless it rejects absolute + `//`/`\\`-leading inputs **and** re-checks the resolved `origin` against `baseURL`.
+
+```typescript
+// Generic shape: a base-bound client resolves a per-request path into the upstream URL.
+// (Apollo RESTDataSource is one instance — override resolveURL(path, request); the same applies
+//  to any hand-rolled `resolveUrl`/`buildUrl`/`join(base, path)` helper in an HTTP-client class.)
+
+// VULN: single-slash strip, then base-relative resolve.
+// client.get(userPath) with userPath="https://evil.com" or "///evil.com" leaves the trusted baseURL.
+function resolveUpstreamUrl(path: string, baseURL: string): URL {
+  const base = baseURL.endsWith('/') ? baseURL : `${baseURL}/`;
+  const normalizedPath = path.startsWith('/') ? path.slice(1) : path;  // insufficient
+  return new URL(normalizedPath, base);
+}
+
+// SAFE: reject absolute/protocol-relative/backslash, resolve, then pin to baseURL origin.
+function resolveUpstreamUrl(path: string, baseURL: string): URL {
+  if (/^[a-z][a-z0-9+.-]*:/i.test(path) || /^[/\\]{2}/.test(path) || path.includes('\\')) {
+    throw new Error('invalid path');
+  }
+  const base = new URL(baseURL.endsWith('/') ? baseURL : `${baseURL}/`);
+  const url = new URL(path.replace(/^\/+/, ''), base);
+  if (url.origin !== base.origin) throw new Error('path escaped base origin');
+  return url;
+}
+```
+
+**Do NOT dismiss SSRF just because "no user-controlled *full URL* is passed to an HTTP client."** That heuristic is wrong for base-rebasing: a user-controlled **path/path-segment** resolved against a base and then fetched is sufficient for CWE-918. The same `new URL(path, base)` / `resolveURL` / `urljoin` sink is frequently filed **only** as path traversal (CWE-22) — it must be **re-judged for SSRF (CWE-918) on the same sink** whenever the resolved URL reaches an outbound HTTP client (cross-ref `path_traversal_lfi_rfi.md`). Reachability is often non-obvious: the tainted segment may need **first-segment placement** (it must land as the host/scheme-bearing part of the resolved URL, not a later path segment) and may arrive through a **cross-module taint chain** (e.g. a privileged resolver passing an attacker-influenced value into a shared data-source method) — trace these rather than stopping at "looks like a path."
+
+### Configured-base HTTP clients (the `baseURL`/`prefixUrl`/`BaseAddress` footgun)
+
+Apollo `RESTDataSource` is **not** special — almost every mainstream HTTP client that supports a configured base URL applies the same WHATWG/RFC-3986 rule: **a per-request `url`/`path` that is itself absolute (or, for spec-based resolvers, protocol-relative) overrides the base and is fetched as-is.** So `client.get(userInput)` is an SSRF sink whenever `userInput` is attacker-influenced, even though the developer "only configured a trusted base." This is a real, shipped vulnerability class — e.g. **axios CVE-2025-27152** (CWE-918): an absolute URL passed to a `baseURL`-configured instance is sent to the attacker host *and leaks the configured auth headers / API keys* to it.
+
+| Client (lang) | Base config | Override behavior when per-request arg is absolute / `//` | Safe knob |
+|---|---|---|---|
+| **axios** (JS/TS) | `axios.create({ baseURL })` | Absolute **and** protocol-relative arg overrides base → request + headers sent to attacker host (CVE-2025-27152, ≤1.8.1) | `allowAbsoluteUrls: false` (≥1.8.2) **plus** re-check host; don't pass user input as `url` |
+| **fetch / undici / node-fetch** (JS) | `new URL(path, base)` then `fetch` | Absolute or `//host` discards base (WHATWG) | reject absolute/`//`, re-check `origin` |
+| **got** (JS) | `prefixUrl` | Safer: **throws** if `input` starts with `/`; `prefixUrl` is concat, not resolution — but a `URL`/`Request` instance argument bypasses `prefixUrl` | keep input a string suffix; never build the arg from a user `URL` object |
+| **ky** (JS) | `prefixUrl` | Safer (same model as got); still applies to absolute strings and a `URL`/`Request` arg bypasses it | same as got |
+| **httpx** (Python) | `Client(base_url=…)` | `_merge_url` only prepends base when arg `is_relative_url` (no scheme **and** no host); an absolute or `//host` arg (has host) is used as-is | validate arg is relative; re-check resolved host |
+| **requests** (Python) | `urljoin(base, path)` / `BaseUrlSession` | `urljoin` absolute/`//` arg overrides base | reject absolute/`//`, re-check host |
+| **Spring `WebClient`/`RestTemplate`** (Java) | `baseUrl(…)` / `DefaultUriBuilderFactory` | absolute `uri(userInput)` overrides base | build with fixed host + `UriComponentsBuilder` path-only; allowlist host |
+| **Retrofit** (Java/Kotlin) | `baseUrl(…)` + `@Url` param | `@Url` absolute **or** `//host` **or** `/abs-path` overrides/ rebases base ("it's how URLs work") | never bind user input to `@Url`; use `@Path` (encoded) on a fixed route |
+| **OkHttp** (Java/Kotlin) | `baseUrl.resolve(link)` | absolute/`//` link discards base origin | reject, then compare `resolvedUrl.host` |
+| **resty** (Go) | `client.SetBaseURL(…)` | absolute arg to `R().Get(url)` overrides base | reject absolute/`//`, re-check host |
+| **.NET `HttpClient`** | `BaseAddress` | absolute request URI ignores `BaseAddress`; a `/leading` relative URI also discards the base **path** (same-host → traversal, not SSRF) | pass a `new Uri(base, relativeNoLeadingSlash)` you built; allowlist host |
+| **Faraday** (Ruby) | `Faraday.new(url: base)` | absolute arg to `conn.get(arg)` overrides base | reject absolute/`//`, re-check host |
+
+**Generic SAST signal (any row):** a client is instantiated with a hardcoded base URL/prefix, and a **later `.get/.post/.put/.delete/.request`/`@Url`/`uri()` call passes a non-literal (user-influenced) path/url** that is not first validated to be relative (no scheme, not `//`-leading, optionally no `\`) **and** whose resolved host/origin is not re-compared to the configured base before the request. Treat the `baseURL`-configured-but-absolute-arg-allowed shape as VULN by default — the configured base provides a false sense of safety and, like axios, often carries credentials that then leak to the attacker host.
+
+### Declarative / SDK-style REST-client libraries (the `RESTDataSource` footgun in every language)
+
+The same footgun appears one layer up, in **"API client" / "data source" / "integration SDK" abstractions** where you subclass or annotate a client with a configured base URL and call relative-path methods. These hide the sink behind a decorator/annotation/base-class method (not a visible `fetch(`), so grep-for-HTTP-client misses them — yet an **absolute / protocol-relative / base-overriding argument** still escapes the configured base (often forwarding the configured auth headers to the attacker host). Flag when the per-call path/url/`URI`/endpoint argument is user-influenced and not validated as relative + host-rechecked.
+
+| Library (lang) | Base config | Per-request override sink to flag |
+|---|---|---|
+| **Apollo `RESTDataSource` / `@apollo/datasource-rest`** (JS/TS) | `this.baseURL` / `resolveURL()` | `this.get(path)` with absolute/`//` `path`, or an overridden `resolveURL` (see section below) |
+| **OpenFeign / Spring Cloud OpenFeign** (Java) | `@FeignClient(url=…)` / `Feign.target(…)` | a **`java.net.URI` method parameter (any position) replaces the base URL** — documented "expected behavior," routinely flagged as SSRF |
+| **Spring 6 HTTP Interface** (Java) | `@HttpExchange` + base `RestClient`/`WebClient` | a `URI` argument to the exchange method overrides the configured base |
+| **MicroProfile Rest Client** (Java/Jakarta) | `@RegisterRestClient(baseUri=…)` | per-call `URI`/`@Path`-built absolute target overriding `baseUri` |
+| **Refit** (.NET) | `RestService.For<T>(baseUrl)` | per-request **full URL** via `[Get("{url}")]` interpolation or an absolute `HttpRequestMessage.RequestUri` |
+| **RestSharp** (.NET) | `new RestClient(baseUrl)` | docs: "when base URL is set you can use both relative **and absolute** path" → an absolute `RestRequest`/`GetJsonAsync("http://…")` resource overrides `BaseUrl` |
+| **Flurl** (.NET) | `"base".AppendPathSegment(x)` | `x` absolute (or a user-built full URL) → request goes to attacker host |
+| **Saloon** (PHP) | Connector `resolveBaseUrl()` + Request `resolveEndpoint()` | an absolute `resolveEndpoint()` value overrides the connector base |
+| **Symfony HttpClient** (PHP) | `ScopingHttpClient` / `base_uri` option | absolute URL arg ignores the scoped `base_uri` |
+| **Sling** (Go) | `sling.New().Base(base)` | `.Path(p)` uses `url.ResolveReference` → absolute/`//` `p` rebases to attacker host |
+| **Her** (Ruby) | `Her::API.setup url:` (Faraday-backed) | full-path request methods — `Model.get/post/put("<path>")`, `get_collection`/`get_resource`, `request(_path: …)` — pass the path to Faraday, so an **absolute** path arg overrides the base (inherits the Faraday row above) |
+| **OpenAPI-generated clients** (all langs) | config `BasePath`/`servers[]` / `Configuration.host` | operation methods that accept a server-override or full-URL param; a settable `servers`/`host` from user input |
+| **Uplink / Slumber / Tapioca** (Python) | Retrofit-style `base_url` | a dynamic/`@get`-templated URL or `Url`-typed arg that carries an absolute value |
+
+**Same SAFE rule for all:** never bind user input to the base-overriding argument (`URI` param, `@Url`, full-URL endpoint, absolute resource); keep the route a fixed relative template with encoded `@Path`/segment params; if a dynamic target is unavoidable, reject inputs that parse as absolute or start with `//`/`\` and re-compare the resolved host against an allowlist before the call; never forward configured credentials to a non-allowlisted host.
+
+**Not this class — host-pinned clients (don't false-positive):** some "REST ORM" libraries pin the request to the configured base host, so a user-controlled **path/id** stays on that host and is *not* a base-override SSRF. **Rails `ActiveResource`** is the canonical example: its `Connection` opens `Net::HTTP` to `self.site`'s host and sends the (escaped) `id`/path/`:from` as the request-target **to that pinned host** — `Model.find(id)` / `find(:all, from: "/path")` do not cross origins. For `ActiveResource`, SSRF only arises when **`self.site`/`self.prefix` is itself built from user input** (configurable/multi-tenant endpoint) — judge that under the generic *configured base set from user input* rule, not the absolute-arg-override shape above.
 
 ## SSRF via URL Parser Differentials
 
@@ -743,6 +827,86 @@ def resolve_fetch(parent, info, scheme, host, port, path):
 ```
 
 **SAFE**: same as general SSRF — strict hostname allowlist, resolve-then-validate IP with pinning, scheme restricted to `https`, user input never as authority; apply at resolver boundary before any outbound call. Cross-ref `graphql_injection.md` (resolver-layer injection vs document injection).
+
+### GraphQL gateway / data-source frameworks (declarative upstream URL construction)
+
+Beyond hand-written resolvers and code-level clients (Apollo `RESTDataSource` etc., above), **GraphQL gateways / BFFs / "virtual graph" frameworks build the upstream URL declaratively** — from config, a directive, or a URL template — and then fetch it for you. The same base-rebasing / authority-injection SSRF applies, but the sink is a config string or template rather than a `fetch(` call, so a resolver-only or grep-for-`fetch` scan misses it. Three shapes to flag:
+
+1. **Admin/metadata-settable upstream URL reachable via a privileged op.** Frameworks that register upstreams at runtime (remote schemas, action handlers, data sources) take a full URL from a metadata/admin API. If that API is reachable (exposed metadata endpoint, weak/forwarded admin role, a `create_*`/`add_*` permission granted too broadly), an attacker points the upstream at `http://169.254.169.254/…` or an internal service → SSRF. Real example: **Hasura `add_remote_schema` remote-schema URL injection, CVE-2021-47715 (CWE-918)**; equivalently a Hasura **action handler** set to an IMDS URL, or a WunderGraph/Mesh data-source `url` taken from a settable source.
+2. **URL template interpolating field arguments / session / headers into host or path.** Gateways let you template the upstream URL with placeholders — Tyk UDG / WunderGraph `:id` and `{{.arguments.x}}` / `{{.object.id}}`, StepZen `@rest(endpoint: "…$args…")`, Hasura REST-connector `{{$base_url}}/{{…}}`, GraphQL Mesh / `@omnigraph` operation paths, **AWS AppSync HTTP resolvers** (`resourcePath: \`/v1/users/${ctx.args.id}\`` / VTL `"resourcePath": $util.toJson("/.../$ctx.args.x")` joined to the data-source endpoint), **Apollo Connectors** `@connect(http: { GET: "…{$args.id}…" })` (and — when no `@source(baseURL:)` is set — the `URLPathTemplate` is a **full URL**, so an `$args`-derived value in host position is direct SSRF), and **Dgraph** `@custom(http: { url: "https://api/$id", … })` / `@lambda`. If a user-controlled value lands in the **authority** (host) position, or in the **first path segment** of a base-relative resolve, or is not URL-encoded (Hasura explicitly requires `escapeUri()`; AppSync `$util.toJson`/`$util.urlEncode` on templated values), the attacker rebases the request: host injection, `@`-userinfo confusion (`{{base}}@evil.com`), absolute/`//` override, or extra-segment SSPP (`../`, `?`, `#`). Severity by placeholder position: a placeholder that **occupies, or can break out to, the host/authority or scheme** (e.g. `http://{{.arguments.host}}/...`, or a first-segment value that rebases the URL) is **high-severity SSRF (CWE-918)**; a placeholder confined to a *later* path segment under a fixed literal scheme+host is lower risk but still flag it if the value is not URL-encoded/allowlisted (extra-segment SSPP via `@`, `/`, `?`, `#`, `../`).
+3. **Header/credential forwarding to a user-influenced upstream.** Gateways that forward the client `Authorization`/cookies to the upstream (WunderGraph header forwarding, Hasura remote-schema header pass-through, Apollo Connectors `headers: [{ name, value: "{$request.headers.authorization}" }]` / `from:`, Dgraph `forwardHeaders`/`secretHeaders`) leak those credentials to whatever host shape 1/2 selects — same credential-leak impact as axios CVE-2025-27152.
+
+Lower-priority but same class (remote-schema/stitching executors built from a config/input URL): GraphQL-Tools / Yoga `buildHTTPExecutor({ endpoint })` / `url-loader` (`loadSchema(url)`), Hot Chocolate (.NET) `AddRemoteSchema`/HTTP stitching, Grafbase connectors `url`, and Apollo Router / Cosmo **subgraph URL override / coprocessor** when the subgraph routing URL is dynamic — flag when the endpoint is non-literal or runtime-settable.
+
+**SAST signals**:
+- Config/metadata field naming an upstream: `add_remote_schema`/`remote_schema`, action `handler`, datasource `url`/`baseURL`/`base_uri`, `@rest(endpoint:`, Mesh `baseUrl`/`@omnigraph` source, AppSync `resourcePath`, Apollo Connectors `@connect`/`@source`/`URLPathTemplate`, Dgraph `@custom(http:`/`@lambda`, stitching `buildHTTPExecutor`/`loadSchema`/`AddRemoteSchema` — whose value is **non-literal** (env-or-input-derived) or settable via a metadata/admin route, especially if that route's authz is weak/forwarded.
+- URL templates with placeholders (`{{.arguments`, `{{.object`, `{{$body`, `{{$session_variables`, `:param`, `$args`, `{$args.`, `$ctx.args`/`ctx.args` in `resourcePath`, `$id`/`$<argName>` in a Dgraph `@custom` `url`) where the placeholder can occupy host/scheme/first-segment, or templated values are interpolated **without** an encode/allowlist (e.g. missing `escapeUri`/`$util.urlEncode`).
+- Upstream header forwarding (`forwardClientHeaders`, `forward_client_headers`, `forwardHeaders`, `secretHeaders`, `{$request.headers`, pass-through `Authorization`) combined with any of the above.
+
+**SAFE**: treat upstream URLs as deploy-time config from a trusted source (env/secret), not runtime/admin-settable by untrusted roles; lock down metadata/admin endpoints and `create_*`/`add_*` permissions (default-deny). For templates, keep the scheme+host **fixed and literal**, only allow placeholders in later path/query positions, URL-encode every interpolated value (`escapeUri` or equivalent), and reject values containing `@ : / \ ? #` or that parse as absolute/`//`. Re-validate the resolved host against an allowlist before fetch; do not forward client credentials to non-allowlisted hosts. Cross-ref `graphql_injection.md` (Request Forgery / resolver-layer SSRF), `server_side_request_forgery` host-allowlist + IP-pinning patterns above, and `api_security.md` (server-side parameter pollution).
+
+## Identity-Provider URL Fetch (OIDC / OAuth / SAML — discovery, JWKS, metadata, `request_uri`)
+
+A federated-login backend **fetches URLs that the identity provider (or a tenant admin) supplies**, and those URLs are attacker-influenceable whenever an attacker can register/configure an IdP, run a "test connection / discover" action, or control the issuer a token claims. The fetch is server-to-server with no user in the loop, so it is classic SSRF — but it hides behind auth-library calls (`Issuer.discover`, `jwksClient`, SAML metadata parse), so a grep-for-`fetch` scan misses it. This is a very common, high-impact surface (IMDS theft, internal port scan, key substitution).
+
+**Attacker-controlled URL sources to flag** (each is fetched server-side):
+- **OIDC discovery**: `<issuer>/.well-known/openid-configuration` where the issuer/discovery URL comes from tenant config, a "run discovery" admin action, or (worst) the `iss` claim of an unverified token. Real: **Amazon Cognito "Run discovery"** allowed `localhost`/IMDS issuers; **sigstore/fulcio** followed cross-host redirects from discovery (blind SSRF + JWKS substitution + k8s SA-token leak, GHSA-f5mr-q85p-6hh6).
+- **`jwks_uri` / `token_endpoint` / `userinfo_endpoint` / `registration_endpoint`** read **out of the discovery document** and then fetched — a malicious discovery doc points these at `http://127.0.0.1:…` / `http://169.254.169.254/…`.
+- **OIDC `request_uri`** (pushed/by-reference request objects) and **OAuth `logo_uri`/`jwks_uri`/`sector_identifier_uri`** in dynamic client registration — server dereferences a client-supplied URL.
+- **SAML metadata URL** (IdP/SP metadata fetched by URL) and **`AssertionConsumerServiceURL`**-style callback fetches.
+
+**SAST signals**:
+- Auth-library discovery/JWKS calls whose URL/issuer argument is **non-literal**: `Issuer.discover(`, `discoverProviderMetadata(`, `openid-configuration`, `jwksClient({ jwksUri:`, `jwks_uri`, `get_signing_key`, `PyJWKClient(`, `WellKnownOpenidConfiguration`, `MetadataAddress =` (.NET OIDC), `python3-saml`/`OneLogin` metadata-by-URL, `samlMetadataUrl`.
+- The URL/issuer traces from tenant/admin config, a `test`/`discover`/`verify` endpoint, or an unverified token claim (`iss`, `request_uri`).
+- Token attached **globally** by the HTTP transport (so it leaks on cross-host redirect / to the `jwks_uri` host) — see CVE-2025-27152 credential-leak pattern.
+
+**VULN**:
+```javascript
+// issuer comes from tenant config / "run discovery" / token iss — fully attacker-influenceable
+const issuer = await Issuer.discover(tenant.issuerUrl);            // fetches /.well-known/openid-configuration
+const jwks   = jwksClient({ jwksUri: issuer.metadata.jwks_uri });  // jwks_uri read from a malicious discovery doc
+// redirects followed by default + Authorization attached globally => blind SSRF + credential/IMDS leak
+```
+
+**SAFE**: allowlist issuer hosts (exact host match, not `startsWith`/suffix); require `https`; resolve-then-validate IP and **pin the connection** to the validated IP (kills the validate-then-fetch DNS-rebinding/TOCTOU window — see *DNS Rebinding* patterns above); **disable redirects** on discovery/JWKS clients or re-validate every hop against the same host; cap response size/time; attach the IdP token/credential **only** when the outgoing host exactly matches the configured issuer host (never globally). Cross-ref `authentication_authorization.md` and `ssrf.md` IP-pinning patterns.
+
+## Database-Layer SSRF (federated / remote-fetch functions & engines)
+
+The outbound request is made by **the database**, not the app's HTTP client — so the sink is a SQL string, not `requests.get(`. Reached either directly (an exposed query interface / admin console) or, more commonly, **as a second-stage payload of SQL injection** (see `secure_sql.md`). Flag user-controlled host/URL reaching any of these remote-fetch primitives; severity is high because the DB host often sits deep in the network with IMDS/admin reachability.
+
+| Engine | Remote-fetch primitive (SSRF/XSPA sink) |
+|--------|------------------------------------------|
+| PostgreSQL | `dblink('host=… port=…', …)` / `dblink_connect`, `postgres_fdw` server `host`/`port`, `COPY … FROM PROGRAM 'curl …'`, extensions `http`/`pgsql-http` (`http_get(url)`) |
+| MySQL/MariaDB | `FEDERATED` engine `CONNECTION='mysql://user@host:port/…'`, `LOAD DATA [LOCAL] INFILE`/`LOAD_FILE` to UNC, HTTP UDFs |
+| MSSQL | `OPENROWSET`/`OPENDATASOURCE` (provider connection string), linked servers (`sp_addlinkedserver`), `xp_dirtree`/`xp_fileexist` to UNC (NTLM-relay/port-probe), `SQLHttp` CLR |
+| Oracle | `UTL_HTTP.request`, `UTL_TCP`, `HTTPURITYPE(url).getclob()`, `DBMS_LDAP.init`, `UTL_SMTP`, `DBMS_SCHEDULER` external jobs |
+| ClickHouse | `url('http://…', format)` table function, `postgresql(host:port,…)`/`mysql(…)`/`mongodb(…)` table functions, `URL`/`PostgreSQL` table engines, `url_base` relative-resolve |
+| DuckDB / analytics | `httpfs` `read_csv('http://…')`/`read_parquet('s3://…')`, `INSTALL`/`LOAD` from URL; Spark/Presto/Trino external tables & connector URLs |
+| MongoDB | `$out`/`$merge` to a connection string, `$lookup` against a configured remote |
+
+**SAST signals**: any of the above primitives whose host/URL/connection-string argument is **non-literal** (built from a parameter, request field, or concatenated SQL); `FROM PROGRAM`, `OPENROWSET(`, `UTL_HTTP`, `dblink(`, `CONNECTION='`, `http_get(`, `url(` in a query builder string; user input flowing into a connection DSN. Also treat as the impact-amplifier of any SQLi finding.
+
+**SAFE**: don't expose these primitives to app-tier roles (revoke `dblink`/`http`/`FEDERATED`/`UTL_HTTP` execute; least-privilege DB account — see `secure_sql.md`); never build connection strings/URLs from user input; if federation is required, pin remote hosts to a deploy-time allowlist and run the DB with egress firewalling so it cannot reach IMDS/localhost/RFC1918.
+
+## LLM / RAG Document Loaders & Agent "Fetch URL" Tools
+
+Modern AI features fetch URLs server-side: RAG **document loaders** ingest a user-supplied URL, web-crawler loaders **recursively follow links found in fetched pages** (so the taint source is *page content*, not just the initial arg), multimodal token-counting/vision paths fetch `image_url`, and **agent tools** ("browse", "fetch", "http_request") let the model hit arbitrary URLs from a prompt. All are SSRF sinks; several shipped real CVEs.
+
+**Affected/known patterns to flag**:
+- **LangChain** — `RecursiveUrlLoader` `preventOutside` used `startsWith` (subdomain/prefix bypass) + no private-IP block (CVE-2026-26019 / GHSA-gf3v-fwqg-4vh7); `WebBaseLoader`, `AsyncHtmlLoader`, `UnstructuredURLLoader`, `SeleniumURLLoader`; `image_url` token counting `_url_to_size()` → `httpx.get` with validate-then-fetch DNS-rebinding (GHSA-r7w7-9xr2-qq2r, GHSA-2g6r-c272-w58r); `RequestsGetTool`/`requests` toolkit.
+- **LlamaIndex** — `SimpleWebPageReader`, `BeautifulSoupWebReader`, `download_loader(...)`, `TrafilaturaWebReader`.
+- **Generic** — any agent/tool function (`fetch`, `browse`, `http_request`, `read_url`, `scrape`) whose URL arg is model/prompt-derived; multimodal `image_url`/`document_url` passed to a fetcher for size/preview.
+
+**SAST signals**: loader/tool constructors and methods above with a **non-literal URL** that traces from request body, prompt, tool-call arguments, or *crawled page content*; origin checks done with `startsWith`/suffix instead of `new URL(x).origin === base.origin`; `validate…then httpx.get/fetch` with a **separate** DNS resolution (TOCTOU); redirects left enabled; no private-IP/metadata block.
+
+**VULN**:
+```python
+# url (and every link discovered on the page) is fetched with no SSRF policy
+loader = RecursiveUrlLoader(url=user_url)        # follows page links → reaches 169.254.169.254 / RFC1918
+docs = loader.load()
+```
+
+**SAFE**: validate **every** outbound hop (initial URL *and* discovered links) with semantic origin comparison (`new URL(link).origin === new URL(base).origin`), not `startsWith`; block private/reserved/metadata ranges and non-`http(s)` schemes; resolve DNS once and **pin** the connection to the validated IP (no validate-then-fetch); disable redirects or re-validate each hop; expose an `allow_fetching_images=False`/allowlist switch for multimodal paths. LangChain ships `validate_safe_url` / `SSRFSafeSyncTransport` — prefer the library's SSRF-safe transport over a bare client.
 
 ## Blind SSRF — Internal Gadget / Impact Catalog
 

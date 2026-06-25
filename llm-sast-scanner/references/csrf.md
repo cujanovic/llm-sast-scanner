@@ -135,6 +135,7 @@ GraphQL on cookie sessions shares the same CSRF model as REST: ambient credentia
 - Apollo Server / Gateway with **`csrfPrevention: false`** (or equivalent CSRF middleware disabled) on a cookie-authenticated endpoint
 - CSRF token validated on **POST** only while **GET** (or form-encoded POST) still executes mutations
 - Batched JSON arrays where a mutation hides beside ostensibly read-only operations
+- **Broken GET-mutation guards**: operation type checked by string match (`query.trim().startsWith("mutation")`) — bypassed by a leading comment `#`, leading `%0a`/whitespace, case-jumbling (`mUtaTiOn`), or a doc holding both a query and a mutation; or the op-type gate keys on `request.method === 'GET'` while a URL `?query=` param (which takes precedence over the POST body) lets a **POST** `…/graphql?query=mutation{...}` run the mutation. See `graphql_injection.md` (GET-mutation restriction bypasses).
 
 **Grep seeds**:
 ```bash

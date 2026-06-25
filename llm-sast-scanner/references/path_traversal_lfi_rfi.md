@@ -20,7 +20,7 @@ The core pattern: *unvalidated user input reaches a filesystem operation and the
 - Paths derived from DB values originally stored from user input (second-order)
 
 **Path traversal is NOT**
-- **SSRF**: fetching a remote URL from user input — separate class
+- **SSRF**: fetching a remote URL from user input — separate class. **Caveat:** if a user-controlled path is resolved against a *base URL* and then fetched, the *same sink* is both path traversal and SSRF — re-judge it for CWE-918 (see "Path-traversal sink that is ALSO SSRF" below); do not dismiss SSRF just because "only a path" is user-controlled.
 - **RCE via arbitrary file write** or **unrestricted file upload**: related impact classes; tag separately
 - **Static file serving**: fully hardcoded paths with no user influence
 - **LFI/RFI alone**: when the sink is `include`/`require` executing code, prefer LFI/RFI tags (see below); path traversal applies when the primitive is read/write/serve without execution
@@ -328,6 +328,9 @@ The vulnerability is in **including/executing a local file** through an interpre
 Some vulnerabilities involve both path traversal AND local file inclusion:
 - `include('pages/' . $_GET['page'] . '.php')` with `../` bypass → both path traversal (the `../` escape) and LFI (the `include` execution)
 - In this case, tag **both** `path_traversal` and `lfi`
+
+### Path-traversal sink that is ALSO SSRF — re-judge for CWE-918
+A user-controlled path resolved against a base URL (`new URL(path, baseURL)`, `urljoin(base, path)`, an Apollo `RESTDataSource.resolveURL`, or any HTTP-client `this.get(path)`/path-join) is commonly filed as **path traversal only** because "only a path is user-controlled, not a full URL." That is wrong when the resolved value is then **fetched by an outbound HTTP client**: an absolute (`https://evil.com`) or protocol-relative (`//evil.com`, or `///evil.com` after a single-slash strip) value rebases off the base origin → **SSRF (CWE-918)**. When the join target is a URL/HTTP client (not a filesystem path), **re-judge the same sink for SSRF and tag `ssrf` in addition to (or instead of) `path_traversal`** — do not write off SSRF just because the caller passes "a path." Full technique + safe patterns: `ssrf.md` → *Base-Relative URL Resolution Override* / *Framework HTTP-client `resolveURL`/path overrides*.
 
 ### When to Tag Only One
 - `file_get_contents($_GET['file'])` with `../` → **path traversal** only (reads file content, does not execute it)
