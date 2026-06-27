@@ -868,11 +868,11 @@ const jwks   = jwksClient({ jwksUri: issuer.metadata.jwks_uri });  // jwks_uri r
 // redirects followed by default + Authorization attached globally => blind SSRF + credential/IMDS leak
 ```
 
-**SAFE**: allowlist issuer hosts (exact host match, not `startsWith`/suffix); require `https`; resolve-then-validate IP and **pin the connection** to the validated IP (kills the validate-then-fetch DNS-rebinding/TOCTOU window — see *DNS Rebinding* patterns above); **disable redirects** on discovery/JWKS clients or re-validate every hop against the same host; cap response size/time; attach the IdP token/credential **only** when the outgoing host exactly matches the configured issuer host (never globally). Cross-ref `authentication_authorization.md` and `ssrf.md` IP-pinning patterns.
+**SAFE**: allowlist issuer hosts (exact host match, not `startsWith`/suffix); require `https`; resolve-then-validate IP and **pin the connection** to the validated IP (kills the validate-then-fetch DNS-rebinding/TOCTOU window — see *DNS Rebinding* patterns above); **disable redirects** on discovery/JWKS clients or re-validate every hop against the same host; cap response size/time; attach the IdP token/credential **only** when the outgoing host exactly matches the configured issuer host (never globally). Cross-ref `authentication_jwt.md` and `ssrf.md` IP-pinning patterns.
 
 ## Database-Layer SSRF (federated / remote-fetch functions & engines)
 
-The outbound request is made by **the database**, not the app's HTTP client — so the sink is a SQL string, not `requests.get(`. Reached either directly (an exposed query interface / admin console) or, more commonly, **as a second-stage payload of SQL injection** (see `secure_sql.md`). Flag user-controlled host/URL reaching any of these remote-fetch primitives; severity is high because the DB host often sits deep in the network with IMDS/admin reachability.
+The outbound request is made by **the database**, not the app's HTTP client — so the sink is a SQL string, not `requests.get(`. Reached either directly (an exposed query interface / admin console) or, more commonly, **as a second-stage payload of SQL injection** (see `sql_injection.md`). Flag user-controlled host/URL reaching any of these remote-fetch primitives; severity is high because the DB host often sits deep in the network with IMDS/admin reachability.
 
 | Engine | Remote-fetch primitive (SSRF/XSPA sink) |
 |--------|------------------------------------------|
@@ -886,7 +886,7 @@ The outbound request is made by **the database**, not the app's HTTP client — 
 
 **SAST signals**: any of the above primitives whose host/URL/connection-string argument is **non-literal** (built from a parameter, request field, or concatenated SQL); `FROM PROGRAM`, `OPENROWSET(`, `UTL_HTTP`, `dblink(`, `CONNECTION='`, `http_get(`, `url(` in a query builder string; user input flowing into a connection DSN. Also treat as the impact-amplifier of any SQLi finding.
 
-**SAFE**: don't expose these primitives to app-tier roles (revoke `dblink`/`http`/`FEDERATED`/`UTL_HTTP` execute; least-privilege DB account — see `secure_sql.md`); never build connection strings/URLs from user input; if federation is required, pin remote hosts to a deploy-time allowlist and run the DB with egress firewalling so it cannot reach IMDS/localhost/RFC1918.
+**SAFE**: don't expose these primitives to app-tier roles (revoke `dblink`/`http`/`FEDERATED`/`UTL_HTTP` execute; least-privilege DB account — see `sql_injection.md`); never build connection strings/URLs from user input; if federation is required, pin remote hosts to a deploy-time allowlist and run the DB with egress firewalling so it cannot reach IMDS/localhost/RFC1918.
 
 ## LLM / RAG Document Loaders & Agent "Fetch URL" Tools
 

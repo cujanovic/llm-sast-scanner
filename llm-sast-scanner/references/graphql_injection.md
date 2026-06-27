@@ -203,6 +203,8 @@ const IPAddress = new GraphQLScalarType({
 
 The **schema is the first input-validation boundary**: a strict type rejects malformed input before any resolver runs (syntactic validation, for free). Over-permissive typing defeats this and forces validation into resolvers, where it is frequently forgotten — so loosely typed args are a high-signal place to look for injection/IDOR/DoS.
 
+**Standalone Low (no sink required):** even when no injection/IDOR/DoS sink is reachable, a **semantically-constrained** argument (`email`, `zipCode`, `country`, `url`, `uuid`, `date`, enum-like `sort`/`status`/`type`) typed as free-form `String`/`JSON` with no validated scalar, `enum`, or resolver validation is a standalone **Low** defense-in-depth finding (CWE-20) — see `input_validation.md` for the cross-language class, the semantic-field dictionary, free-text exclusions, and de-confliction (`role`/`tenantId` self-write → `mass_assignment`/`privilege_escalation`). When a sink **is** reachable, report the higher class below instead.
+
 **Vulnerable conditions (weak typing / missing validation)**:
 - Arguments typed as `String`, `ID`, or catch-all `JSON`/`JSONObject`/`AWSJSON` where a **narrow type fits** — an `enum` for a fixed set (status, role, sort key), a validated custom scalar (`EmailAddress`, `URL`, `UUID`, `PositiveInt`), or a defined **input object type** for a mutation instead of many loose scalar args. Loose typing means the only validation is whatever the resolver remembers to do.
 - Numeric/string/list args with **no bounds**: `Int`/`Float` without min/max range, `String` without max length, list args without size cap (list size also crosses into DoS — see `graphql_dos.md`).

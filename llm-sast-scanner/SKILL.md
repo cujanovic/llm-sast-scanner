@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework.   Covers 94 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework.   Covers 95 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
   version: "1.39.0"
   domain: application-security
-  references: 94 vulnerability knowledge bases
+  references: 95 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 94 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 95 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -35,7 +35,7 @@ documenting the sources, sinks, and sanitizers/barriers used to detect and triag
 | **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Subdomain Takeover (dangling-DNS candidate flagging in IaC), Kubernetes / Cloud Orchestration, CI/CD & Container Security, nginx / Web-Server Configuration |
 | **API & AI/Agent Services** | API / REST / Web-Service Security, Webhook / Integration Security, MCP (Model Context Protocol) Security |
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
-| **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor |
+| **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor, Improper Input Validation (semantic-type mismatch / missing format validation, standalone Low) |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
 | **Language/Platform** | PHP Security, Mobile Security (Android/iOS), C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
 
@@ -220,6 +220,7 @@ references/prompt_injection.md           — LLM prompt injection (CWE-1427)
 references/file_permissions.md           — Incorrect permission assignment / world-writable files / weak DACLs (CWE-732)
 references/insecure_temp_file.md         — Insecure temporary file creation / predictable names / race window (CWE-377)
 references/format_string_injection.md    — Externally-controlled format strings in printf-style APIs (CWE-134)
+references/input_validation.md           — Improper input validation (CWE-20/1287): semantic-domain field (email/zip/phone/url/uuid/date/country/enum-like) typed free-form with no format/allowlist/scalar/schema validation; standalone Low even with no sink; excludes free-text & already-validated; supersedes to higher sink class when a sink is reachable (all languages + GraphQL)
 references/output_encoding.md            — Inappropriate encoding for output context, encoder/context mismatch (CWE-838)
 references/hardcoded_code_backdoor.md    — Embedded malicious code / supply-chain backdoor patterns (CWE-506)
 references/aspnet_security_misconfig.md  — ASP.NET misconfiguration: debug binary, disabled request validation (CWE-011/016)
@@ -575,7 +576,7 @@ On any mismatch: correct the citation if the real evidence is found, or **downgr
 | **Critical** | Direct RCE, authentication bypass, unauthenticated data exposure |
 | **High** | SQLi, SSRF, IDOR with sensitive data, stored XSS, privilege escalation |
 | **Medium** | Reflected XSS, CSRF, path traversal, insecure deserialization |
-| **Low** | Information disclosure, open redirect, weak crypto, insecure cookie |
+| **Low** | Information disclosure, open redirect, weak crypto, insecure cookie, improper input validation (semantic-type mismatch / missing format validation, CWE-20 — see `input_validation.md`) |
 | **Info** | Missing security headers, verbose errors, defense-in-depth gaps |
 
 **Severity Downgrade Rule:** When exploitation requires authentication, specific non-default configuration, chained prerequisites, or is only reachable through an internal/admin-only path, downgrade severity by one level from the class default; LIKELY-verdict findings whose exploitability is marked UNCERTAIN must be capped at one level below the class default regardless of vulnerability type.
@@ -654,6 +655,8 @@ Analyzer: llm-sast-scanner v1.38.0
 
 ## Hardening Notes (defense-in-depth — NOT findings)
 <missing-but-not-exploitable controls: a gap behind an already-effective layer is a hardening note, not a finding, and must not be assigned a severity; omit if none>
+<!-- EXCEPTION: improper input validation on a semantically-constrained field (CWE-20, semantic-type mismatch per input_validation.md) is a standalone Low finding, NOT a hardening note — report it under findings even when no sink is reachable. Free-text and already-validated fields remain non-findings. -->
+
 
 ## Positive Patterns (what the codebase does well)
 <concrete controls observed working: parameterized queries throughout, output auto-escaping, centralized authz, per-request client scoping, etc. — calibrates trust in the findings and helps the team prioritize; omit only if nothing notable>
