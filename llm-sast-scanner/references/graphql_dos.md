@@ -1,6 +1,6 @@
 ---
 name: graphql_dos
-description: Detect GraphQL denial-of-service — missing depth/complexity/cost limits, alias/batch/directive overloading, field duplication, circular fragments, unbounded pagination, missing execution timeouts, and resolver amplification on public GraphQL endpoints.
+description: Detect GraphQL denial-of-service — missing depth/complexity/cost limits, alias/batch/directive overloading, field duplication, circular fragments, unbounded pagination, unbounded list-typed input-argument cardinality (bulk-operation amplification), missing execution timeouts, and resolver amplification on public GraphQL endpoints.
 ---
 
 # GraphQL Denial of Service (CWE-770 / CWE-400 / CWE-834)
@@ -23,6 +23,7 @@ Cross-ref generic resource-exhaustion patterns in `denial_of_service.md` (ReDoS,
 | Many aliases / duplicate fields | No alias/field-count rule | Linear CPU/memory per alias |
 | Many directives on one field | No directive cap | Validation + execution overhead |
 | JSON array body `[{query},…]` | No `maxBatchSize` | N × single-request cost |
+| Large list-typed input arg (`ids:[ID!]`, `input:[T!]`) | No `maxItems`/array-length cap; static per-field cost | N resolver/DB units from one shallow op |
 | Large `first`/`limit`/`pageSize`/`offset` args | Resolver `findAll()` / no server max | Memory + row fetch blow-up |
 | Negative `limit` / `first` (-1) | ORM treats negative as "no limit" | Full-table fetch in one operation |
 | Relay `Connection` `first`/`last` uncapped | No cap on connection page size | Unbounded edge fetch + cursor work |
@@ -459,6 +460,35 @@ app.use(graphqlUploadExpress()); // no maxFiles / maxFileSize
 ```
 
 **SAFE**: set `maxFiles` and per-file `maxFileSize`; reject parts not referenced in `map`; treat each `Upload` variable as single-use; stream to bounded temp storage with cleanup. Cross-ref `graphql_injection.md` (Multipart `Upload` scalar abuse) and `arbitrary_file_upload.md`.
+
+### 16. Unbounded list/array INPUT argument (bulk-operation amplification)
+
+A **list-typed input argument** (`ids: [ID!]!`, `input: [CreateOrderInput!]!`) — or a **list field inside an input object** — whose element count is unbounded, where the resolver performs **per-element work** (DB write/read, HTTP call, crypto, file op). A single shallow operation (depth 1–2, one alias, one HTTP request) carrying a 50k-element array in `variables` forces 50k units of work. This **bypasses** depth limits, alias/field caps, HTTP-batch disabling, and any complexity/cost rule that scores **statically per selection/field** without multiplying by `variables[arg].length`.
+
+**Distinct from**: HTTP array batching (#8 — array of *operations*, not an argument), alias overloading (#4), large *string* args (#12 — scalar character length, not element count), and pagination (#9 — output page size, not input cardinality). The amplifier here is the **cardinality of one list-typed input value**.
+
+**Vulnerable when**: a resolver iterates a client-supplied list argument (`Promise.all(input.map(…))`, `for (const x of args.ids)`, `ids.map(id => db…)`, bulk `insertMany`/`deleteMany(args.ids)`, `WHERE id IN (:ids)`) with no element-count check; **and** no `maxItems` / array-length validation rule is installed; **and** complexity/cost is static-per-field (never reads the variable array length) or absent.
+
+**Grep**:
+```bash
+rg -n "Promise\.all\(\s*\w+\.map|\.map\(\s*\w*\s*=>.*(db|repo|fetch|axios|prisma|knex|query|insert|delete|update)|insertMany|deleteMany|bulkCreate|createMany|updateMany|findByIds|IN\s*\(" --glob '*.{js,ts,py,go,java,rb}' -C2
+# list-typed input args / input-object list fields in SDL (then check for a length cap)
+rg -n "\w+\s*:\s*\[\w+!?\]!?" --glob '*.{graphql,graphqls}'
+rg -n "maxItems|array.*length.*limit|input.*length|len\(.*\)\s*>|\.length\s*>" --glob '*.{js,ts,py,go,java,rb}' -i
+```
+
+**VULN**:
+```graphql
+type Mutation { createOrders(input: [CreateOrderInput!]!): [Order!]! }   # no max list length
+type Query    { productsByIds(ids: [ID!]!): [Product!]! }
+```
+```js
+// one DB unit per element — depth/alias/complexity-per-field/batch-disable do not bound it
+createOrders: (_, { input }) => Promise.all(input.map(o => db.orders.insert(o))),
+productsByIds: (_, { ids }) => Promise.all(ids.map(id => db.products.findById(id))),
+```
+
+**SAFE**: validate input-list length before execution (reject `input.length > N`); a validation rule that caps total list-input elements per document; charge complexity **proportional to** array length (`cost = perItem × variables[arg].length`); or route bulk operations through a paginated/queued batch API with a hard ceiling.
 
 ## Vulnerable vs Safe Examples
 
