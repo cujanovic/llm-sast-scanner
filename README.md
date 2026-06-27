@@ -69,7 +69,7 @@ Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated
 
 ## Vulnerability coverage
 
-94 reference knowledge bases, organized into categories:
+95 reference knowledge bases, organized into categories:
 
 | Category | Focus |
 |----------|-------|
