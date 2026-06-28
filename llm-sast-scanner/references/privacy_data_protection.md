@@ -40,9 +40,19 @@ Privacy flaws arise when personal data is collected, stored, transmitted, or sha
 | Financial | `iban`, `account_number`, `routing`, `credit_card`, `card_number`, `cvv`, `salary`, `income` |
 | Location / device | `latitude`, `longitude`, `geo`, `gps`, `ip_address`, `device_id`, `advertising_id`, `idfa`, `gaid` |
 | Sensitive attributes | `gender`, `ethnicity`, `religion`, `sexual_orientation`, `political`, `union`, `genetic` |
+| Audit / actor identity | `created_by`, `createdBy`, `updated_by`, `updatedBy`, `last_updated_by`, `approver`, `assigned_to`, `assignedTo`, `owner`, `reviewer` (reveal *which person* acted on a record — relationship/identity metadata, often over-exposed on shared objects) |
+| Ownership / financial stake | `ownership_percentage`, `ownershipPercentage`, `ownership_status`, `ownershipStatus`, `stake`, `beneficial_owner`, `shareholding` |
 | Child data | `child`, `minor`, `parent_consent`, `coppa`, `under_13`, `age_gate` |
 
 Also scan: OpenAPI/GraphQL/Proto field names, ORM models, DB migrations, form `name=` attributes, mobile `UserDefaults`/SharedPreferences keys, analytics event property maps.
+
+**Confidence tiering (strong vs. weak) to control false positives.** When deciding whether a struct/DTO/endpoint *handles PII* (so the sink rules below apply), tier the field names — a single common field is benign on its own; one unambiguous field is enough:
+
+- **Strong (1 hit flags it)** — names that rarely appear outside a PII/financial context: `ssn`, `social_security`, `cvv`, `cvc`, `cvv2`, `iban`, `passport`, `national_id`, `aadhaar`/`aadhar`, `tax_id`, `drivers_license`/`license_number`, `routing_number`, `sort_code`, `credit_card`/`card_number`, `dob`/`date_of_birth`, plus any Health/biometric or Sensitive-attribute row above. Also match these as a **token inside a compound** name so `userSsn`, `customer_cvv`, `applicantPassport` are caught.
+- **Weak (require ≥2 distinct)** — common individually but PII in aggregate: `email`, `phone`/`mobile`, `first_name`/`last_name`/`full_name`, `address`/`street_address`/`postal_code`/`zip`, `gender`, `nationality`, `birthday`. Two or more distinct weak fields on the same object ⇒ treat as PII handling.
+- **Normalize before matching:** fold camelCase→snake (`firstName`→`first_name`), unify `-`/`_`/`.` separators, lowercase, but keep digit runs (`cvv2` must survive). This makes `First-Name`, `firstName`, and `first_name` all match one list.
+
+This tiering decides *PII presence*; severity still comes from the **sink** (logging, third-party/LLM egress, cross-tenant exposure) per the rules below — a single highly-sensitive strong field (SSN/card/health) reaching a logging or off-tenant sink is high severity regardless of the count.
 
 ### Logging / analytics / telemetry sinks
 

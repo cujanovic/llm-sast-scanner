@@ -1,6 +1,6 @@
 ---
 name: graphql_dos
-description: Detect GraphQL denial-of-service — missing depth/complexity/cost limits, alias/batch/directive overloading, field duplication, circular fragments, unbounded pagination, unbounded list-typed input-argument cardinality (bulk-operation amplification), missing execution timeouts, and resolver amplification on public GraphQL endpoints.
+description: Detect GraphQL denial-of-service — missing depth/complexity/cost limits, alias/batch/directive overloading, field duplication, circular fragments, unbounded pagination, unbounded list-typed input-argument cardinality (bulk-operation amplification), federation `_entities` entity-resolution amplification, missing execution timeouts, and resolver amplification on public GraphQL endpoints.
 ---
 
 # GraphQL Denial of Service (CWE-770 / CWE-400 / CWE-834)
@@ -489,6 +489,21 @@ productsByIds: (_, { ids }) => Promise.all(ids.map(id => db.products.findById(id
 ```
 
 **SAFE**: validate input-list length before execution (reject `input.length > N`); a validation rule that caps total list-input elements per document; charge complexity **proportional to** array length (`cost = perItem × variables[arg].length`); or route bulk operations through a paginated/queued batch API with a hard ceiling.
+
+### 17. Federation `_entities` representation-storm amplification
+
+Apollo Federation's auto-generated `Query._entities(representations: [_Any!]!): [_Entity]!` (added by `buildSubgraphSchema` / `buildFederatedSchema` for every `@key` type) is a **list-typed input argument** (special case of #16) whose per-element work is a `__resolveReference` call — typically a DB/HTTP lookup per representation. A single shallow operation carrying tens of thousands of representations forces one resolver round-trip each, **bypassing** depth/alias/field caps and HTTP-batch limits, and is usually invisible to complexity rules that score the public SDL (the `_entities` field is not in it). Aliasing `_entities` (`a:_entities(...) b:_entities(...)`) multiplies further.
+
+**Vulnerable when**: a directly reachable subgraph (`buildSubgraphSchema`) has no `representations` length cap and no complexity rule that multiplies by `variables.representations.length`; `__resolveReference` does per-id DB/HTTP work (often without DataLoader → also #14).
+
+**Grep**:
+```bash
+rg -n "buildSubgraphSchema|buildFederatedSchema|_entities|representations|__resolveReference" --glob '*.{js,ts,go,py,java,rb}'
+```
+
+**VULN**: `_entities(representations:[{__typename:"User",id:"1"}, … × 50000])` → 50k `User.__resolveReference` DB reads in one request.
+
+**SAFE**: cap `representations` length in a validation rule; batch `__resolveReference` via DataLoader; restrict subgraph network reachability to the gateway. Cross-ref the access/disclosure side of `_entities` in `graphql_injection.md` (federation entity-resolution access).
 
 ## Vulnerable vs Safe Examples
 

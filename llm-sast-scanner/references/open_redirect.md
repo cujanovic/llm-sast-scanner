@@ -143,7 +143,10 @@ match\s*\(\s*["']\^/
 - Sink argument is `request.getParameter`, `req.query`, `req.body`, `request.GET`, `$_GET`, `params[`, `QueryString[`, `c.Query(`, `Referer` header — no parse/allowlist between source and sink
 - `redirect:` / `Location` value built via string concat (`+`, `fmt.Sprintf`, template literal) with user-controlled fragment
 
-## Java / Spring Detection Rules
+### Chain pivots (an open redirect is rarely the terminal impact)
+- **Open redirect → OAuth token theft**: a redirect endpoint reachable as — or chained into — an OAuth/OIDC `redirect_uri` (or via a loose `redirect_uri` allowlist that permits this host/path) leaks the authorization `code`/token to the attacker → account takeover (see `oauth_oidc_misconfiguration.md`).
+- **Open redirect → SSRF allowlist bypass**: an allowlisted host that 30x-redirects to an internal target defeats SSRF validation that only checks the *first* URL — the redirect endpoint becomes an SSRF filter-bypass primitive (see `ssrf.md`, "SSRF via Redirect Chain (30x Bypass)").
+- **Open redirect → XSS**: a `javascript:`/`data:` destination executed on navigation is XSS, not just redirection — flag these scheme values as XSS sinks too (see `xss.md`).
 
 - `return "redirect:" + target`, `new ModelAndView("redirect:" + target)`, `response.sendRedirect(target)`, `headers.setLocation(URI.create(target))`, and `response.setHeader("Location", target)` are all open-redirect sinks when `target` is user-controlled.
 - Do not relabel a plain attacker-chosen redirect destination as `http_response_splitting` unless the evidence shows CR/LF injection into the header value; without header-breaking characters it remains `open_redirect`.

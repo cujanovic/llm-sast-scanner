@@ -64,6 +64,7 @@ IDOR occurs when an authenticated user changes a user-supplied identifier (path 
 ### Parameter Analysis
 - Pagination/cursors: `page[offset]`, `page[limit]`, `cursor`, `nextPageToken` — these often reveal or accept cross-tenant or cross-state identifiers
 - Directory/list endpoints as seeders: search/list/suggest/export surfaces frequently leak object IDs that feed secondary exploitation
+- **Object-reference param-name hints (prioritization only — never a standalone finding).** A param that *names* an object reference is high-priority to check for a missing ownership/tenant scope on the lookup it feeds — it is not itself the finding (the missing authz check is). Highest signal on **path and query** params (these address an object directly); a bare `id`/`key` in a JSON **body** is lower-signal. Identifier-suffix heuristic (case-insensitive): bare `id`, or names matching `[_-]id$` / `[a-z0-9]Id$` / `[a-z0-9]ID$` (`userId`, `account_id`, `orderId`, `docID`). Object-name tokens: `user`, `account`, `order`, `doc`, `document`, `group`, `profile`, `report`, `invoice`, `file`, `owner`, `tenant`, `org`, `customer`, `member`, `key`. A match means *verify the ownership check on that lookup*, nothing more.
 
 ### Enumeration Techniques
 - Alternate types: `{"id":123}` vs `{"id":"123"}`, arrays vs scalars, objects vs scalars
@@ -553,6 +554,7 @@ INSERT INTO users (id, role) VALUES ('00000000-0000-0000-0000-000000000000', 'ad
 - IDOR + Stored XSS: pivot into other sessions through data access obtained via IDOR
 - IDOR + SSRF: exfiltrate internal IDs, then access the resources those IDs map to
 - IDOR + Race: defeat spot checks by firing simultaneous requests
+- IDOR ↔ JWT: a tamperable or over-trusted `sub`/`user_id`/`role` claim turns horizontal IDOR into full account takeover; conversely an IDOR that returns another principal's token/secret enables JWT replay or impersonation (see `authentication_jwt.md`)
 
 ## Analysis Workflow
 

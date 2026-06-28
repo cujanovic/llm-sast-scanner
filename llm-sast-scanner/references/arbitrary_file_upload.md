@@ -58,10 +58,11 @@ Grep for receive-and-store chains; trace whether validation exists and where the
 | Stack | Grep targets |
 |-------|-------------|
 | Python/Flask | `request\.files`, `file\.save\(`, `FileStorage` |
-| Python/Django | `request\.FILES`, `InMemoryUploadedFile`, `default_storage\.save`, `FileField`, `ImageField` |
+| Python/Django | `request\.FILES`, `InMemoryUploadedFile`, `TemporaryUploadedFile`, `default_storage\.save`, `FileField`, `ImageField` |
 | Node.js | `multer\(`, `upload\.(single\|array\|fields)`, `formidable`, `busboy`, `multiparty`, `req\.files`, `express-fileupload` |
 | PHP | `\$_FILES`, `move_uploaded_file\(`, `copy\(\$_FILES` |
-| Java/Spring | `MultipartFile`, `file\.transferTo\(`, `Part\.write\(`, `Files\.write\(.*getBytes` |
+| Java/Spring | `MultipartFile`, `CommonsMultipartFile`, `StandardMultipartFile`, `file\.transferTo\(`, `Part\.write\(`, `Files\.write\(.*getBytes` (partial guard: `StringUtils.cleanPath(file.getOriginalFilename())` strips traversal but NOT a dangerous extension — still needs an allowlist) |
+| Ruby | `CarrierWave`, `mount_uploader`, `has_one_attached`, `Shrine` (`include Shrine::Attachment`), `params\[.*\]\[:file\]` |
 | Go | `FormFile\(`, `MultipartForm\.File`, `io\.Copy\(.*header\.Filename` |
 | Ruby/Rails | `params\[:file\]`, `has_one_attached`, `mount_uploader`, `CarrierWave` |
 | C#/ASP.NET | `IFormFile`, `CopyToAsync\(`, `HttpPostedFileBase`, `Request\.Files` |
@@ -204,7 +205,7 @@ end
 
 ### Dangerous extensions to flag
 
-**Server-side scripts**: `.php`, `.php3`, `.php4`, `.php5`, `.phtml`, `.phar`, `.py`, `.rb`, `.pl`, `.sh`, `.cgi`, `.asp`, `.aspx`, `.jsp`, `.jspx`, `.jspf`
+**Server-side scripts**: `.php`, `.php3`, `.php4`, `.php5`, `.php7`, `.pht`, `.phtml`, `.phar`, `.py`, `.rb`, `.pl`, `.sh`, `.cgi`, `.asp`, `.aspx`, `.asa`, `.cer`, `.jsp`, `.jspx`, `.jspf`, `.jsw`, `.jsv`
 
 **Apache config override**: `.htaccess` (AddHandler/AddType), `.user.ini` (`auto_prepend_file` / `auto_append_file` on PHP-FPM/CGI)
 

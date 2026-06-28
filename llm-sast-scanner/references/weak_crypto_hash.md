@@ -410,13 +410,14 @@ SecretKeySpec\s*\([^)]*\.getBytes\(\)
 
 ## Key Management (CWE-321 / CWE-326)
 
-**VULN** (any match):
+**VULN** (any match) — these are the *crypto-management* defects this class owns:
 
-- Hardcoded key material: `byte[] key = {0x…}`, `SECRET_KEY = "…"`, Base64 key literals in source or committed config
 - Same key object used for encryption and signing/MAC
 - DEK stored with ciphertext without KEK wrap (JSON `{key, data}`, key file beside `.enc`)
-- Password/phrase as raw symmetric key
-- Long-lived key with no version/alias/rotation metadata when KMS is absent
+- Password/phrase as raw symmetric key (no KDF), or key shorter than the minimum size below
+- Static/reused IV/nonce; long-lived key with no version/alias/rotation metadata when KMS is absent
+
+> **De-confliction (avoid double-reporting):** a key that is merely *hardcoded and extractable* — `SECRET_KEY = "…"`, `byte[] key = {0x…}`, Base64 key literal in source/committed config — whose size and algorithm are otherwise adequate is **`hardcoded_secrets`** (CWE-798, see `hardcoded_secrets.md`), **not** this class. Report `weak_crypto_hash` only when the *cryptographic* property is wrong (too short, reused for encrypt+sign, DEK-with-ciphertext, password-as-key, static IV). When both are true (e.g. a hardcoded **and** undersized key), prefer `weak_crypto_hash` and note the exposure; do not emit both for the same literal.
 
 **SAFE** (any match):
 
@@ -449,7 +450,7 @@ KMS|KeyVault|CloudKMS|generateDataKey|Envelope|wrapKey|vault\.read
 process\.env\.(SECRET|KEY).*createCipher
 ```
 
-Cross-ref: hardcoded key literals also match hardcoded-credential/backdoor detection when that lens is in scope.
+Cross-ref: a plain hardcoded/extractable key literal (adequate size & algorithm) is `hardcoded_secrets` (CWE-798); reserve this class for the crypto-management defects above. See `hardcoded_secrets.md`.
 
 ---
 

@@ -186,7 +186,7 @@ When the PHP `expect` wrapper is loaded and external entities are enabled, `SYST
 <r>&xxe;</r>
 ```
 
-**Grep seeds**: `expect://`, `LIBXML_NOENT`, `libxml_disable_entity_loader\(false\)`, `simplexml_load_string` / `DOMDocument::loadXML` on user XML without entity loader disabled (PHP < 8.0).
+**Grep seeds**: `expect://`, `LIBXML_NOENT`, `LIBXML_DTDLOAD`, `libxml_disable_entity_loader\(false\)`, `simplexml_load_string` / `DOMDocument::loadXML` on user XML without entity loader disabled (PHP < 8.0).
 
 **SAFE**: PHP 8.0+ external entities off by default; never enable `LIBXML_NOENT` on untrusted input; `libxml_disable_entity_loader(true)` before parse (legacy); prefer rejecting DOCTYPE entirely.
 
@@ -201,8 +201,8 @@ When the PHP `expect` wrapper is loaded and external entities are enabled, `SYST
 - Internal vs external subsets, multi-DOCTYPE edge handling
 
 **Network Controls**
-- If network blocked but filesystem readable, pivot to local file disclosure
-- If files blocked but network open, pivot to SSRF/OAST
+- If network blocked but filesystem readable, pivot to local file disclosure (see `path_traversal_lfi_rfi.md`)
+- If files blocked but network open, pivot to SSRF/OAST (see `ssrf.md` — internal-service gadgets and scheme escalation)
 
 ### Local-DTD Repurposing (External DTD Blocked)
 
@@ -256,7 +256,7 @@ Payload shape varies by target DTD — goal is to redefine an existing parameter
 1. **Inventory consumers** - Endpoints, upload parsers, background jobs, CLI tools, converters, third-party SDKs
 2. **Capability probes** - Does parser accept DOCTYPE? Resolve external entities? Allow network access? Support XInclude/XSLT?
 3. **Establish oracle** - Error shape, length/ETag diffs, OAST callbacks
-4. **Escalate** - Targeted file/SSRF payloads
+4. **Escalate** - Targeted file (`path_traversal_lfi_rfi.md`) / SSRF (`ssrf.md`) payloads
 5. **Validate parity** - Same parser options must hold across REST, SOAP, SAML, file uploads, and background jobs
 
 ## Confirming a Finding
@@ -365,7 +365,7 @@ Flag any XML parse/transform call lacking adjacent hardening (DTD/external-entit
 | Language | Vulnerable sinks (flag unless hardened) |
 |----------|----------------------------------------|
 | **Python** | `ET.parse`, `ET.fromstring`, `ET.iterparse`, `minidom.parseString`, `xml.sax.parse`, `xmltodict.parse`; `etree.parse/fromstring/XML`, `objectify.parse` without `resolve_entities=False` |
-| **Java** | `DocumentBuilderFactory` → `parse`, `SAXParserFactory` → `parse`, `XMLInputFactory` → `createXMLStreamReader`, `TransformerFactory` → `newTransformer`, `SchemaFactory` → `newSchema`, JAXB `Unmarshaller` |
+| **Java** | `DocumentBuilderFactory` → `parse`, `SAXParserFactory` → `parse`, `XMLInputFactory` → `createXMLStreamReader`, `TransformerFactory` → `newTransformer`, `SchemaFactory` → `newSchema`, JAXB `Unmarshaller`; Spring OXM `Jaxb2Marshaller` / `MarshallingHttpMessageConverter` (SOAP/`@RequestBody` XML) when entity expansion is not disabled |
 | **PHP** | `simplexml_load_string/file`, `DOMDocument::loadXML/load`, `xml_parse`, `SimpleXMLElement` constructor |
 | **.NET** | `XmlDocument.Load/LoadXml`, `XmlTextReader`, `XDocument.Load`, `XmlReader.Create` without `DtdProcessing.Prohibit` |
 | **Node.js** | `libxmljs.parseXmlString/parseXml`, `node-expat`, `sax.parser` (check entity expansion) |
@@ -439,6 +439,7 @@ tree = etree.fromstring(request.body, parser)
 - **VULN**: `$doc = new DOMDocument(); $doc->loadXML($userXml)` — external entities enabled by default
 - **VULN**: `libxml_disable_entity_loader(false)` or absent call before SimpleXML/DOMDocument usage (PHP < 8.0)
 - **VULN**: `loadXML($xml, LIBXML_NOENT)` — NOENT **expands** entities; does not disable loading
+- **VULN**: `loadXML($xml, LIBXML_DTDLOAD)` — DTDLOAD **loads the external DTD** (enables DTD/parameter-entity processing → SSRF/file-read/DoS vectors) even without `LIBXML_NOENT`; any `LIBXML_DTDLOAD` on user XML is a flag
 - **SAFE**: `libxml_disable_entity_loader(true)` called before parsing (PHP < 8.0)
 - **SAFE**: PHP 8.0+ disables external entity loading by default; still prefer `LIBXML_NONET` for network blocking
 

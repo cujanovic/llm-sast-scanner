@@ -60,11 +60,20 @@ Grep for route/handler definitions, then verify each sensitive endpoint has **bo
 - Laravel: `Route::get|post|delete`
 - ASP.NET: `[HttpGet]`, `[HttpPost]`, `[HttpDelete]`
 
+**Non-REST entry points (often missed — inventory these too)**
+- **GraphQL**: every `Query`/`Mutation`/`Subscription` resolver is an endpoint — a mutation with no `@auth`/guard in the resolver/field is BFLA even if the HTTP route is protected. Grep resolver maps, `@Resolver`, `buildSchema`, SDL `type Mutation`.
+- **WebSocket**: message/event handlers (`socket.on(`, `@SubscribeMessage`, `@MessageMapping`, channel subscribe) — auth is frequently checked only on the HTTP upgrade, not per message/action.
+- **RPC / gRPC**: service methods (`rpc `/`@GrpcService`/`ServerServiceDefinition`), tRPC `procedure`/`mutation`, JSON-RPC method dispatch tables — each method is a function-level authz boundary.
+- **Background/queue/cron** handlers reachable from a user-triggered action.
+
 **Missing or inconsistent guards**
-- Handler under `/admin`, `/management`, `/internal`, `/api/admin`, `/system` with no auth decorator or middleware
+- Handler under `/admin`, `/superadmin`, `/management`, `/ops`, `/internal`, `/api/admin`, `/system` with no auth decorator or middleware
 - `authenticate_user!` / `@login_required` / `[Authorize]` without accompanying role check (`@admin_required`, `@PreAuthorize`, `requireRole`, `role:admin`)
+- **Wrong-role guard**: an admin action gated only by `@Secured("ROLE_USER")` / `[Authorize]` (any authenticated user) / `middleware('auth')` without a role — authenticated ≠ authorized.
 - Same resource: GET protected, POST/DELETE/PUT unguarded
 - Route registered **before** auth middleware in the stack, or mounted outside a protected route group
+- **Secondary unauthenticated path** to the same handler: an internal API alias, a `/v1` vs `/v2` duplicate, or a second mount point where only one copy carries the guard.
+- **Test/dev-mode auth skip**: middleware bypassed under an env/flag (`if (process.env.NODE_ENV !== 'production') return next()`, `if app.debug:`, `@Profile("!prod")` security config) that can ship or be toggled.
 - Client-side-only gating: UI hides admin nav but server handler has no role check
 
 **Role/permission system signals**

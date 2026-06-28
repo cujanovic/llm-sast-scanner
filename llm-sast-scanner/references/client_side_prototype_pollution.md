@@ -815,7 +815,7 @@ Re-test `constructor[prototype]` when `__proto__` is stripped; re-test `#__proto
 | Browser-API gadget (URL/href, Notification/title, Worker/name, Image/src, URLSearchParams/toString) reachable via any pollution source on the same origin | **High–Critical** |
 | Arbitrary script load gadget (`Akamai Boomerang.url`, `@analytics/google-tag-manager.customScriptSrc`, `Pendo.dataHost`, `Closure.CLOSURE_BASE_PATH`, `hCaptcha.assethost`) | **Critical** (full-origin compromise via attacker JS) |
 | Cookie-injection-only gadget (`Google Analytics.cookieName`) | **Medium** |
-| Open-redirect-only gadget (`URLSearchParams.toString` chained with `location.assign`) | **Medium** |
+| Open-redirect-only gadget (`URLSearchParams.toString` chained with `location.assign`) — see `open_redirect.md` | **Medium** |
 | Pollution source confirmed but no gadget reachable on the page | **Low / Informational** (defense-in-depth) |
 
 **Downgrade** by one level when: the page runs `Object.freeze(Object.prototype)` early, or the only reachable gadget is in dead code, or exploitation requires the victim to perform a chained action (open URL + click + submit) that materially raises attacker effort.

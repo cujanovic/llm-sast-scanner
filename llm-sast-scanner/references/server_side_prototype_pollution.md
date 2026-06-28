@@ -9,6 +9,8 @@ description: Server-Side Prototype Pollution (SSPP) — pollution sinks (merge /
 
 Server-Side Prototype Pollution lets an attacker write to `Object.prototype` (or another shared prototype) on the server. Because every plain JavaScript object inherits from `Object.prototype`, a single polluted key changes the *default* value seen by every undefined-property read in the entire process. SSPP itself is rarely the impact — it is an **amplifier**: pollution becomes RCE, SSRF, command injection, path traversal, privilege escalation, or DoS only when combined with a downstream **gadget**, i.e. existing code that reads an undefined property and uses it as a security-sensitive parameter (`shell`, `env.NODE_OPTIONS`, `hostname`, `socketPath`, `cwd`, `mode`, `escapeFunction`, `sourceURL`, etc.).
 
+**Impact-class pivots** (report severity and triage the gadget under the class it actually lands): code/command execution → `rce.md`; outbound-request gadgets (`socketPath`, `fetch` options) → `ssrf.md`; file-path gadgets (`cwd`, archive `uid/gid`, LFI chains) → `path_traversal_lfi_rfi.md`; ACL/flag gadgets (`if (user.<flag>)`, `isAdmin`) → `privilege_escalation.md` / `mass_assignment.md`; template-compile gadgets (`outputFunctionName`, `sourceURL`) → `ssti.md`.
+
 A vulnerable application therefore needs two things to be exploitable:
 
 1. **A pollution sink** — a place where attacker-controlled keys flow into a write of the form `target[__proto__][key] = value`, `target.constructor.prototype[key] = value`, or `target.prototype[key] = value`. This is most commonly a recursive merge / deep-clone / `_.set` / nested-query-string parser / JSON deserializer.

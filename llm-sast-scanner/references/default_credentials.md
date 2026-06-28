@@ -1,23 +1,28 @@
 ---
 name: default_credentials
-description: Detect hardcoded or default credentials used for authentication, database connections, or secret keys in source code and configuration files.
+description: Detect reachable hardcoded or default login credential PAIRS (admin/admin, root/root, seeded admin accounts, env-var||fallback login defaults) that gate an authentication path. Standalone secret literals (API keys, tokens, signing/JWT secrets, private keys, connection strings) belong to hardcoded_secrets (CWE-798); runtime credential leakage belongs to information_disclosure.
 ---
 
 # Default / Hardcoded Credentials
 
-Hardcoded credentials are secrets — passwords, API keys, signing keys — embedded directly in source code, configuration files, or connection strings. They represent a critical risk: they are committed to version control, visible to every person with repository access, and cannot be rotated without a code change and a new deployment.
+This class covers **reachable login credential pairs** — a hardcoded or default *username/password pair* (`admin`/`admin`, `root`/`root`, a seeded admin account, an `env-var || 'fallback'` login default) that gates a reachable authentication path. The defect is an attacker logging in with credentials baked into the application.
 
-Secrets leaked at runtime via logs, error messages, HTTP responses, or debug endpoints belong to **information_disclosure** — see `information_disclosure.md`. This class covers credentials embedded in source, config, or build artifacts at rest.
+**Scope split — pick the narrowest class:**
+- **Secret literals at rest** (API keys, access/refresh tokens, signing/JWT secrets, private keys, OAuth client secrets, connection strings carrying an embedded password) → **`hardcoded_secrets.md`** (CWE-798). That class owns the provider-format catalog, entropy heuristics, and the client-vs-backend public-exposure model. Do **not** suppress those — route them there.
+- **Secrets leaked at runtime** via logs, error messages, HTTP responses, or debug endpoints → **`information_disclosure.md`**.
+- **Reachable hardcoded login PAIRS / default creds** → **this class.**
 
 ## What It Is and Is Not
 
 ### What it IS
 
-- Passwords, API keys, access tokens, private keys, JWT/signing secrets, or connection strings assigned as string literals
-- Default or factory credentials (`admin`/`password`, `root`/`root`) used on reachable auth or DB paths
-- Fallback literals when env vars are unset: `process.env.ADMIN_PASSWORD || 'default_password'`
-- Secrets in client-shipped code (frontend bundles, mobile binaries, `public/`/`static/` assets) — extractable without server access
-- High-entropy literals assigned to `*password*`, `*secret*`, `*token*`, `*api_key*`, `*private_key*` variables
+- Default or factory **login credential pairs** (`admin`/`password`, `root`/`root`) used on reachable auth paths
+- A hardcoded `username` + `password` compared/checked at a reachable login endpoint
+- Seed/init scripts creating an admin user with a trivially-guessable hardcoded password reachable via login
+- Fallback **login** literals when env vars are unset: `process.env.ADMIN_PASSWORD || 'default_password'`
+- A hardcoded DB/service password used as the *login* on a reachable path (the connection *string* as an extractable secret → `hardcoded_secrets.md`)
+
+> Standalone secret literals (API keys, tokens, signing/JWT secrets, private keys, connection strings) are **`hardcoded_secrets.md`**, not this class.
 
 ### What it is NOT
 
@@ -51,52 +56,28 @@ A true positive requires **both** of the following:
 
 ## Where to Look
 
-- Application source: config modules, init/seed scripts, shared `utils/`/`lib/` imported by client entry points
-- Config files: `.env`, `config.ini`, `application.yml`, `appsettings.json`, `wp-config.php`
-- Infrastructure: `docker-compose.yml`, Kubernetes manifests, Dockerfiles, Makefiles
-- CI/CD: `.github/workflows/`, `.gitlab-ci.yml`, `Jenkinsfile`
-- Client-shipped paths: `public/`, `static/`, `assets/`, frontend bundles, mobile app source (APK/IPA decompilation)
-- Version history: `git log -p`, deleted commits — secrets persist after removal
+- Login/auth handlers and middleware: hardcoded `user==... && pass==...` comparisons, admin-login routes
+- Application source: config modules, init/seed scripts creating admin accounts, shared `utils/`/`lib/` auth helpers
+- Config files used by the login/DB-connect path: `.env`, `config.ini`, `application.yml`, `appsettings.json`, `wp-config.php`
+- Infrastructure that seeds login creds: `docker-compose.yml` `environment:`, Kubernetes manifests, Makefile setup targets
+
+> Client-shipped artifacts (`public/`/`static/`, frontend bundles, mobile APK/IPA) and git history as *secret-extraction* surfaces are covered by `hardcoded_secrets.md`.
 
 ## Recon Indicators
 
-Grep for distinctive formats and secret-named assignments; trace whether the file reaches a client bundle or auth path.
+This class targets **login pairs / default creds**. Grep for hardcoded password literals that gate an auth path, then confirm a reachable login endpoint accepts them.
 
-**High-confidence regex patterns**
+> Provider secret-format regexes (AWS/Stripe/GitHub/etc.), entropy heuristics, and the client-vs-backend public-exposure model now live in the canonical **`hardcoded_secrets.md`** catalog. For a bare API key / token / signing secret / private key / connection string, report there.
 
-| Secret Type | Pattern |
-|---|---|
-| AWS Access Key ID | `AKIA[0-9A-Z]{16}` (40-char base64 secret nearby) |
-| Google API Key | `AIza[0-9A-Za-z\-_]{35}` |
-| Google OAuth Client Secret | `GOCSPX-[0-9A-Za-z\-_]{28}` |
-| GitHub PAT | `ghp_[0-9A-Za-z]{36}`, `github_pat_[0-9A-Za-z_]{82}` |
-| GitHub OAuth/app/server token | `gho_`, `ghs_`, `ghr_` + `[0-9A-Za-z]{36}` |
-| GitLab PAT | `glpat-[0-9A-Za-z\-_]{20}` |
-| Slack Token | `xoxb-`, `xoxp-`, `xoxa-`, `xoxr-` |
-| Slack Webhook URL | `hooks.slack.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+` |
-| Stripe Secret Key | `sk_live_`, `sk_test_`, `rk_live_` (restricted) (note: `pk_*` are publishable, not secret) |
-| Twilio Account SID / API Key | `AC[0-9a-f]{32}` (SID, 32-hex auth token nearby), `SK[0-9a-fA-F]{32}` (API key) |
-| SendGrid API Key | `SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}` |
-| Mailgun API Key | `key-[0-9a-zA-Z]{32}` |
-| OpenAI API Key | `sk-[A-Za-z0-9]{48}`, `sk-proj-[A-Za-z0-9\-_]{100,}` |
-| Anthropic API Key | `sk-ant-[A-Za-z0-9\-_]{90,}` |
-| xAI (Grok) API Key | `xai-[A-Za-z0-9]{80,}` |
-| Azure Storage Key | `AccountKey=` + ~88-char base64; `DefaultEndpointsProtocol=https?;AccountName=...;AccountKey=` |
-| GCP Service Account JSON | `"type"\s*:\s*"service_account"` with `"private_key"`/`"private_key_id"` fields |
-| HashiCorp Vault Token | `hvs\.`, `hvb\.`, `hvr\.` + `[A-Za-z0-9_\-]{24,}` |
-| DigitalOcean Token | `dop_v1_`, `doo_v1_`, `dor_v1_` + `[a-f0-9]{64}` |
-| Shopify Token | `shpat_`, `shpss_`, `shppa_`, `shpca_` + `[a-fA-F0-9]{32}` |
-| npm Access Token | `npm_[A-Za-z0-9]{36}` |
-| Telegram Bot Token | `[0-9]{8,10}:AA[A-Za-z0-9_\-]{33}` |
-| Discord Webhook URL | `discord(?:app)?\.com/api/webhooks/[0-9]{17,19}/[A-Za-z0-9_\-]{60,68}` |
-| Private Key | `-----BEGIN (RSA \|EC \|OPENSSH \|DSA \|PGP )?PRIVATE KEY-----` |
-| DB Connection String | `postgresql://[^:]+:[^@]+@`, `mysql://[^:]+:[^@]+@`, `mongodb(?:\+srv)?://[^:]+:[^@]+@`, `redis://:[^@]+@` |
+**Login-pair / default-cred patterns**
 
-**Variable assignment patterns**
+- Hardcoded comparison: `if (user == "admin" && pass == "admin")`, `password.equals("admin123")`, `strcmp(input, "secret123")` on a reachable input path
+- Constant credential: `define('DB_PASSWORD', 'root')`, `$password = "admin123"`, `ADMIN_PASSWORD = "admin123"` used by a login/connect path
+- Inline-credential connect that doubles as the login: `mysqli_connect('localhost','root','password','db')`, `mongoose.connect('mongodb://admin:password@host/db')`
+- Fallback login default: `process.env.ADMIN_PASSWORD || 'default_password'`
+- Seed/init: `INSERT INTO users (...) VALUES ('admin', '<plaintext-or-trivial-hash>')`; `CommandLineRunner`/`@PostConstruct`/`before_first_request` creating an admin with a hardcoded password
 
-- `api_key = "..."`, `apiKey: "..."`, `SECRET_KEY = '...'`, `password = "..."`, `client_secret = "..."`
-- Long alphanumeric strings (32+ chars) or base64 blobs assigned to auth-related variable names
-- `*api_key*`, `*secret*`, `*token*`, `*password*`, `*private_key*`, `*connection_string*`, `DATABASE_URL`
+(Common weak login values are listed under *Common Vulnerable Values* above.)
 
 **Skip during recon**
 
@@ -107,7 +88,7 @@ Grep for distinctive formats and secret-named assignments; trace whether the fil
 
 ## Python Source Detection Rules
 
-These patterns detect hardcoded secrets generally, but the `default_credentials` tag is reserved for reachable username/password login pairs — hardcoded signing keys, API keys, and DB credentials should be tagged `weak_crypto` or `information_disclosure` per the FALSE POSITIVE rules below.
+The `default_credentials` tag is reserved for reachable username/password login pairs. The patterns below that assign bare secret literals (`SECRET_KEY`, `API_KEY`, signing keys, connection strings) are detected here for convenience but belong to **`hardcoded_secrets`** (`hardcoded_secrets.md`) — emit them there, not as `default_credentials`.
 
 ### Direct assignment
 - **VULN**: `password = "admin"` — literal credential assigned to password variable
@@ -202,10 +183,10 @@ These patterns detect hardcoded secrets generally, but the `default_credentials`
 - Credentials in `.env.example` only (template file, not `.env`) AND no corresponding `.env` file exists AND no fallback in code — **NOT a finding** if the app requires the operator to set real credentials
 - Credentials used only for local dev that are clearly not reachable (e.g., CI-only fixture with `if os.getenv('CI'):`) — lower confidence
 - Password hashing with bcrypt/argon2/scrypt of a seed password — the hash itself is not a default credential vulnerability UNLESS the seed password is trivially guessable (admin/admin, test/test)
-- Do NOT emit `default_credentials` for database connection credentials in application config files (application.yml, application.properties, docker-compose.yml) — these are infrastructure credentials, not application login defaults. Tag as `information_disclosure` or `weak_crypto` if appropriate.
+- Do NOT emit `default_credentials` for database connection credentials in application config files (application.yml, application.properties, docker-compose.yml) — these are not application login defaults. Tag the connection string as `hardcoded_secrets` (extractable secret at rest) per `hardcoded_secrets.md`.
 - Do NOT emit for test data, seed data, or demo account setup in database initialization scripts UNLESS those accounts are accessible through a reachable production login endpoint.
-- Do NOT emit for hardcoded secrets used in JWT signing, encryption keys, or API keys — these should be tagged as `weak_crypto` or `information_disclosure` instead.
-- Only emit when there is a REACHABLE authentication endpoint that accepts a hardcoded username/password pair defined in the application code.
+- Do NOT emit `default_credentials` for hardcoded secrets used in JWT signing, encryption keys, API keys, tokens, or private keys — these are **`hardcoded_secrets`** (CWE-798), report them there (not suppressed, not `weak_crypto`/`information_disclosure`). `weak_crypto` is only when the algorithm/key strength is the defect.
+- Only emit `default_credentials` when there is a REACHABLE authentication endpoint that accepts a hardcoded username/password pair defined in the application code.
 
 ### Source → Sink Patterns
 

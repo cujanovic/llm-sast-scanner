@@ -12,7 +12,7 @@ Cross-site scripting persists because context boundaries, parser behavior, and f
 **What XSS IS** — unescaped, unsanitized user input reaching an HTML/JS/DOM output sink:
 
 - **Server-side HTML sinks**: `{{ var | safe }}`, `mark_safe(var)`, `Markup(var)`, `<%- var %>` (EJS), `{{{ var }}}` (Handlebars), `!{var}` (Pug), `th:utext`, `[(${var})]` (Thymeleaf), `{!! $var !!}` (Blade), `raw(var)` / `.html_safe` (Rails), `echo $var` without `htmlspecialchars()`, `@Html.Raw(var)`, `template.HTML(var)` (Go bypass), `render_template_string(f"...{var}...")`, `res.send("<p>" + var + "</p>")`
-- **Client DOM sinks**: `innerHTML`/`outerHTML`/`insertAdjacentHTML`, `document.write`, jQuery `.html()`/`.append()`, `dangerouslySetInnerHTML`, `v-html`, `[innerHTML]`, `{@html}`, `bypassSecurityTrustHtml(var)`
+- **Client DOM sinks**: `innerHTML`/`outerHTML`/`insertAdjacentHTML`, `document.write`/`document.writeln`, jQuery `.html()`/`.append()`/`$.parseHTML(var)`, `dangerouslySetInnerHTML`, `v-html`, `[innerHTML]`, `{@html}`, Angular `bypassSecurityTrustHtml(var)` / `bypassSecurityTrustScript` / `bypassSecurityTrustUrl` / `bypassSecurityTrustStyle` / `bypassSecurityTrustResourceUrl`
 - **JS execution sinks**: `eval(var)`, `setTimeout(var, …)` / `setInterval(var, …)` with string args, `new Function(var)()`, `scriptElement.text = var`, event-handler attributes (`onclick`, `href="javascript:…"`), `location.href = var` when scheme is attacker-controlled
 
 **What XSS is NOT** (commonly confused with):
@@ -66,7 +66,7 @@ Flag any dynamic variable passed to these sinks; taint tracing confirms exploita
 **Server-side unescaped output**
 - Jinja2/Django: `\| safe`, `{% autoescape off %}`, `Markup(`, `mark_safe(`, `format_html(` with user args
 - EJS: `<%- `; Handlebars: `{{{`; Pug: `!{`; Twig: `\| raw`; Blade: `{!!`; Thymeleaf: `th:utext`, `[($`
-- Rails: `raw(`, `.html_safe`, `<%= raw`; PHP: `echo $`, `print $`, `<?=` without `htmlspecialchars`
+- Rails: `raw(`, `.html_safe`, `<%= raw`, `content_tag(...)` built from a `.html_safe`/unescaped value; PHP: `echo $`, `print $`, `<?=` without `htmlspecialchars`
 - Go: `template.HTML(`, `template.JS(`, `text/template` for HTML; C#: `@Html.Raw(`, `MvcHtmlString.Create(`
 - String-built HTML: `res.send("<`, `f"<.*{var}`, `render_template_string(f`
 
@@ -538,6 +538,16 @@ return <div>{userInput}</div>;     // React auto-escaped
 ```html
 <div>{{ userInput }}</div>         <!-- Angular/Vue interpolation -->
 ```
+
+## Weak Mitigations — do NOT downgrade (still Likely Vulnerable)
+
+A barrier that is *present but not contextual output encoding* does not make a reflected/DOM sink safe. When the only "protection" before an HTML/JS/attr/URL sink is one of these, keep the finding (mark **Likely Vulnerable**, not Not Vulnerable):
+
+- **WAF / input filtering only** — a regex/WAF stripping `<script>` or `onerror` is bypassable (case, encoding, novel events, mutation/mXSS); it is not encoding.
+- **Numeric-ID / format allowlist only** — validating that *one* parameter is numeric says nothing about the *other* reflected fields reaching the sink.
+- **CSP only** — CSP is defense-in-depth; an injection with no inline-blocking nonce/hash (or with `unsafe-inline`, a permissive `script-src`, JSONP/Angular gadgets, or a `data:`/`object-src` hole) still fires. (Strict nonce/hash CSP with no gadgets → see Common False Alarms.)
+- **Blocklist of specific tags/attributes** — enumerating bad tags misses the rest; only allowlist sanitization (DOMPurify/sanitize-html with empty/strict config) or contextual encoding is reliable.
+- **Length truncation / trimming**, **HTML-escaping in the wrong context** (HTML-escape applied to a value placed in a JS string, URL, or event handler) — context mismatch ≠ safe.
 
 ## Common False Alarms
 

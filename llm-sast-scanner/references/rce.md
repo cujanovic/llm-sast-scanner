@@ -117,7 +117,7 @@ EJS: <%= global.process.mainModule.require('child_process').execSync('id') %>
 - Autoloaded gadget chains in frameworks and plugins
 
 **Python/Ruby**
-- pickle, `yaml.load`/`unsafe_load`, Marshal
+- pickle, `yaml.load`/`unsafe_load`, Marshal — Ruby `Marshal.load`/`Marshal.restore(var)`, Psych `YAML.load(var)` / `YAML.unsafe_load(var)` without `permitted_classes:` (`YAML.safe_load` is the safe form), `Oj.load(var)` in compat/object mode
 - Automatic deserialization in message queues and cache layers
 
 **Expression Languages**
@@ -222,8 +222,8 @@ Flag sinks where a non-constant variable appears in a dangerous position. Phase-
 
 | Language | Grep targets |
 |----------|--------------|
-| Python | `os.system(`, `os.popen(`, `subprocess.*shell=True`, string-form `subprocess.run(` / `Popen(` with variables |
-| Node.js | `child_process.exec(`, `execSync(`, `spawn(.*shell:\s*true`, `shelljs.exec(` |
+| Python | `os.system(`, `os.popen(`, `subprocess.*shell=True`, string-form `subprocess.run(` / `Popen(` with variables, legacy `commands.getoutput(` / `commands.getstatusoutput(` (py2), `pty.spawn(` / `os.execv*(` with built input |
+| Node.js | `child_process.exec(`, `execSync(`, `spawn(.*shell:\s*true`, `shelljs.exec(`, `execa(var)` / `` execa`...${var}` ``, `execFile(`/`spawn(` where the **command path** (1st arg) is variable |
 | PHP | `exec(`, `system(`, `passthru(`, `shell_exec(`, `popen(`, `proc_open(`, `pcntl_exec(`, `` ` `` backticks with `{$` or concatenation |
 | Ruby | `system("` with `#{}`, backticks, `%x{`, `IO.popen(`, `Open3.popen3(` |
 | Java | `Runtime.getRuntime().exec(`, `ProcessBuilder(` with variable args or `"sh", "-c"` |
@@ -251,6 +251,8 @@ Flag sinks where a non-constant variable appears in a dangerous position. Phase-
 | Any | container/orchestration SDK calls (`run`, `create`, `exec`) where the image, command, or entrypoint is built from external input |
 
 **Skip (safe)** — list-form subprocess/spawn without shell; `json.loads`/`JSON.parse`; `yaml.safe_load`; `ast.literal_eval`; container `run(...)` with a hardcoded image and arguments.
+
+**Source param-name hints (prioritization only — never a standalone finding).** Request params whose *name* suggests the value may flow into a command/arg/program-name position — high-priority to trace into the OS-command sinks above. A name match is a prioritization signal only; flag command injection / RCE only when the value reaches a dangerous sink. Match case-insensitively, tokenizing compounds: `cmd`, `command`, `exec`, `execute`, `run`, `cli`, `arg`, `args`, `option`, `flag`, `daemon`, `host`, `hostname`, `ip`, `domain`, `ping`, `nslookup`, `dir`, `path`, `file`, `filename`, `download`, `upload`, `url`, `log`, `name`, `process`, `task`, `job`, `script`, `program`, `binary`, `format` (ffmpeg/imagemagick converters), `image` (container image selectors).
 
 ## Safe Patterns
 

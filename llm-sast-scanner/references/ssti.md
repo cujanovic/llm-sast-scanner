@@ -22,6 +22,8 @@ The core pattern: *unvalidated user input is used as the template string passed 
 2. The template engine is invoked against that attacker-controlled string.
 3. User input constructs a dynamic view/template name without strict allowlist validation (Thymeleaf view names, Flask template paths).
 
+**Source param-name hints (prioritization only — never a standalone finding).** Params whose *name* suggests their value may be rendered or used as a template/view selector — high-priority to trace to a template-string or dynamic-view sink (conditions above). Customizable content (email/notification/report bodies, themes, signatures) is the common SSTI carrier. Match case-insensitively, tokenizing compounds: `template`, `tpl`, `view`, `theme`, `layout`, `page`, `preview`, `render`, `body`, `content`, `message`, `subject`, `email_body`, `notification`, `report`, `format`, `pattern`, `expression`, `activity`, `redirect`. A name match means *trace it* — confirm SSTI only when the value reaches the engine as the template itself or an unvalidated view name.
+
 ### Test Payloads
 Confirm execution with a math probe before escalating to RCE:
 
@@ -47,6 +49,11 @@ Confirm execution with a math probe before escalating to RCE:
 ## Exploitation Chain
 
 Always confirm evaluation with `{{7*7}}` → `49` (or engine-equivalent) before RCE.
+
+**Chain pivots** (a confirmed SSTI is rarely terminal — check the reachable adjacent class):
+- **SSTI → SSRF**: most engines expose URL/HTTP helpers or object-navigation that issue server-side requests *before* a full RCE gadget is reachable — treat a confirmed SSTI as an SSRF primitive even when RCE is blocked (see `ssrf.md`).
+- **SSTI → RCE**: the typical terminal impact; report RCE severity once an engine-specific gadget is reachable (see `rce.md`).
+- **Prototype pollution → SSTI gadget**: a polluted template option (`outputFunctionName`, `sourceURL`, etc.) reaches a template-compile sink, turning pollution into template injection (see `server_side_prototype_pollution.md`).
 
 **Jinja2 (Python/Flask)**
 ```
@@ -292,16 +299,30 @@ t.Execute(w, map[string]string{"Name": r.URL.Query().Get("name")})
 - **Java**: Velocity `RuntimeServices.evaluate` / `parse`, `VelocityEngine.evaluate` / `mergeTemplate`; FreeMarker `Template` constructors and `StringTemplateLoader.putTemplate`; Pebble `getTemplate` / `getLiteralTemplate` / `Template.fromString`; Jinjava `render` / `renderForResult`; Thymeleaf `ITemplateEngine.process` / `processThrottled`; StringTemplate `new ST(var)`.
 - **Python**: Jinja2 `Template` / `Environment.from_string`, Flask `render_template_string`, Mako `Template`, Django/Bottle/Genshi/Chameleon/Chevron/Airspeed/TRender template constructors.
 - **Ruby**: ERB `ERB.new(var).result`, Liquid `Template.parse(var)`.
-- **JavaScript**: `ejs.render`, `nunjucks.renderString`, `Handlebars.compile`, `pug.render` / `pug.compile`, `_.template`; user-controlled *template object* passed to Express `res.render()` on vulnerable engines (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, `whiskers`).
-- **PHP**: Twig `createTemplate`, Smarty `fetch("string:" . $var)`.
+- **JavaScript**: `ejs.render`, `nunjucks.renderString`, `Handlebars.compile` / `Handlebars.precompile`, `pug.render` / `pug.compile`, `_.template`, Swig `swig.render(var)`, Twig.js `twig({ data: var })`; user-controlled *template object* passed to Express `res.render()` on vulnerable engines (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, `whiskers`).
+- **PHP**: Twig `createTemplate`, Smarty `fetch("string:" . $var)`, Laravel `Blade::render($var)` / `View::make($var)` with a non-literal template name.
 - **Go**: `template.New(name).Parse(var)`.
+- **C#/.NET**: Scriban `Template.Parse(var)`, Handlebars.Net `Handlebars.Compile(var)`, DotLiquid `DotLiquid.Template.Parse(var)`, Fluid `FluidParser.TryParse(var, ...)`.
+- **Java (additional)**: StringTemplate `new STGroup(var, ...)` / `new STGroupString(var)` with a non-literal group source (alongside `new ST(var)`).
 
 **Sanitizers / barriers**:
 - Java: simple/numeric/boolean types not treated as template code.
 - Python/Ruby: comparison against constant; Ruby also allowlist of template names.
 - Blocklist filtering of `{{`, `}}`, `<%` is **not** reliable — do not downgrade findings based on filters alone.
 
-Commonly affected languages: Java, Python, Ruby, JavaScript, PHP, Go. Limited coverage for C# (Scriban `Template.Parse`, Handlebars.Net `Compile`, DotLiquid, Fluid). Related Spring view/SpEL paths should be tagged `spel_injection`, not `ssti`.
+Commonly affected languages: Java, Python, Ruby, JavaScript, PHP, Go, C#. Related Spring view/SpEL paths should be tagged `spel_injection`, not `ssti`.
+
+## Engine risk tier (drives severity / verification effort)
+
+The engine determines whether template control yields **RCE** (Critical) or only data/markup injection (lower). Tier the finding by the engine, then verify the actual sink:
+
+| Tier | Engines | Default impact |
+|------|---------|----------------|
+| **Critical — RCE-by-design** | Jinja2, Mako (Python); Twig (PHP); FreeMarker, Velocity, Pebble, Jinjava (Java); ERB, Slim, Haml (Ruby); EJS, `_.template` (Lodash), Swig, Pug, `eta`, `squirrelly`, `haml-coffee` (JS); Go `text/template`→method calls; Smarty, Blade (PHP); Scriban-unsandboxed (.NET) | Server-side template control → **RCE** |
+| **High — sandboxed but escapable / object-graph reachable** | Handlebars(+helpers), Nunjucks, Thymeleaf (non-SpEL), DotLiquid, Fluid, Handlebars.Net | Data exfil / SSRF / partial RCE via helpers or `constructor` chains; treat as RCE candidate until disproven |
+| **Medium — logic-less / strongly sandboxed** | Mustache, Liquid (Shopify), Go `html/template` (autoescape) | Stored/reflected data injection, XSS, info leak — not RCE absent an escape |
+
+Notes: a Critical/High engine plus a *template-string* sink (not a variable slot) = report **Critical/High**; a Medium engine still warrants an XSS/info-leak check. Sandbox/allowlist that the version genuinely enforces can downgrade — blocklist filtering of `{{`/`<%` cannot (see barriers above).
 
 ## Safe Patterns
 

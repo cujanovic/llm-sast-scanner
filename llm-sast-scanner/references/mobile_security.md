@@ -204,7 +204,7 @@ String jwt = signJWT(payload, "hardcoded_secret_key");
 
 **FALSE POSITIVE**: Placeholder strings such as `"YOUR_KEY_HERE"`, `"TODO"`, or `"REPLACE_ME"` in configuration templates. Also do not flag localization strings, error message literals, or display labels even when they appear in a field named `key`.
 
-**Cross-ref:** Full hardcoded-secret taint rules and entropy heuristics live in the `hardcoded_code_backdoor` reference (hardening-platform lens, CWE-798).
+**Cross-ref:** Full hardcoded-secret detection (provider-format catalog, entropy heuristics, public-exposure model — and on mobile **all** app source/binary is client-exposed) lives in the `hardcoded_secrets` reference (CWE-798). `hardcoded_code_backdoor` is CWE-506 (malicious embedded code), a different class.
 
 ---
 
@@ -1292,5 +1292,5 @@ rg -n 'jailbreak|Cydia|frida|AppAttest|DeviceCheck|fileExists.*MobileSubstrate' 
 ```
 
 **Cross-lens refs:**
-- Hardcoded secrets → `hardcoded_code_backdoor` (CWE-798)
+- Hardcoded secrets → `hardcoded_secrets` (CWE-798)
 - TLS trust bypass / missing pinning → `certificate_validation`, `cleartext_transmission` (CWE-295, CWE-319)

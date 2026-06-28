@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework.   Covers 95 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework.   Covers 96 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
   version: "1.39.0"
   domain: application-security
-  references: 95 vulnerability knowledge bases
+  references: 96 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,13 +22,13 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 95 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 96 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
 |----------|----------------|
 | **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, Server-Side Include (SSI) Injection, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
-| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, OAuth 2.0 / OIDC Misconfiguration, Default Credentials, Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Session Puzzling, Reverse-Proxy Access Bypass, Email Parser Differential, Mass Assignment, BaaS Client-Side Authorization (Supabase RLS / Firebase Security Rules) |
+| **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, OAuth 2.0 / OIDC Misconfiguration, Default Credentials, Hardcoded Secrets (CWE-798, secret literals at rest / client-exposure model), Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Session Puzzling, Reverse-Proxy Access Bypass, Email Parser Differential, Mass Assignment, BaaS Client-Side Authorization (Supabase RLS / Firebase Security Rules) |
 | **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
 | **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, Correlation/Tracing Header Injection, CORS Misconfiguration, WebSocket Security (CSWSH), postMessage Security, XSSI / JSONP, Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, GraphQL Denial of Service, Regex Injection/ReDoS, CVE Patterns |
@@ -187,7 +187,8 @@ references/xssi_jsonp.md                  — Cross-Site Script Inclusion / JSON
 references/trust_boundary.md             — Trust boundary violations
 references/race_conditions.md            — Race conditions / TOCTOU
 references/brute_force.md                — Brute force / credential stuffing
-references/default_credentials.md        — Default / hardcoded credentials
+references/default_credentials.md        — Default / hardcoded login credential PAIRS reachable via auth (admin/admin, seeded admins, fallback login defaults)
+references/hardcoded_secrets.md          — Hardcoded secret literals at rest: API keys, tokens, signing/JWT secrets, private keys, OAuth client secrets, connection strings; client-vs-backend public-exposure model (CWE-798/259/321)
 references/verification_code_abuse.md    — Verification code abuse
 references/business_logic.md             — Business logic flaws
 references/http_method_tamper.md         — HTTP method tampering
@@ -414,7 +415,8 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 #### False Positive Guardrails
 
 **Tags**
-- `default_credentials`: require a reachable auth path that accepts the hardcoded credential.
+- `default_credentials`: require a reachable auth path that accepts the hardcoded login PAIR. A bare secret literal (API key, token, signing/JWT secret, private key, connection string) is `hardcoded_secrets`, not this tag.
+- `hardcoded_secrets`: a real secret literal at rest (provider format or ≥20 random chars) — not a placeholder, publishable-by-design key (Stripe `pk_*`, Firebase client `apiKey`), test/sandbox key, or env-var read. Severity by public exposure: client-shipped (bundle/mobile/source-map/public asset) → High/Critical; backend-only → Medium (still a finding — VCS/rotation exposure; do not drop). Algorithm/key-*strength* defects are `weak_crypto_hash`; runtime leakage is `information_disclosure`. Never write the raw secret — mask it.
 - `weak_crypto_hash`: require direct use of weak hash/algo — not just an import or third-party component. Covers both weak algorithms (DES, RC4, ECB) and weak hashes (MD5, SHA-1 for passwords); do not use `weak_crypto` as a separate tag.
 - `rce` → prefer `command_injection` for direct shell/process execution. Do not replace `spel_injection` with `rce`/`command_injection`.
 - `jndi_injection` in demos: only if the JNDI sink is the primary exploit path.
@@ -424,7 +426,7 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - `insecure_deserialization`: skip if `component_vulnerability` covers the same sink.
 - `arbitrary_file_upload`: skip for avatar/profile upload with type restrictions and non-webroot storage.
 - `session_fixation`: skip when Spring Security default session management is active.
-- `information_disclosure`: skip for DB credentials in config files — deployment issue, not app-level.
+- `information_disclosure`: skip for DB credentials in config files — route a connection string with an embedded password to `hardcoded_secrets` (extractable secret at rest); reserve `information_disclosure` for runtime leakage (logs/errors/responses/served source maps).
 - `shared_client_cache_leak`: require a structure that is BOTH shared across requests/users AND keyed/scoped without the identity the value depends on. Safe (drop) when the key provably includes `userId`/`tenantId`/session/auth-token-hash, when the client/cache/loader is created per-request, when the cached data is identity-independent (public/config), or when only a stateless transport is reused with auth passed per-call. Prefer `web_cache_deception` when the cache is an HTTP/CDN/edge/proxy cache; use `shared_client_cache_leak` only for in-process caches/dedup/singletons/pools/thread-locals/globals. Do not flag mutation paths for the dedup sub-class (query dedup does not merge mutations).
 
 **Scope**

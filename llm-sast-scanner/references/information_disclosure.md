@@ -35,6 +35,18 @@ Leaked information acts as a force multiplier for attackers — it maps the code
 - Profiler endpoints: `/debug/pprof`, `/actuator`, `/_profiler`, custom `/debug` APIs
 - Feature/config toggles exposed in JS or headers
 
+#### Diagnostic-endpoint catalog (framework-specific, high-value)
+
+Concrete reachable surfaces worth enumerating by name. The heap/env/config dumps leak secrets, session tokens, and connection strings (**Critical** per rubric — "config dumps"); the interactive consoles and JMX bridges are code-execution sinks (cross-ref `rce.md`).
+
+- **Spring Boot Actuator** sub-endpoints (beyond `/actuator/health`): `/actuator/heapdump` (full JVM heap → in-memory secrets, session tokens, request bodies), `/actuator/threaddump`, `/actuator/env` & `/actuator/configprops` (config + masked-but-often-leaked secrets), `/actuator/mappings`, `/actuator/loggers` (runtime log-level **write** → can flip sensitive logging on), `/actuator/sessions`, `/actuator/shutdown` (state-changing)
+- **Jolokia / JMX-over-HTTP**: `/jolokia`, `/actuator/jolokia` — read/write MBeans; certain MBeans (e.g. `reloadByURL`, logback `JMXConfigurator`, Diagnostic `Compiler`) escalate to **RCE/SSRF** → cross-ref `rce.md`, `ssrf.md`
+- **Werkzeug interactive debugger console**: the `__debugger__` endpoint (`?__debugger__=yes&cmd=...&frm=...&s=...`) evaluates arbitrary Python when the console PIN is disabled/guessable → **RCE** (cross-ref `rce.md`); generic "Flask debug on" is the lower-severity signal
+- **PHP Xdebug** triggers: `XDEBUG_SESSION` cookie, `XDEBUG_SESSION_START` (GET/POST), `XDEBUG_PROFILE` / `start_profiler` — switch a prod app into remote-debug or profiling mode; historic `xdebug.remote_connect_back` enables attacker-directed debug connections → **RCE**
+- **Laravel Debugbar** (`/_debugbar/open`, `/_debugbar/...`) and **Clockwork** (`/__clockwork/...`): expose executed SQL, bound params, env, session, and full request/response data
+- **Symfony** web profiler `/_profiler` and web-debug-toolbar `/_wdt/<token>`
+- **Go** `net/http/pprof`: `/debug/pprof/` (and `/debug/pprof/heap|goroutine|cmdline|profile`) auto-registered on the default mux — leaks memory, args, and CPU profiles
+
 ### DVCS and Backups
 
 - DVCS: `/.git/` (HEAD, config, index, objects), `.svn/entries`, `.hg/store` → reconstruct source and secrets

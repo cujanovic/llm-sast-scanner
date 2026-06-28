@@ -53,10 +53,12 @@ Grep verification and issuance sites before assessing endpoints:
 
 ```bash
 # Libraries
-rg -n "import jwt|from jose|jsonwebtoken|io\.jsonwebtoken|golang-jwt|dgrijalva/jwt-go|firebase/php-jwt" .
+rg -n "import jwt|from jose|jsonwebtoken|@nestjs/jwt|io\.jsonwebtoken|com\.auth0\.jwt|golang-jwt|dgrijalva/jwt-go|lestrrat-go/jwx|firebase/php-jwt|lcobucci/jwt" .
 
 # Signature bypass
-rg -n "verify_signature.*False|verify_signature:\s*false|jwt\.decode\(|options=\{.*verify" .
+rg -n "verify_signature.*False|verify_signature:\s*false|jwt\.decode\(|options=\{.*verify|complete\s*[:=]\s*[Ff]alse" .
+# token pulled from a query string (logged in URLs/referrer, weaker than header/cookie):
+rg -n "request\.args\.get\(['\"]token|req\.query\.(token|jwt|access_token)|query_params\[['\"]token" .
 
 # Algorithm confusion / none acceptance
 rg -n "algorithms.*none|get_unverified_header" .
@@ -389,6 +391,7 @@ store.save(hash(token), userId, expiresAt);
 - XSS → token theft → replay across services with weak audience enforcement
 - SSRF → fetch private JWKS → sign tokens accepted by internal services
 - Host header poisoning → OIDC redirect_uri poisoning → authorization code capture
+- JWT ↔ IDOR: a forgeable or unbound `sub`/`user_id` claim is an authorization-bypass primitive equivalent to IDOR on every object keyed by that identity — a successful claim swap yields the same cross-user access (and, with a `role`/scope claim, vertical escalation), so triage reachable object endpoints as IDOR once the claim is attacker-controllable (see `idor.md`)
 
 ## Analysis Workflow
 
@@ -484,6 +487,7 @@ Verification must bind the token to the correct issuer, audience, key, and clien
 - **VULN**: `jwt.decode(token, key, algorithms=["none"])` — accepts none algorithm
 - **VULN**: `jwt.decode(token, options={"verify_signature": False})` — skips signature verification
 - **VULN**: `jwt.decode(token, key, algorithms=jwt.get_unverified_header(token)['alg'])` — algorithm confusion
+- **VULN**: `jwt.decode(token, key)` on **PyJWT < 2.0** with the `algorithms` arg omitted — older versions did not require it and would accept `alg:none`/attacker-chosen algs; always pass an explicit `algorithms=[...]` allowlist.
 - **SAFE**: `jwt.decode(token, SECRET_KEY, algorithms=["HS256"])` — fixed algorithm
 - **Pattern**: Any `verify=False` or `options={"verify_*": False}` = HIGH RISK
 

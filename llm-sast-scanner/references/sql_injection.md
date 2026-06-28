@@ -54,7 +54,7 @@ Grep for query execution calls where the SQL string argument is built dynamicall
 1. **Concatenation into execution**: `cursor.execute("... WHERE id = " + var)`, `$pdo->query("... id = " . $var)`, `jdbcTemplate.query("... '" + var + "'")`
 2. **Interpolation literals**: `cursor.execute(f"... '{var}'")`, `` db.query(`... ${var}`) ``, `db.QueryRow(fmt.Sprintf("... '%s'", var))`
 3. **Format functions (not binding)**: `cursor.execute("... %s" % var)`, `"... {}".format(var)`, `String.format("... '%s'", var)`, `sprintf("... %s", $var)`
-4. **ORM raw/unsafe with dynamic strings**: Django `objects.raw(f"...")` / `RawSQL(f"...")` / `extra(where=[f"..."])`, ActiveRecord `where("col = '#{var}'")`, Sequelize `` sequelize.query(`...${var}`) ``, TypeORM `` .where(`col = '${var}'`) ``, Prisma `$queryRawUnsafe`/`$executeRawUnsafe`, EF `FromSqlRaw("..." + var)`
+4. **ORM raw/unsafe with dynamic strings**: Django `objects.raw(f"...")` / `RawSQL(f"...")` / `extra(where=[f"..."])`, ActiveRecord `where("col = '#{var}'")`, Sequelize `` sequelize.query(`...${var}`) `` / `sequelize.literal(var)`, TypeORM `` .where(`col = '${var}'`) `` / `createQueryBuilder().where("col = '" + var + "'")`, Prisma `$queryRawUnsafe`/`$executeRawUnsafe`, EF `FromSqlRaw("..." + var)`
 5. **Dynamic identifiers** (parameterization cannot protect these): `f"SELECT * FROM {table}"`, `f"ORDER BY {sort_col}"`
 
 **Safe construction (skip)**
@@ -62,6 +62,8 @@ Grep for query execution calls where the SQL string argument is built dynamicall
 - Static query string + separate bind args: `execute("... WHERE id = %s", (val,))`, `query("... id = ?", [val])`
 - ORM builders: `.filter()`, `.where(col: val)`, `.findOne()`, `.findUnique()`
 - Prisma tagged template: `` prisma.$queryRaw`SELECT * WHERE id = ${userId}` `` (values bound, not interpolated into text)
+
+**Source param-name hints (prioritization only — never a standalone finding).** Request params whose *name* commonly maps to a SQL clause and is therefore high-priority to trace into the dynamic-construction sites above — especially the **dynamic-identifier** cases (#5), where these names are routinely interpolated as column/table/direction with no binding possible. A name match is only a prioritization signal; flag SQLi only when the value reaches a dynamic query. Match case-insensitively, tokenizing compounds: `sort`, `order`, `orderby`, `order_by`, `direction`, `sortcol`, `column`, `col`, `field`, `table`, `select`, `where`, `filter`, `search`, `keyword`, `query`, `q`, `row`, `fetch`, `report`, `results`, `groupby`, `having`, `offset`, `limit`. Free-form `sort`/`order`/`column`/`table`/`direction` reaching `ORDER BY`/`GROUP BY`/identifier position **without an allowlist** is the classic non-bindable sink.
 
 ## How to Detect
 
