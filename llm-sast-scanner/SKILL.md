@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework.   Covers 96 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework.   Covers 101 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.39.0"
+  version: "1.40.0"
   domain: application-security
-  references: 96 vulnerability knowledge bases
+  references: 101 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,22 +22,22 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 96 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 101 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
 |----------|----------------|
-| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, Server-Side Include (SSI) Injection, NoSQL Injection, GraphQL Injection, XXE, RCE / Command Injection, Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
+| **Injection** | SQL Injection, XSS, Client-Side Prototype Pollution (CSPP), SSTI, Server-Side Include (SSI) Injection, Edge Side Include (ESI) Injection, NoSQL Injection, GraphQL Injection, XXE / XSLT Injection, RCE / Command Injection, Environment Variable Injection (CWE-99/454, loader/runtime/config override), Expression Language Injection, LDAP Injection, XPath/XQuery Injection, CSV/Formula Injection, Log Injection, Prompt Injection (LLM), DOM Clobbering |
 | **Access Control & Auth** | IDOR, Privilege Escalation, Authentication/JWT, OAuth 2.0 / OIDC Misconfiguration, Default Credentials, Hardcoded Secrets (CWE-798, secret literals at rest / client-exposure model), Brute Force, Business Logic, HTTP Method Tampering, Verification Code Abuse, Session Fixation, Session Puzzling, Reverse-Proxy Access Bypass, Email Parser Differential, Mass Assignment, BaaS Client-Side Authorization (Supabase RLS / Firebase Security Rules) |
-| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
+| **Data Exposure & Crypto** | Weak Crypto/Hash, Information Disclosure, Insecure Cookie, Trust Boundary, Client-IP / Network-Origin Trust (XFF Spoofing), Shared-Client Cache/Dedup Cross-User Leak, Cleartext Transmission, Certificate/TLS Validation, Privacy / Data Protection |
 | **Server-Side** | SSRF, Path Traversal/LFI/RFI, Client Side Path Traversal (CSPT), Server-Side Prototype Pollution (SSPP), Insecure Deserialization, Arbitrary File Upload, JNDI Injection, Race Conditions, Insecure Temp File, File Permissions |
-| **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, Correlation/Tracing Header Injection, CORS Misconfiguration, WebSocket Security (CSWSH), postMessage Security, XSSI / JSONP, Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, GraphQL Denial of Service, Regex Injection/ReDoS, CVE Patterns |
+| **Protocol & Infrastructure** | CSRF, Open Redirect, Reverse Tabnabbing, HTTP Request Smuggling/Desync, HTTP Response Splitting, Host Header Poisoning, Correlation/Tracing Header Injection, CORS Misconfiguration, WebSocket Security (CSWSH), postMessage Security, XSSI / JSONP / Reflected File Download (RFD), Clickjacking, Content Security Policy (CSP) Weaknesses, XS-Leaks, Web Cache Deception/Poisoning, Denial of Service, GraphQL Denial of Service, Regex Injection/ReDoS, CVE Patterns |
 | **Cloud & Infrastructure-as-Code** | IaC Security (Terraform/CloudFormation/ARM/Bicep/Pulumi), Subdomain Takeover (dangling-DNS candidate flagging in IaC), Kubernetes / Cloud Orchestration, CI/CD & Container Security, nginx / Web-Server Configuration |
 | **API & AI/Agent Services** | API / REST / Web-Service Security, Webhook / Integration Security, MCP (Model Context Protocol) Security |
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor, Improper Input Validation (semantic-type mismatch / missing format validation, standalone Low) |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
-| **Language/Platform** | PHP Security, Mobile Security (Android/iOS), C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
+| **Language/Platform** | PHP Security, Android Security, iOS Security, Electron / Desktop App Security, C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
 
 ---
 
@@ -156,9 +156,10 @@ references/sql_injection.md          — SQL / ORM injection
 references/xss.md                    — Cross-site scripting
 references/ssrf.md                   — Server-side request forgery
 references/rce.md                    — Remote code execution
+references/environment_variable_injection.md — Env var injection: user-controlled name/value into process env (process.env/os.environ/setenv/ENV[]/SetEnvironmentVariable) → loader hijack (LD_PRELOAD/NODE_OPTIONS/PATH) or secret/flag override (CWE-99/454)
 references/idor.md                   — Insecure direct object reference
 references/authentication_jwt.md     — Auth flaws, JWT weaknesses
-references/oauth_oidc_misconfiguration.md — OAuth 2.0 / OIDC flow misconfig: weak redirect_uri match, missing state/PKCE, code reuse/race, cross-client token acceptance, unverified-email linking, implicit/ROPC, dynamic-registration SSRF (CWE-287/346/601)
+references/oauth_oidc_misconfiguration.md — OAuth 2.0 / OIDC flow misconfig: weak redirect_uri match, missing state/PKCE, code reuse/race, cross-client token acceptance, unverified-email linking, implicit/ROPC, dynamic-registration SSRF, SAML signature-validation flaws (signature stripping, XML signature wrapping, comment truncation) (CWE-287/346/601)
 references/reverse_proxy_access_bypass.md — Reverse-proxy access bypass: authz applied to a different path representation than routing (rewrite headers X-Original-URL/X-Rewrite-URL, normalization mismatch, stale API versions, Referer/Origin gates) (CWE-863/289/436)
 references/session_puzzling.md       — Session puzzling / session-variable overloading: unauthenticated or mid-flow session keys reused as proof of full authentication (CWE-841/384)
 references/email_parser_differential.md — Email validation-vs-parsing differential: regex/split('@') accepted but mail library parses differently (encoded-words, comments, multiple @, IDN) → takeover; identity-key collisions (CWE-20/697)
@@ -169,7 +170,8 @@ references/server_side_prototype_pollution.md — Server-Side Prototype Pollutio
 references/client_side_prototype_pollution.md — Client-Side Prototype Pollution (PP/gadget catalog, browser-API gadgets, sanitizer bypasses)
 references/ssti.md                   — Server-side template injection
 references/ssi_injection.md          — Server-Side Include (SSI) injection: #exec RCE, #include/#printenv disclosure on SSI-parsed pages (CWE-97)
-references/xxe.md                    — XML external entity
+references/esi_injection.md          — Edge Side Include (ESI) injection: esi:include SSRF/metadata + content injection, esi:vars cookie/header theft (HttpOnly bypass) on an ESI-enabled surrogate cache/CDN (Varnish/Squid/Fastly/Akamai); gate on Surrogate-Control/esi-on/do_esi (CWE-97)
+references/xxe.md                    — XML external entity (XXE) + XSLT injection (user-controlled stylesheet → file read/write, SSRF, RCE via XSLTProcessor/php:function, .NET msxsl:script, Xalan/Saxon, EXSLT)
 references/insecure_deserialization.md    — Insecure deserialization
 references/arbitrary_file_upload.md      — Arbitrary file upload
 references/privilege_escalation.md       — Privilege escalation
@@ -183,8 +185,9 @@ references/open_redirect.md              — Open redirect
 references/reverse_tabnabbing.md         — Reverse tabnabbing: target="_blank"/window.open without rel="noopener" exposing window.opener (CWE-1022)
 references/websocket_security.md         — WebSocket security: CSWSH (missing Origin check), missing connection/per-message auth, unsanitized broadcast (CWE-345/284/346)
 references/postmessage_security.md       — postMessage security: missing event.origin checks, wildcard targetOrigin, weak substring/regex origin allowlists, event.data taint to DOM/JS sinks (CWE-345/346)
-references/xssi_jsonp.md                  — Cross-Site Script Inclusion / JSONP: callback-wrapped sensitive data, sensitive data served as executable JS, dynamic .js endpoints stealable via cross-origin script include (CWE-345/200)
-references/trust_boundary.md             — Trust boundary violations
+references/xssi_jsonp.md                  — Cross-Site Script Inclusion / JSONP / Reflected File Download (RFD): callback-wrapped sensitive data, sensitive data served as executable JS, dynamic .js endpoints stealable via cross-origin script include, and reflected/download responses lacking a fixed Content-Disposition filename (or building it from user input) enabling attacker-named executable downloads (CWE-345/200/494)
+references/trust_boundary.md             — Trust boundary violations (CWE-501)
+references/xff_spoofing.md               — Client-IP spoofing & network-origin trust: X-Forwarded-For/X-Real-IP/True-Client-IP/Forwarded derivation failures (no trusted-proxy gate, single-instance reads, spoofable fallback chain, edge append-vs-replace, RFC 7239 fail-open, raw IP used as rate-limit/cache key) + multi-tenant cloud/CI/serverless/datacenter range trust (CWE-348/290/291)
 references/race_conditions.md            — Race conditions / TOCTOU
 references/brute_force.md                — Brute force / credential stuffing
 references/default_credentials.md        — Default / hardcoded login credential PAIRS reachable via auth (admin/admin, seeded admins, fallback login defaults)
@@ -201,7 +204,9 @@ references/expression_language_injection.md — Expression language injection (S
 references/jndi_injection.md             — JNDI injection (Log4Shell class)
 references/denial_of_service.md          — Denial of service / resource exhaustion
 references/php_security.md               — PHP-specific security issues
-references/mobile_security.md            — Mobile security (Android / iOS)
+references/android_security.md           — Android security: insecure storage (SharedPreferences/SQLite/external/Keystore), exported component & intent injection, deep-link/WebView RCE (addJavascriptInterface/file-URL access), insecure IPC (ContentProvider/PendingIntent), crypto misuse (ECB/static-IV/weak-key/java.util.Random), allowBackup, clipboard/FLAG_SECURE leakage, client-only root detection (gate: *.kt/*.java + AndroidManifest.xml/build.gradle)
+references/ios_security.md               — iOS security (Swift/Obj-C): insecure storage (UserDefaults/plist/Core Data/file-protection), Keychain misuse, deep-link/URL-scheme → WKWebView/open, ATS bypass (NSAllowsArbitraryLoads), crypto misuse (DES/3DES/RC4/hardcoded keys/arc4random), TLS trust bypass (missing SecTrustEvaluateWithError), clipboard/screen-capture leakage, client-only jailbreak detection (gate: *.swift/*.m + Info.plist/*.xcodeproj/Podfile)
+references/electron_desktop_security.md  — Electron / desktop web-runtime hardening: BrowserWindow webPreferences (nodeIntegration/contextIsolation/sandbox/webSecurity), unsafe preload contextBridge & ipcMain handlers, unrestricted navigation, shell.openExternal (CWE-1188/829/94)
 references/session_fixation.md           — Session fixation
 references/ldap_injection.md             — LDAP injection (CWE-090, RFC 4515 filter/DN escaping)
 references/xpath_injection.md            — XPath (CWE-643), XQuery (CWE-652), XML injection (CWE-091)
@@ -258,7 +263,7 @@ sanitizers/barriers that neutralize it. Prefer those recognized barriers when ru
 - For a full audit, gate references on the files actually present — by extension, or a quick content grep for
   in-file signals (k8s `kind:`, CloudFormation, AI-SDK deps) — NOT a coarse stack
   label: ALWAYS load the language-agnostic classes, and load a platform/language/infra-specific reference
-  (e.g. `php_security.md`, `mobile_security.md`, `memory_safety_c_cpp.md`, `smart_contract_security.md`,
+  (e.g. `php_security.md`, `android_security.md`, `ios_security.md`, `memory_safety_c_cpp.md`, `smart_contract_security.md`,
   `aspnet_security_misconfig.md`, `iac_security.md`, `kubernetes_cloud_security.md`) ONLY when its ecosystem
   appears in the tree; when unsure, LOAD (coverage wins over tokens). This still covers every applicable
   class while skipping only provably-absent stacks.
@@ -641,7 +646,7 @@ When producing a full report, write to `sast_report.md` (or user-specified path)
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
-Analyzer: llm-sast-scanner v1.38.0
+Analyzer: llm-sast-scanner v<version>
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>

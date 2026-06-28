@@ -1,6 +1,6 @@
 ---
 name: xssi-jsonp
-description: Cross-Site Script Inclusion (XSSI) and JSONP — server endpoints that wrap sensitive JSON in executable JavaScript (callback/jsonp parameters, application/javascript responses) enabling cross-origin data theft via script tags (CWE-345, CWE-200)
+description: Cross-Site Script Inclusion (XSSI), JSONP, and Reflected File Download (RFD) — server endpoints that wrap sensitive JSON in executable JavaScript (callback/jsonp parameters, application/javascript responses) enabling cross-origin data theft via script tags, and reflected-input/download responses lacking a fixed Content-Disposition filename enabling attacker-named executable downloads (CWE-345, CWE-200, CWE-494)
 ---
 
 # Cross-Site Script Inclusion / JSONP (CWE-345 / CWE-200)
@@ -58,6 +58,11 @@ rg -n '<script[^>]+src=["'"'"'][^"'"'"']*\?(callback|jsonp)=' --glob '*.{html,ej
 
 # Anti-hijack guard presence (negative signal when absent on sensitive JSON routes)
 rg -n "\)\]\}'|while\s*\(\s*1\s*\)|&&&" --glob '*.{js,ts,py,rb,go,java,php}'
+
+# RFD: user-controlled Content-Disposition filename (sink), or reflecting/download
+# routes with NO fixed attachment filename (the absence near a reflected response is the signal)
+rg -ni 'content-disposition' --glob '*.{js,ts,py,rb,go,java,php,cs}' -C1
+rg -ni "filename=[\"']?[^\"';]*\$\{|filename=[\"']?[^\"';]*[\"']?\s*\+|filename=.*(req\.|request\.|params|query|input)" --glob '*.{js,ts,py,rb,php,java,cs}'
 ```
 
 Trace each callback/jsonp hit to whether the wrapped payload includes user-specific fields and whether authentication is required.
@@ -165,9 +170,48 @@ app.get('/api/friends', (req, res) => {
 });
 ```
 
+### Reflected File Download (RFD) — CWE-494 / CWE-345
+
+RFD extends reflected input beyond the browser: an attacker crafts a URL whose reflected value becomes the **content** of a downloaded file, and whose **filename/extension** is attacker-chosen, so the victim downloads (and may execute) an attacker-controlled file that appears to come from the trusted origin. The same unvalidated reflection that drives JSONP is the source; the new conditions are at the **response/header layer**, so flag them even on non-JSONP routes.
+
+Three conditions, all source-detectable:
+1. **Reflected, attacker-influenced content** at/near the start of the body — JSONP `callback`, an echoed query/path value, or a permissive `Content-Type` the browser will download (e.g. `application/octet-stream`, `application/json` without `nosniff`).
+2. **Attacker-controllable download filename** — either (a) the response sets **no** `Content-Disposition: attachment; filename="<fixed>"`, so the browser derives the name from the path and an attacker appends one via path-appending (`/api/profile;/evil.bat?callback=||calc||`), or (b) the route builds `Content-Disposition`/`filename` **from user input** (also a CRLF/header-injection sink — see `http_response_splitting.md`).
+3. **No `X-Content-Type-Options: nosniff`** — lets the browser content-sniff the reflected body into an executable type.
+
+```javascript
+// VULN — reflected callback, no fixed Content-Disposition filename, no nosniff:
+//   /api/profile;/setup.bat?callback=||calc|| downloads "setup.bat" with attacker body
+app.get('/api/profile', requireAuth, (req, res) => {
+  const cb = req.query.callback || 'cb';
+  res.type('application/javascript');
+  res.send(`${cb}(${JSON.stringify({ id: req.user.id })})`);
+});
+
+// VULN — filename built from user input (RFD + Content-Disposition header injection)
+app.get('/api/export', (req, res) => {
+  res.setHeader('Content-Disposition', `attachment; filename="${req.query.name}"`);
+  res.send(buildReport(req.query));
+});
+
+// SAFE — strict callback identifier, fixed server-chosen filename, nosniff
+app.get('/api/export', requireAuth, (req, res) => {
+  if (req.query.callback && !/^[a-zA-Z_$][\w.$]*$/.test(req.query.callback)) {
+    return res.status(400).end();
+  }
+  const name = sanitizeBaseName(req.query.name) || 'report';      // allowlist, strip path/CR/LF, force extension
+  res.setHeader('Content-Disposition', `attachment; filename="${name}.csv"`);
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.type('text/csv').send(buildReport(req.query));
+});
+```
+
+**Severity:** typically **Low–Medium** standalone (social-engineering download abuse from a trusted origin); raise to **High** when the reflected content is attacker-controlled enough to ship a working executable/script payload, or when the filename is built from user input (header-injection/CRLF compounds it). A user-controlled `Content-Disposition` filename is a standalone finding even when no JSONP is present.
+
 ## Safe Patterns
 
 - **Serve data as JSON** with `Content-Type: application/json` — never `application/javascript` for API payloads containing user or session data.
+- **Fixed, server-chosen download filename** — always set `Content-Disposition: attachment; filename="<server-controlled name + extension>"`; never build the filename from user input (RFD + header-injection). Strip `/`, `\`, `;`, CR/LF and force a safe extension.
 - **Eliminate JSONP** — replace with CORS-enabled JSON endpoints and explicit credentialed `fetch` from allowed origins.
 - **Never embed secrets/PII** in script-includable responses (`.js` routes, JSONP wrappers, inline config blobs reachable via predictable GET URLs).
 - **Anti-hijack prefix** on JSON GET responses when legacy clients require non-JSONP arrays: prefix body with `)]}'\n` or `while(1);` so script inclusion does not yield valid executable assignments (defense-in-depth — not a substitute for auth + JSON content type).
@@ -182,6 +226,7 @@ app.get('/api/friends', (req, res) => {
 - Authenticated JSONP / callback endpoint returning PII, tokens, or account data → **High–Critical** (one-click cross-origin data theft via `<script src>`).
 - Public JSONP on non-sensitive feed with strict callback regex and no session fields → **Low** (legacy pattern; deprecate).
 - Dynamic `.js` embedding CSRF token only (no PII) → **Medium** (CSRF token theft enables forged state-changing requests).
+- Reflected/download endpoint with **no fixed `Content-Disposition` filename** or a **user-controlled filename**, no `nosniff` → **Reflected File Download (RFD)**, **Low–Medium** standalone (**High** if reflected content can carry an executable payload or filename is user-built — compounds with `http_response_splitting.md`).
 - `application/json` + `nosniff` + no callback reflection + CORS not misconfigured → **FALSE POSITIVE** for XSSI.
 - Static public `.js` bundle with no interpolated user/session data → **Info** (not XSSI).
 
@@ -201,6 +246,7 @@ app.get('/api/friends', (req, res) => {
 - `cors_misconfiguration.md` — preferred replacement pattern (CORS + JSON instead of JSONP).
 - `information_disclosure.md` — broader sensitive data exposure taxonomy.
 - `insecure_cookie.md` — `SameSite` and cookie scope affecting script-inclusion with credentials.
+- `http_response_splitting.md` — user-controlled `Content-Disposition`/`filename` is also a CRLF/header-injection sink (compounds RFD).
 
 ## Core Principle
 

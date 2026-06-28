@@ -87,7 +87,7 @@ Flag file operations where the path argument is dynamic (variable, not a fully h
 - **Go**: `os.Open(`, `os.ReadFile(`, `filepath.Join(`, `http.ServeFile(`, `http.ServeContent(w, r, var, ...)`
 - **C#**: `File.ReadAllText(`, `File.ReadAllBytes(`, `new FileStream(`, `Path.Combine(`
 - **Path construction joins**: `os.path.join(BASE, var)`, `path.join(__dirname, var)`, `Paths.get(base).resolve(var)`, string concat `` `${base}/${var}` ``
-- **Archive extraction**: `zipfile.ZipFile.extractall`, `tarfile.extractall`, `ZipEntry.getName()` as output path, Node `adm-zip`/`node-tar`/`unzipper` extract calls
+- **Archive extraction**: `zipfile.ZipFile.extractall`, `tarfile.extractall`, `ZipEntry.getName()` as output path (incl. streaming `ZipInputStream.getNextEntry()` and `net.lingala.zip4j` `ZipFile.extractAll`/`FileHeader.getFileName`), Node `adm-zip`/`node-tar`/`unzipper` extract calls
 - **Java guard nuance**: `Paths.get(base).resolve(var).normalize().startsWith(base)` is only sound when `base` was canonicalized first (`toRealPath()`); comparing against a non-real base lets a symlink or prefix sibling (`/safe-evil`) defeat the `startsWith` check.
 
 Skip: fully hardcoded paths, config/env-only paths with no user component, fixed-root static middleware (e.g. `express.static('public')`).

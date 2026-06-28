@@ -68,6 +68,8 @@ Grep nginx config trees. Recon is directive/variable presence; confirm block sco
 - `valid_referers none blocked;` used as the only gate on a sensitive route.
 - An unanchored or overlapping regex `location`/`map`, or a nested-quantifier regex, allows route bypass or ReDoS-driven worker exhaustion.
 - `proxy_pass` with URI normalization or `merge_slashes off` causes nginx and the upstream to disagree on the path, bypassing ACLs or enabling smuggling.
+- **`proxy_intercept_errors on;` + `error_page ... @named` whose handler does `proxy_pass $variable`** where the variable is derived from the upstream `Location`/response → if the first upstream has an open redirect (or attacker-influenced `Location`), nginx follows it into a second, attacker-chosen upstream → SSRF. Recon: `proxy_intercept_errors\s+on` together with a `@`-named `error_page` handler and a non-literal `proxy_pass`. SAFE: never build the redirect-follow target from upstream/client data; pin the second hop to a fixed upstream.
+- **Weak/unanchored regex `location ~` that captures a path segment into `proxy_pass http://storage/$1`** (object storage / origin), where the capture can contain `%0d%0a`/`%0a` or `..` → CRLF/request smuggling or path escape into the bucket. Recon: `location\s*~` with a `(.*)`/`(.+)` capture feeding `proxy_pass` to `*.googleapis.com`/`*.amazonaws.com`/`storage` without an anchored, character-restricted pattern. SAFE: anchor the regex (`^/assets/([a-zA-Z0-9._-]+)$`), reject control chars, and pin the bucket/path prefix.
 
 ## Safe Patterns
 

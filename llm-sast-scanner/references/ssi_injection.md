@@ -1,6 +1,6 @@
 ---
 name: ssi_injection
-description: Server-Side Include (SSI) injection — user input reflected into pages processed by an SSI-enabled web server, allowing #exec command execution and #include/#printenv file & environment disclosure (CWE-97)
+description: Server-Side Include (SSI) injection — user input reflected into pages processed by an SSI-enabled web server (Apache mod_include, nginx SSI, IIS) enabling #exec RCE, #include/#printenv file/secret disclosure on .shtml/SSI-parsed pages (CWE-97). For the surrogate-cache/CDN cousin (esi:include SSRF, esi:vars cookie theft) see esi_injection.md.
 ---
 
 # Server-Side Include (SSI) Injection (CWE-97)
@@ -59,6 +59,10 @@ High-signal: any path where request data lands in a `.shtml` (or SSI-`AddOutputF
 - **PHP / classic CGI / Perl**: most common host of legacy SSI; watch `echo`/`print` of request data onto `.shtml`.
 - **Java**: servlet/JSP output written to SSI-parsed `.shtml` fronted by Apache; `request.getParameter` → `.shtml`.
 - **Static generators / nginx**: nginx `ssi on;` reflecting `$arg_*`/`$http_*` into parsed responses.
+
+## Edge Side Includes (ESI) — the surrogate-cache cousin
+
+ESI is the same injection class but parsed by a **surrogate cache/CDN** (Varnish, Squid, Fastly, Akamai) on the *response*, not by the origin web server — so the origin can be fully patched and still feed `<esi:include>` (SSRF/metadata) and `<esi:vars>` (cookie theft) to a downstream surrogate. It has its own dedicated, signal-gated reference: see **`esi_injection.md`** (load when a surrogate front-end with ESI processing is present — `Surrogate-Control: content="ESI/1.0"`, `esi on`, `do_esi`).
 
 ## Severity / Triage
 

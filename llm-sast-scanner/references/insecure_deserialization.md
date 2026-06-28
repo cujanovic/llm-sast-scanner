@@ -42,7 +42,7 @@ Insecure deserialization happens when an application reconstructs objects from u
 - Generally safe — no polymorphic deserialization by default
 - Dangerous only when combined with custom TypeAdapters that instantiate arbitrary classes
 
-**json-io, Genson, Flexjson, Jodd**
+**json-io (`com.cedarsoftware.util.io.JsonReader`), Genson, Flexjson, Jodd**
 - Various levels of polymorphic type support
 - Look for class name fields in JSON (`@class`, `@type`, `class`)
 
@@ -484,6 +484,10 @@ Commonly affected languages: Java, Python, JavaScript, Ruby, C#, Go.
 **C# sinks**: `BinaryFormatter`, `LosFormatter`, `NetDataContractSerializer`, `JavaScriptSerializer` + type resolver; untrusted stream → unsafe deserializer.
 
 **Go sinks**: `encoding/gob` `gob.NewDecoder(...).Decode(...)` on attacker-controlled streams; third-party decoders that resolve concrete types from input (e.g. registered `gob` interface types, `mapstructure`/YAML into `interface{}`). Risk is generally lower than Java native deserialization (no broad gadget chains in the stdlib) — primary impact is DoS/panic and type confusion — but untrusted `gob` input should still be treated as a sink. Safe: decoding into a fixed concrete struct from a trusted source; `json.Unmarshal` into typed structs.
+
+**OCaml sinks**: `Marshal.from_string` / `Marshal.from_bytes` / `Marshal.from_channel`, and `input_value` (the `Stdlib` wrapper over the same format) on attacker-controlled bytes. The OCaml marshal format is unauthenticated and unverified — unmarshalling violates type safety (a forged blob produces a value of an arbitrary claimed type), so a crafted payload causes memory corruption / crashes and can be leveraged for code execution. Safe: never unmarshal untrusted input; use a typed, validating parser (e.g. a `ppx`-derived JSON/`Sexp` decoder into a fixed type).
+
+**Clojure sinks**: `(read-string s)` and `clojure.core/read` with the default `*read-eval*` true — reader macro `#=(...)` evaluates arbitrary Clojure/Java at read time → RCE. Safe: `(clojure.edn/read-string s)` / `clojure.edn/read` (no eval, no arbitrary tagged-literal execution), or bind `*read-eval*` to `false` (still prefer `edn`).
 
 **Sources**: remote/network input on all platforms.
 

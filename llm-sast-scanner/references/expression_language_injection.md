@@ -146,6 +146,21 @@ String template = "fragments/" + request.getParameter("page");
 return template;  // if Thymeleaf processes the path as a fragment expression, SSTI possible
 ```
 
+### Search-engine script injection (Elasticsearch / OpenSearch Painless, Lucene)
+
+Search backends embed a scripting language (Painless, Lucene expressions, the legacy `mvel`/Groovy script engines) reachable through `sort`, `script_fields`, `script_score`, `runtime_mappings`, `min_score`, and scripted aggregations. If any part of a query body — especially a **raw `sort`/`script` string forwarded from a client argument** — is taken from user input without an allowlist, the attacker controls a per-document expression. Even sandboxed Painless yields field/metadata exfiltration (`doc['_seq_no']`, ordering oracles), tenant-boundary probing, and CPU-DoS; older/unsandboxed engines are full RCE.
+
+```jsonc
+// VULNERABLE: client-supplied sort_query forwarded verbatim into the ES sort clause
+// GraphQL/REST arg:  sort_query = "_script:{...,\"script\":{\"source\":\"doc['_seq_no'].value\"}}"
+{ "query": {...}, "sort": <RAW_USER_SORT> }          // per-document Painless executes
+
+// VULNERABLE: user value concatenated into a script source
+{ "script_score": { "script": { "source": "Math.log(2 + doc['" + userField + "'].value)" } } }
+```
+
+**SAFE / barriers:** never forward a raw `sort`/`script`/aggregation string from the client — accept a typed enum of allowed sort fields and map server-side; use **parameterized** scripts (`"params"` with a fixed `source`, never string concatenation); disable dynamic scripting where unused (`script.allowed_types: none`/`stored`), restrict contexts; allowlist queryable fields. Treat any user input reaching `sort`, `script.source`, `runtime_mappings`, or `aggs...script` as an injection sink. Cross-ref `nosql_injection.md` (query-shape injection) and `rce.md`.
+
 ## Java Source Detection Rules
 
 ### TRUE POSITIVE

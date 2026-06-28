@@ -26,6 +26,7 @@ JNDI (Java Naming and Directory Interface) injection occurs when user-controlled
 - `Context.lookup` / `InitialContext.lookup` name argument
 - `Hashtable.put` / `setProperty` with `Context.PROVIDER_URL` or `"java.naming.provider.url"`
 - Spring LDAP `LdapOperations.lookup`, `search`, `list`, `findByDn`, etc. (name/base DN args)
+- Framework JNDI wrappers: Apache Shiro `org.apache.shiro.jndi.JndiTemplate.lookup`; `JMXConnectorFactory.connect` / `JMXConnector` with user-controlled service URL
 - `LdapOperations.search(..., scope=true)` and `unbind(..., recursive=true)` when name is tainted
 - Taint steps: `new CompositeName(tainted)`, `CompoundName.add(tainted)`, `new JMXServiceURL(tainted)`, `JMXConnectorFactory.newJMXConnector`, `new RMIConnector(tainted)`
 - **Log4Shell**: user data flowing into Log4j2 `Logger` methods (`info`, `warn`, `error`, `debug`, etc.) — message lookup substitution; version may not be verified statically

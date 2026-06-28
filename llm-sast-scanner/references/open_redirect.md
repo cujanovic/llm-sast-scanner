@@ -21,7 +21,7 @@ Identify cases where user-controlled input reaches a redirect or forward target 
 - JavaScript server-side: `res.redirect(userUrl)`, `Location` response header writes
 - JavaScript client-side: `window.location`, `location.href`, `location.assign` (browser redirect)
 - Python: Flask `redirect()`, Django `HttpResponseRedirect`
-- Go: `http.Redirect`, `Header().Set("Location", ...)`
+- Go: `http.Redirect`, `Header().Set("Location", ...)`; web-framework redirect helpers — Echo `c.Redirect(code, userURL)`, fasthttp `RequestCtx.Redirect`, Beego `Controller.Redirect`, Revel `Controller.Redirect`, Gin `c.Redirect`
 - Ruby: Rails redirect helpers with user-controlled target
 - C#: MVC `Redirect()`, `RedirectToAction` with tainted URL
 - Java forward (CWE-552): `RequestDispatcher.forward(userInput)` — server-side forward, not browser redirect

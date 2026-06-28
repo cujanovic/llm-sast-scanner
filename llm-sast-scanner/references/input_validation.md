@@ -91,6 +91,10 @@ data = ProfileIn(**request.json)                 # rejects malformed input befor
 
 **SAFE (free-text — correctly NOT flagged):** `bio: String`, `comment: String`, `searchTerm: String` accepting arbitrary text.
 
+### Python NaN / numeric type-confusion (parse-coercion bypass)
+
+A numeric field validated *after* coercion can be bypassed with the special float tokens `NaN`, `inf`, `-inf`: tainted request data passed to `float(...)`, `complex(...)`, or `bool(...)` (and `json.loads`, which parses bare `NaN`/`Infinity`) yields a value for which **every comparison is false** (`NaN < limit`, `NaN > limit`, `NaN == NaN` are all `False`). A range/threshold check (`if amount > MAX: reject`) therefore lets `NaN` through, and it can poison aggregates, balances, or auth scoring downstream. Flag tainted input reaching `float()`/`complex()`/`json.loads()` whose result feeds a comparison-based gate without an explicit `math.isnan()`/`math.isfinite()` (or NumPy `np.isnan`) check. **SAFE**: reject non-finite values (`if not math.isfinite(x): abort(400)`) or validate with a schema that disallows `NaN`/`inf` (pydantic `allow_inf_nan=False`).
+
 ## Recon Indicators (Grep)
 
 ```bash

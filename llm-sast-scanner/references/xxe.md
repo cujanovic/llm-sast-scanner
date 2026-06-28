@@ -1,6 +1,6 @@
 ---
 name: xxe
-description: XXE testing for external entity injection, file disclosure, and SSRF via XML parsers
+description: XXE testing for external entity injection, file disclosure, and SSRF via XML parsers; also XSLT injection (user-controlled stylesheet → file read/write, SSRF, and RCE via XSLTProcessor/registerPHPFunctions, .NET msxsl:script, Xalan/Saxon Java bridge, EXSLT)
 ---
 
 # XXE
@@ -615,8 +615,22 @@ Commonly affected languages: Java, Python, PHP, JavaScript, Ruby, C#. Go stdlib 
 
 ## XSLT injection (CWE-074 / XXE-adjacent)
 
-- **Java**: user XSLT → `TransformerFactory.newTransformer`, Saxon `XsltCompiler.compile`, `Templates.newTransformer` without secure processing
-- **Python**: lxml/libxslt transform with user stylesheet
+When the **stylesheet** (not just the input XML) is attacker-controlled and handed to an XSLT processor, the attacker controls a Turing-complete transform language. Impact is processor-dependent and frequently exceeds XXE: arbitrary **file read / SSRF** (`document()`, XSLT 2.0 `unparsed-text()`), arbitrary **file write** (EXSLT `<exsl:document>` / Xalan `redirect:write`), and **RCE** via language-bridge extensions. The SAST signal is a user-influenced stylesheet reaching a transform sink without secure/trusted processing disabled.
+
+**Sinks by language**
+- **Java**: user stylesheet → `TransformerFactory.newTransformer(Source)` / `Templates`, Saxon `XsltCompiler.compile`/`newXsltTransformer`, Xalan `TransformerFactory` — without `FEATURE_SECURE_PROCESSING`. Xalan/Saxon allow Java-bridge RCE: `xmlns:rt="http://xml.apache.org/xalan/java/java.lang.Runtime"` then `rt:exec(rt:getRuntime(),'cmd')`, or Saxon `xmlns:java="java:java.lang.Runtime"`.
+- **PHP**: `XSLTProcessor::importStylesheet($userDoc)` then `transformTo*`. If `$proc->registerPHPFunctions()` is called (no allow-list), the stylesheet runs arbitrary PHP — `php:function('system','id')`, `php:function('file_put_contents','shell.php',...)` → **RCE**. Flag any `registerPHPFunctions()` with a user-controlled stylesheet, especially with no function allow-list argument.
+- **.NET**: `XslCompiledTransform.Load(userStylesheet, XsltSettings.TrustedXslt, resolver)` or `XsltSettings{ EnableScript=true, EnableDocumentFunction=true }` — `<msxsl:script language="C#">` executes arbitrary C# (`Process.Start`) → **RCE**. Safe: `XsltSettings.Default` (script + `document()` disabled) and `XmlResolver=null`.
+- **Python**: `lxml.etree.XSLT(user_stylesheet)` — `document()`/`<exsl:document>` enabled unless `access_control=etree.XSLTAccessControl.DENY_ALL`; libxslt `--shell`/extensions.
+- **Command-line / libs**: `xsltproc userStylesheet.xsl`, `saxon`, Node `xslt-processor`/`node_xslt`/`libxslt` bindings with user stylesheet.
+
+**Recon (Grep)**
+```bash
+rg -ni 'XSLTProcessor|importStylesheet|registerPHPFunctions|XslCompiledTransform|XsltSettings|TrustedXslt|EnableScript|msxsl:script|etree\.XSLT|XSLTAccessControl|newTransformer\(|XsltCompiler|xsltproc' --glob '*.{php,cs,java,py,js,ts,go,rb}'
+rg -ni 'xalan/java|saxon\.sf\.net/java|exsl:document|redirect:write|php:function|unparsed-text|document\(' --glob '*.{xsl,xslt,xml,php,cs,java,py}'
+```
+
+**Safe**: `XMLConstants.FEATURE_SECURE_PROCESSING=true` + empty `ACCESS_EXTERNAL_STYLESHEET` (Java); never call `registerPHPFunctions` / `EnableScript` / `TrustedXslt` on user stylesheets; lxml `XSLTAccessControl.DENY_ALL`; compile only **static, server-controlled** stylesheets and treat user input strictly as transformed *data*, not as the transform.
 
 ## Missing schema validation (CWE-112)
 

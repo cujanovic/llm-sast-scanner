@@ -65,6 +65,7 @@ Grep manifests, Helm templates, and Kustomize patches for structural signals. Tr
 - **Exposed dashboard/kubelet** — Dashboard `Service` type `LoadBalancer`/`NodePort` without auth annotations; kubelet port `10250`/`10255` published broadly.
 - **automountServiceAccountToken** — default or explicit `true` on workloads with no in-cluster API need (increases token theft blast radius).
 - **Missing resource limits** — container omits `resources.limits` for CPU/memory; enables noisy-neighbor and node exhaustion DoS.
+- **Ingress annotation / snippet injection** — ingress-nginx `nginx.ingress.kubernetes.io/configuration-snippet`, `server-snippet`, `stream-snippet`, `auth-url`, `permanent-redirect`, `mirror-*`, and `*-by-lua*` annotation values are interpolated into the generated `nginx.conf`. If users (or low-privileged tenants) can create/edit `Ingress` objects, unsanitized annotation values inject nginx directives / Lua → read any in-cluster Secret (via the controller's ServiceAccount), SSRF, or RCE on the controller. Treat `allow-snippet-annotations: true` (historically the default), `annotation-value-word-blocklist` unset, and multi-tenant `Ingress` create rights as the vulnerable condition. Note: certain newline/`permanent-redirect`/`auth-url` value injections bypass `allow-snippet-annotations: false`. Cross-ref `ssrf.md`, `rce.md`, `nginx_security.md`.
 
 ## Safe Patterns
 

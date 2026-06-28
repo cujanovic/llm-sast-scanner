@@ -1,11 +1,11 @@
 ---
-name: mobile_security
-description: Mobile security detection for Android and iOS — vulnerable code patterns for insecure data storage, intent injection, WebView RCE, insecure IPC, and crypto misuse
+name: android_security
+description: Android application security — insecure data storage (SharedPreferences/SQLite/external storage/Keystore), exported component & intent injection, deep-link/WebView RCE (addJavascriptInterface, file-URL access), insecure IPC (ContentProvider/PendingIntent), crypto misuse (ECB/static IV/weak key/java.util.Random), allowBackup, clipboard/FLAG_SECURE leakage, client-only root detection, cert-trust bypass (CWE-312/89/22/749/927/327/295). Load when an Android project is present (*.kt/*.java + AndroidManifest.xml/build.gradle).
 ---
 
-# Mobile Security (Android / iOS)
+# Android Security
 
-Identify cases where mobile application code stores sensitive data insecurely, exposes components to untrusted callers, passes user-controlled input to dangerous APIs without validation, or applies weak or static cryptographic material.
+Identify cases where Android application code stores sensitive data insecurely, exposes components to untrusted callers, passes user-controlled input to dangerous APIs without validation, or applies weak or static cryptographic material. (iOS/Swift patterns: see `ios_security.md`.)
 
 ## Source -> Sink Pattern
 
@@ -16,13 +16,6 @@ Identify cases where mobile application code stores sensitive data insecurely, e
 - Deep-link parameters extracted from `Intent.ACTION_VIEW` data
 - IPC data received via `Messenger`, `AIDL`, or `BroadcastReceiver.onReceive(context, intent)`
 
-**iOS Sources**
-- URL scheme parameters: `url.host`, `url.path`, `URLComponents(url:).queryItems`
-- Universal Link / deep-link payload in `application(_:open:options:)`
-- Push notification payload: `userInfo["url"]` or arbitrary `userInfo` keys
-- Clipboard: `UIPasteboard.general.string`
-- `WKScriptMessage.body` from JavaScript message handlers
-
 **Android Sinks**
 - `SharedPreferences.Editor.putString(key, sensitiveValue)` with `MODE_WORLD_READABLE`
 - `SQLiteDatabase.execSQL(rawQuery)` / `rawQuery(query, null)` where query contains untrusted data
@@ -32,15 +25,6 @@ Identify cases where mobile application code stores sensitive data insecurely, e
 - `WebView.addJavascriptInterface(object, name)`
 - `startActivity(intentFromIPC)` / `startService(intentFromIPC)`
 - `Cipher.getInstance("AES/ECB/...")` / `Cipher.getInstance("DES/...")`
-
-**iOS Sinks**
-- `UserDefaults.standard.set(sensitiveValue, forKey: key)`
-- `FileManager.default.createFile(atPath: docPath, contents: sensitiveData, attributes: nil)` without `NSFileProtectionComplete`
-- `print(sensitiveValue)` / `NSLog(@"%@", sensitiveValue)`
-- `WKWebView.load(URLRequest(url: unvalidatedURL))`
-- `UIApplication.shared.open(unvalidatedURL)`
-- `CCCrypt` with `kCCAlgorithmDES` or key length < 16
-- `SecItemAdd` / `SecItemUpdate` storing cleartext passwords outside the keychain
 
 ---
 
@@ -617,113 +601,7 @@ rg -n 'domain path=' --glob '**/backup_rules.xml'
 
 ---
 
-## iOS Vulnerable Patterns (Swift / Objective-C)
-
-### Insecure Keychain / Storage
-
-#### UserDefaults Storing Sensitive Data
-
-**VULN**:
-```swift
-UserDefaults.standard.set(password, forKey: "userPassword")
-UserDefaults.standard.set(authToken, forKey: "authToken")
-```
-
-**VULN (Objective-C)**:
-```objc
-[[NSUserDefaults standardUserDefaults] setObject:token forKey:@"auth_token"];
-```
-
-**SAFE** — store in the Keychain:
-```swift
-let query: [String: Any] = [
-    kSecClass as String: kSecClassGenericPassword,
-    kSecAttrAccount as String: "userPassword",
-    kSecValueData as String: password.data(using: .utf8)!
-]
-SecItemAdd(query as CFDictionary, nil)
-```
-
-**TRUE POSITIVE**: `UserDefaults.standard.set(value, forKey: key)` where the value originates from a variable named `password`, `token`, `secret`, `key`, `credential`, `pin`, or `ssn`.
-
-**FALSE POSITIVE**: `UserDefaults.standard.set(true, forKey: "hasCompletedOnboarding")` — non-sensitive flag. Evaluate the semantics of both the key name and the value origin.
-
----
-
-#### File Written Without Data Protection
-
-**VULN**:
-```swift
-let path = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-    .appendingPathComponent("credentials.json")
-try sensitiveData.write(to: path)  // no file protection attributes
-```
-
-**SAFE**:
-```swift
-try sensitiveData.write(to: path, options: .completeFileProtection)
-// equivalent to NSFileProtectionComplete — file inaccessible when device is locked
-```
-
-**TRUE POSITIVE**: `.write(to: path)` or `FileManager.createFile(atPath:contents:attributes:)` with `attributes: nil` (or absent `NSFileProtectionKey`) when the written content is sensitive.
-
-**FALSE POSITIVE**: Writing cached images, non-sensitive JSON configuration, or temporary files to `.cachesDirectory` without file protection is low risk; flag only when the written data contains credentials or PII.
-
----
-
-#### Plist / Core Data Cleartext Storage
-
-**VULN** — secrets written to plist on disk:
-```swift
-let creds = ["authToken": token, "refreshToken": refresh]
-(creds as NSDictionary).write(toFile: plistPath, atomically: true)
-```
-
-**VULN (Objective-C)**:
-```objc
-[@{@"password": password} writeToFile:path atomically:YES];
-```
-
-**VULN** — sensitive fields in Core Data without encryption transform:
-```swift
-entity.setValue(ssn, forKey: "socialSecurityNumber")
-try context.save()
-```
-
-**SAFE** — Keychain for secrets; Core Data with `NSPersistentStoreFileProtectionKey`:
-```swift
-let options = [NSPersistentStoreFileProtectionKey: FileProtectionType.complete]
-```
-
-**TRUE POSITIVE**: `write(toFile:atomically:)` / `write(to:atomically:)` / Core Data `setValue` where the value traces to `token`, `password`, `secret`, `pin`, `ssn`, or `credential` without Keychain or file-protection attributes.
-
-**FALSE POSITIVE**: Plist storing non-sensitive feature flags or cached public configuration.
-
-**Grep (Swift/Objective-C):**
-```bash
-rg -n 'writeToFile:|write\(toFile:|NSUserDefaults|UserDefaults\.standard\.set|setValue\(.*forKey:' --glob '*.{swift,m,mm}'
-rg -n 'kSecClass|SecItemAdd|SecItemCopyMatching' --glob '*.{swift,m,mm}'
-```
-
----
-
-#### Logging Sensitive Data
-
-**VULN**:
-```swift
-print("Auth token: \(authToken)")
-print("Password entered: \(password)")
-NSLog("User credentials: %@ / %@", username, password)
-```
-
-**SAFE**:
-```swift
-print("Login attempt for user ID: \(userId)")  // no credential value emitted
-```
-
-**TRUE POSITIVE**: `print(...)` or `NSLog(...)` interpolating or formatting a variable whose name contains `password`, `token`, `secret`, `key`, `credential`, `pin`, or `ssn`.
-
-**FALSE POSITIVE**: `print("Response status: \(statusCode)")` — no sensitive value present.
+## Clipboard, Screenshot & Integrity (shared with iOS)
 
 **PII log indicators — extend variable-name heuristics with:**
 ```bash
@@ -732,8 +610,6 @@ rg -n 'Log\.[divwe]\s*\(.*(email|phone|ssn|dob|address|iban|pan|cvv|accountNumbe
 # iOS
 rg -n 'print\s*\(|NSLog\s*\(.*(email|phone|ssn|dob|address|iban|pan|cvv|accountNumber)' --glob '*.{swift,m,mm}'
 ```
-
----
 
 ### Clipboard and Screenshot Leakage
 
@@ -791,252 +667,6 @@ getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
 rg -n 'FLAG_SECURE|isSecureTextEntry|secureTextEntry' --glob '*.{java,kt,swift,m,mm,xml}'
 ```
 
----
-
-### Insecure URL Scheme / Deep Link Handling
-
-#### Unvalidated Deep-Link URL Handling
-
-**VULN**:
-```swift
-func application(_ app: UIApplication, open url: URL,
-                 options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
-    let target = url.host  // e.g. myapp://redirect?to=https://evil.com
-    webView.load(URLRequest(url: URL(string: target!)!))
-    return true
-}
-```
-
-**SAFE**:
-```swift
-func application(_ app: UIApplication, open url: URL,
-                 options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool {
-    guard let host = url.host, allowedHosts.contains(host) else { return false }
-    webView.load(URLRequest(url: URL(string: "https://\(host)/safe-path")!))
-    return true
-}
-```
-
-**TRUE POSITIVE**: URL components extracted from `application(_:open:options:)` or `scene(_:openURLContexts:)` flow directly into `WKWebView.load(URLRequest(...))`, `UIApplication.shared.open(...)`, or file operations without scheme/host validation.
-
-**FALSE POSITIVE**: URL host extracted from the deep link and used only as a lookup key against a local dictionary or route map where actual navigation targets are hardcoded.
-
----
-
-#### Deep Link → Internal Action → API Request Path (second-order CSPT)
-
-Beyond WebView/navigation sinks, a deep-link handler that **fetches remote/stored JSON and dispatches an internal action which builds an authenticated API request** is a second-order Client-Side Path Traversal source: if the action concatenates a field from that JSON into the request **URL path**, `#`/`%23` truncation and `../`/`%2e%2e%2f` traversal in the field rewrite the call into an **arbitrary authenticated request to any API endpoint, as the victim**. A common enabler is a **hardcoded third-party service API key** (e.g. a link shortener) extracted from the app, letting the attacker store the JSON blob the app later trusts.
-
-**TRUE POSITIVE**: a value parsed from `application(_:open:options:)` / `ACTION_VIEW` / `onNewIntent` / RN `Linking` (directly, or fetched back from a service keyed by the link) flows into an internal action that interpolates it into an authenticated `URLRequest`/`fetch`/HTTP-client **path** without an allowlist.
-
-**FALSE POSITIVE**: the deep-link/JSON field selects an action by exact match against a fixed route map and the request path is hardcoded per action (the field never concatenates into the URL).
-
-See `client_side_path_traversal.md` (Second-Order CSPT) for the full chain, the query-only impact gadgets, and SAFE patterns.
-
----
-
-#### WKWebView Loading Unvalidated External URL
-
-**VULN**:
-```swift
-let urlString = deepLinkURL.queryParameters["redirect"] ?? ""
-webView.load(URLRequest(url: URL(string: urlString)!))
-```
-
-**SAFE**:
-```swift
-guard let urlString = deepLinkURL.queryParameters["redirect"],
-      urlString.hasPrefix("https://trusted.example.com/") else { return }
-webView.load(URLRequest(url: URL(string: urlString)!))
-```
-
-**TRUE POSITIVE**: `WKWebView.load(URLRequest(url: externalURL))` where `externalURL` is derived from external input (URL scheme, push notification, user text field) without strict prefix or allowlist validation.
-
-**FALSE POSITIVE**: `webView.load(URLRequest(url: URL(string: "https://static.example.com/help")!))` — hardcoded URL, no user control.
-
----
-
-### ATS Bypass (App Transport Security)
-
-#### NSAllowsArbitraryLoads
-
-**VULN** — Info.plist:
-```xml
-<key>NSAppTransportSecurity</key>
-<dict>
-    <key>NSAllowsArbitraryLoads</key>
-    <true/>
-</dict>
-```
-
-**TRUE POSITIVE**: `NSAllowsArbitraryLoads` set to `true` at the top-level ATS dictionary — this disables TLS enforcement globally for all network connections.
-
-**FALSE POSITIVE**: `NSAllowsArbitraryLoads` set to `true` only within `NSExceptionDomains` for a specific domain (e.g., a legacy internal server during a migration window) with `NSTemporaryExceptionAllowsInsecureHTTPLoads` is lower severity than the global flag; still report as a finding but at MEDIUM rather than HIGH.
-
----
-
-#### NSExceptionDomains Insecure Exception
-
-**VULN**:
-```xml
-<key>NSAppTransportSecurity</key>
-<dict>
-    <key>NSExceptionDomains</key>
-    <dict>
-        <key>api.example.com</key>
-        <dict>
-            <key>NSTemporaryExceptionAllowsInsecureHTTPLoads</key>
-            <true/>
-            <key>NSIncludesSubdomains</key>
-            <true/>
-        </dict>
-    </dict>
-</dict>
-```
-
-**TRUE POSITIVE**: `NSTemporaryExceptionAllowsInsecureHTTPLoads: true` for a domain used as a production API endpoint, especially combined with `NSIncludesSubdomains: true`.
-
-**FALSE POSITIVE**: Exceptions restricted to `localhost` or `127.0.0.1` for local development tooling — valid test configuration; do not flag in CI/CD SAST unless the build target is a release variant.
-
----
-
-### Insecure Crypto (iOS)
-
-#### DES or Small Key Size
-
-**VULN**:
-```swift
-let status = CCCrypt(
-    CCOperation(kCCEncrypt),
-    CCAlgorithm(kCCAlgorithmDES),  // 56-bit key — broken
-    CCOptions(kCCOptionPKCS7Padding),
-    keyBytes, kCCKeySizeDES, iv,
-    plaintext, plaintextLength,
-    ciphertext, ciphertextLength, &moved)
-```
-
-**SAFE**:
-```swift
-CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding,
-        keyBytes, kCCKeySizeAES256, iv, ...)
-```
-
-**TRUE POSITIVE**: `kCCAlgorithmDES`, `kCCAlgorithm3DES`, or `kCCAlgorithmRC4` in any `CCCrypt` call. Also flag `kCCAlgorithmAES` with key size constant `kCCKeySizeAES128` only when the key material is derived from a weak source (see below).
-
-**FALSE POSITIVE**: `kCCAlgorithmAES` with `kCCKeySizeAES256` and a key derived from `SecRandomCopyBytes` — acceptable configuration.
-
----
-
-#### Hardcoded Encryption Key
-
-**VULN**:
-```swift
-let key = "MySecretKey12345"
-let keyData = key.data(using: .utf8)!
-CCCrypt(kCCEncrypt, kCCAlgorithmAES, kCCOptionPKCS7Padding,
-        (keyData as NSData).bytes, keyData.count, iv, ...)
-```
-
-**VULN (Objective-C)**:
-```objc
-const char *key = "HardcodedKeyValue";
-CCCrypt(kCCEncrypt, kCCAlgorithmAES128, kCCOptionPKCS7Padding,
-        key, strlen(key), iv, ...);
-```
-
-**TRUE POSITIVE**: String literal or byte array literal used directly as the key argument to `CCCrypt`, `SecKeyCreateWithData`, or any third-party symmetric encryption API, when the literal has length >= 8 and mixed entropy suggesting it is a real key rather than a placeholder.
-
-**FALSE POSITIVE**: Test-only key literals in files under `*Tests*`, `*Spec*`, or `*Mock*` directories — report as INFORMATIONAL in test code, not HIGH in production code.
-
----
-
-#### arc4random for Key / Token Generation
-
-**VULN**:
-```swift
-let token = String(arc4random_uniform(1_000_000))
-UserDefaults.standard.set(token, forKey: "sessionToken")
-```
-
-**VULN (Objective-C)**:
-```objc
-NSString *otp = [NSString stringWithFormat:@"%d", arc4random_uniform(999999)];
-```
-
-**SAFE**:
-```swift
-var tokenBytes = [UInt8](repeating: 0, count: 32)
-let result = SecRandomCopyBytes(kSecRandomDefault, tokenBytes.count, &tokenBytes)
-guard result == errSecSuccess else { fatalError("SecRandomCopyBytes failed") }
-let token = Data(tokenBytes).base64EncodedString()
-```
-
-**TRUE POSITIVE**: `arc4random`, `arc4random_uniform`, or `rand()` / `random()` used to generate values assigned to variables named `token`, `otp`, `nonce`, `sessionId`, `key`, `secret`, or `password`.
-
-**FALSE POSITIVE**: `arc4random_uniform` used to shuffle UI elements, randomize quiz question order, or produce non-security-critical random numbers.
-
----
-
-### Weak Certificate Validation
-
-#### Accepting All TLS Certificates in URLSession Delegate
-
-**VULN**:
-```swift
-func urlSession(_ session: URLSession,
-                didReceive challenge: URLAuthenticationChallenge,
-                completionHandler: @escaping (URLSession.AuthChallengeDisposition,
-                                              URLCredential?) -> Void) {
-    // Accepts ANY certificate — including expired, self-signed, or attacker-controlled
-    let serverTrust = challenge.protectionSpace.serverTrust!
-    completionHandler(.useCredential, URLCredential(trust: serverTrust))
-}
-```
-
-**SAFE** — evaluate trust before accepting:
-```swift
-func urlSession(_ session: URLSession,
-                didReceive challenge: URLAuthenticationChallenge,
-                completionHandler: @escaping (URLSession.AuthChallengeDisposition,
-                                              URLCredential?) -> Void) {
-    guard challenge.protectionSpace.authenticationMethod ==
-              NSURLAuthenticationMethodServerTrust,
-          let serverTrust = challenge.protectionSpace.serverTrust else {
-        completionHandler(.cancelAuthenticationChallenge, nil)
-        return
-    }
-    var error: CFError?
-    if SecTrustEvaluateWithError(serverTrust, &error) {
-        completionHandler(.useCredential, URLCredential(trust: serverTrust))
-    } else {
-        completionHandler(.cancelAuthenticationChallenge, nil)
-    }
-}
-```
-
-**TRUE POSITIVE**: `completionHandler(.useCredential, URLCredential(trust: serverTrust))` called without a preceding `SecTrustEvaluateWithError` check that gates on a `true` return value.
-
-**FALSE POSITIVE**: Custom certificate pinning implementations that verify the server's leaf or intermediate certificate against a bundled public key or certificate hash before calling `.useCredential` — not a vulnerability even though `SecTrustEvaluateWithError` may not be used.
-
----
-
-#### Objective-C NSURLConnection / NSURLSession Trust Bypass
-
-**VULN**:
-```objc
-- (void)connection:(NSURLConnection *)connection
-    willSendRequestForAuthenticationChallenge:(NSURLAuthenticationChallenge *)challenge {
-    [challenge.sender useCredential:
-        [NSURLCredential credentialForTrust:challenge.protectionSpace.serverTrust]
-             forAuthenticationChallenge:challenge];
-}
-```
-
-**TRUE POSITIVE**: `useCredential:forAuthenticationChallenge:` called with a trust credential for a server trust challenge without validating the trust object first.
-
-**FALSE POSITIVE**: Implementation that calls `SecTrustEvaluate` (or `SecTrustEvaluateWithError`) and only proceeds with `useCredential` when the return value indicates success.
-
-**Cross-ref:** Certificate pinning absence, custom trust managers, and TLS protocol downgrade patterns are covered in `certificate_validation.md` and `cleartext_transmission.md`. Flag missing pins as MEDIUM (absence-based); flag trust bypass as CRITICAL.
 
 ---
 
@@ -1075,6 +705,7 @@ if (!server.verifyIntegrityToken(verdict.token)) abortSensitiveFlow()
 rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrity|AppAttest|DeviceCheck' --glob '*.{java,kt,swift,m,mm}'
 ```
 
+
 ---
 
 ## Severity Reference
@@ -1099,17 +730,7 @@ rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrit
 | Static / zero IV | Android | CWE-329 | HIGH |
 | AES key size < 128 bits | Android | CWE-326 | HIGH |
 | java.util.Random for security tokens | Android | CWE-338 | HIGH |
-| UserDefaults storing sensitive data | iOS | CWE-312 | HIGH |
-| File written without NSFileProtectionComplete | iOS | CWE-312 | MEDIUM |
-| Unvalidated deep-link URL to WKWebView | iOS | CWE-939 | HIGH |
-| NSAllowsArbitraryLoads: true (global) | iOS | CWE-319 | HIGH |
-| NSTemporaryExceptionAllowsInsecureHTTPLoads per domain | iOS | CWE-319 | MEDIUM |
-| kCCAlgorithmDES / 3DES usage | iOS | CWE-327 | HIGH |
-| Hardcoded encryption key literal | iOS | CWE-798 | HIGH |
-| arc4random for security token generation | iOS | CWE-338 | HIGH |
-| TLS certificate accepted without SecTrustEvaluateWithError | iOS | CWE-295 | CRITICAL |
 | SQLite storing credentials/tokens in cleartext | Android | CWE-312 | HIGH |
-| Secrets in plist / unprotected Core Data | iOS | CWE-312 | HIGH |
 | Symmetric key outside Android Keystore | Android | CWE-522 | HIGH |
 | allowBackup enabled with local secrets | Android | CWE-530 | MEDIUM |
 | Deep link parameter to navigation sink | Android / iOS | CWE-939 | HIGH |
@@ -1121,7 +742,6 @@ rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrit
 ---
 
 ## Sources, Sinks & Sanitizers
-
 ### CWE-079 — WebView XSS / script injection
 
 **Detection patterns (Android):**
@@ -1230,7 +850,6 @@ Commonly tracked classes: SQL injection (CWE-089), predicate injection (CWE-943)
 iOS cookie storage and ATS plist keys (`NSAllowsArbitraryLoads`) remain heuristic-only for this scanner.
 
 ## Manifest & WebView Config
-
 **Android manifest (XML models):**
 - `android:exported` implicit when `<intent-filter>` present
 - `android:allowBackup`, `android:debuggable` on `<application>`
@@ -1244,7 +863,6 @@ iOS cookie storage and ATS plist keys (`NSAllowsArbitraryLoads`) remain heuristi
 - `baseURL` parameter on HTML load APIs — must not be `nil` or user-controlled
 
 ## Common False Alarms
-
 - **`setJavaScriptEnabled(true)`** flags every call — not limited to user-controlled URLs; pair with unsafe WebView fetch taint for exploitable XSS paths.
 - **`addJavascriptInterface`** is syntactic — any bridge registration alerts regardless of loaded origin; downgrade when WebView loads only bundled `file:///android_asset/` assets.
 - **Missing certificate pinning** is absence-based — apps using system trust store without pins alert on all network calls; not equivalent to MITM-vulnerable custom trust managers.
@@ -1254,6 +872,7 @@ iOS cookie storage and ATS plist keys (`NSAllowsArbitraryLoads`) remain heuristi
 - **Implicit PendingIntents** sanitizes explicit Intents — `FLAG_IMMUTABLE` alone is insufficient if the base Intent is implicit.
 - **Fragment injection in PreferenceActivity** only covers exported activities whose `isValidFragment` unconditionally returns `true`.
 - **Swift unsafe WebView fetch** requires taint flow — hardcoded safe `baseURL` with static HTML is not flagged.
+
 
 ---
 
@@ -1275,20 +894,6 @@ rg -n 'WebView|loadUrl|addJavascriptInterface|setJavaScriptEnabled|setAllowFileA
 rg -n 'Log\.[divwe]\s*\(|ClipData|setPrimaryClip|allowBackup' --glob '*.{java,kt,xml}'
 # Integrity
 rg -n 'RootBeer|isRooted|PlayIntegrity|FLAG_SECURE' --glob '*.{java,kt}'
-```
-
-**iOS (Swift/Objective-C/plist):**
-```bash
-# Storage
-rg -n 'UserDefaults|NSUserDefaults|writeToFile|SecItemAdd|kSecClass|NSPersistentStore' --glob '*.{swift,m,mm}'
-# Deep links / WebView
-rg -n 'open url:|openURLContexts|WKWebView|loadHTMLString|load\s*\(\s*URLRequest' --glob '*.{swift,m,mm}'
-# Transport / ATS
-rg -n 'NSAllowsArbitraryLoads|NSExceptionDomains|didReceive.*challenge|SecTrustEvaluate' --glob '*.{swift,m,mm,plist}'
-# Logging / clipboard / capture
-rg -n 'print\s*\(|NSLog\s*\(|UIPasteboard|isSecureTextEntry|secureTextEntry' --glob '*.{swift,m,mm}'
-# Integrity
-rg -n 'jailbreak|Cydia|frida|AppAttest|DeviceCheck|fileExists.*MobileSubstrate' --glob '*.{swift,m,mm}'
 ```
 
 **Cross-lens refs:**

@@ -46,6 +46,10 @@ Flag where an external call, value transfer, or privileged write occurs without 
 | Uninitialized storage pointer / data location | local `struct`/array declared without explicit `memory`/`storage` (esp. `pragma <0.5.0`); data-location mismatch aliasing low storage slots |
 | Incorrect visibility / mutability | state-changing fn left `public`/unspecified where `external`/`internal` intended; missing `view`/`pure`; unnecessary `payable` |
 | Missing access control | `external`/`public` state-changing fns with no `onlyOwner`/role modifier |
+| Read-only reentrancy | external consumers reading `view` getters (`getRate(`, `getPoolTokens(`, `get_virtual_price(`, LP `getReserves(`) for valuation without a reentrancy lock |
+| Transfer-hook reentrancy | `tokensReceived`/`tokensToSend` (ERC-777), `onERC721Received`/`onERC1155Received`, `onTokenTransfer`/`transferAndCall` (ERC-677/1363) reachable before state settles |
+| Hash collision | `abi.encodePacked(` with ≥2 dynamic (`string`/`bytes`/array) args feeding `keccak256`/a signature or commitment check |
+| Signature malleability | raw `ecrecover(` without canonical-`s`/`v` checks or `address(0)` guard; signature bytes used as a mapping/replay key |
 
 **Skip (lower risk)** — `view`/`pure` functions with no state change or value flow; constant-target `delegatecall` to a trusted library; arithmetic under Solidity ≥0.8 default checked math (unless inside `unchecked {}`).
 
@@ -53,7 +57,9 @@ Flag where an external call, value transfer, or privileged write occurs without 
 
 ### Reentrancy
 - **VULN**: external call before state update — `(_bool,) = msg.sender.call{value: amount}(""); balances[msg.sender] -= amount;`
-- **SAFE**: checks-effects-interactions — update state first, then call; or a `nonReentrant` guard; or pull-payment pattern.
+- **VULN (read-only / view reentrancy)**: a `view` function (e.g. an LP price getter — `getRate()`, `getPoolTokens()`, Curve `get_virtual_price()`) is called by a consumer *during* a reentrant callback, while the pool's internal accounting is mid-update — it returns a stale/inconsistent price even though no state is written in the view. The vulnerable shape is a protocol that trusts another contract's `view` getter for valuation without that getter being reentrancy-protected. **SAFE**: pools expose a reentrancy-locked read (or revert during reentrancy); consumers check the lock / use a manipulation-resistant source.
+- **VULN (transfer-hook reentrancy)**: callbacks invoked *before* state settles — ERC-777 `tokensReceived`/`tokensToSend`, ERC-721/1155 `onERC721Received`/`onERC1155Received`, ERC-677/1363 `onTokenTransfer`/`transferAndCall` — let a malicious recipient re-enter mint/transfer/accounting.
+- **SAFE**: checks-effects-interactions — update state first, then call; or a `nonReentrant` guard (covering view getters too); or pull-payment pattern.
 
 ### Access control
 - **VULN**: `function setOwner(address o) external { owner = o; }` — no modifier; anyone takes ownership.
@@ -94,6 +100,14 @@ Flag where an external call, value transfer, or privileged write occurs without 
 ### Token-standard pitfalls
 - **VULN**: ERC-20 `approve` race; missing return-value check on non-standard tokens; ERC-721/1155 `safeTransfer` reentrancy via `onERC*Received`; missing events.
 - **SAFE**: `SafeERC20` wrappers, increase/decrease-allowance, reentrancy-aware hooks.
+
+### Hash collision via `abi.encodePacked`
+- **VULN**: `keccak256(abi.encodePacked(a, b))` where **two or more** arguments are dynamic types (`string`/`bytes`/dynamic arrays) — packed encoding is ambiguous, so `("ab","c")` and `("a","bc")` hash identically. When the hash gates auth, signatures, or a Merkle/commitment check, an attacker crafts a colliding input to bypass it.
+- **SAFE**: use `abi.encode` (each field length-prefixed) for hashing multiple dynamic values, or place fixed-width fields between them / hash each separately.
+
+### Signature malleability & signature-as-key
+- **VULN**: verifying with low-level `ecrecover` without rejecting non-canonical `s` (high-`s` half-order) or `v ∉ {27,28}` → a second valid signature exists for the same message; replay/double-spend when a raw signature (or its hash) is used as a uniqueness key / mapping key (`usedSig[sig] = true`). Also treat `ecrecover` returning `address(0)` (invalid sig) as a failure, not a match.
+- **SAFE**: OpenZeppelin `ECDSA.recover`/`tryRecover` (enforces canonical `s`, rejects `address(0)`); key replay protection on the **message digest + nonce**, never on the malleable signature bytes.
 
 ### Self-destruct / privileged teardown
 - **VULN**: reachable `selfdestruct(attacker)`; `renounceOwnership()` leaving no admin; force-fed ether assumptions.

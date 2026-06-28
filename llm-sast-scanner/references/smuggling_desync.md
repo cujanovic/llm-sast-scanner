@@ -1,6 +1,6 @@
 ---
 name: smuggling_desync
-description: Detect HTTP Request Smuggling and desync vulnerabilities arising from inconsistent Content-Length vs Transfer-Encoding header handling between frontend proxy and backend server.
+description: Detect HTTP Request Smuggling and desync vulnerabilities arising from inconsistent Content-Length vs Transfer-Encoding handling between frontend proxy and backend server, custom HTTP parser/proxy implementation bugs (bare CR/LF delimiters, whitespace before colon, chunk-extension mishandling, obs-fold, dual framing headers), and client-side / pause-based desync.
 ---
 
 # HTTP Request Smuggling / Desync
@@ -110,10 +110,56 @@ curl -v --http2-prior-knowledge http://TARGET/ \
 # If the upgrade succeeds end-to-end, retry a front-end-blocked path (e.g. /admin) over the tunneled h2c stream.
 ```
 
+**h2c — static (config/code) signal**, not just the runtime probe: flag an edge that **forwards the client upgrade** to the backend plus a backend that **speaks h2c**. The edge bug is forwarding `Upgrade`/`Connection`/`HTTP2-Settings` instead of consuming/stripping them; the backend bug is enabling cleartext HTTP/2.
+```bash
+# Edge forwards client Upgrade/Connection toward upstream (WebSocket-style config also enables h2c)
+rg -n 'proxy_set_header\s+Upgrade\s+\$http_upgrade|proxy_set_header\s+Connection' --glob '*.{conf,nginx}'
+rg -n 'set\s+bereq\.http\.(upgrade|connection)|header_up\s+(Upgrade|Connection)' --glob '*.{vcl}' --glob 'Caddyfile*'
+# Backend enables cleartext HTTP/2
+rg -n 'h2c\.NewHandler|AllowHTTP2WithoutTLS|h2c\.NewClientConn|ConfigureServer.*H2C' --glob '*.go'
+# Mitigation to expect (flag absence): edge clears the upgrade toward the backend
+rg -n 'del-header\s+Upgrade|proxy_set_header\s+Upgrade\s+""|more_clear_input_headers.*Upgrade' --glob '*.{cfg,conf,nginx,vcl}'
+```
+
+### HTTP/2 → HTTP/1.1 downgrade translation (when the repo translates h2→h1)
+
+H2.CL/H2.TE (probe above) are the *deployment* symptom; the *code* bug is a translator that copies HTTP/2 pseudo-headers and header fields into an HTTP/1.1 request line/headers **without RFC 7540 §8.1.2 / §10.3 validation**. Each unvalidated character becomes request-line or header injection on the h1 hop:
+- **CR/LF (or NUL) in a header value or pseudo-header** → injects a second header/request (H2.X). Reject `\r`, `\n`, `\0` in every copied value.
+- **`:method`, `:path`, `:authority`, `:scheme` written verbatim into the request line** → a space/CRLF in `:method` (Apache class) or control chars in `:path` smuggle a request line. Reject whitespace/controls; validate `:scheme`; reconcile `:authority` vs a copied `Host`.
+- **Duplicate pseudo-headers / pseudo-headers after regular headers** → must 400, not last-wins.
+- **Forwarded `Content-Length`/`Transfer-Encoding` not reconciled with the DATA-frame length** on downgrade (length is lost across the boundary) → CL/TE smuggling. Derive length from the stream end, don't trust a client-sent CL.
+- **RFC 8441 extended `CONNECT` / `:protocol`** copied through without hardening → tunnel/smuggling.
+Recon: `rg -n ':method|:path|:authority|:scheme|pseudo.?header|downgrade|http2.*http1' --glob '*.{go,rs,java,py,c,cpp}'` then confirm each copied value is rejected for `\r\n\0`, whitespace, and duplicates before the h1 request is serialized.
+
+Beyond opt-in lenient flags, the smuggling bug is often **in the request-parsing code itself**. When the codebase implements an HTTP/1.1 parser, a custom proxy, a WAF, or hand-rolled header/chunked handling, audit for these RFC-7230 deviations — each creates a parse discrepancy with the *other* hop:
+
+- **Bare CR / bare LF as a line delimiter.** Header/request lines MUST be delimited by full `CRLF`. Code that splits on `\n` alone (or treats a lone `\r` as end-of-line) desyncs against a hop that requires `CRLF`. Recon: `split('\n')` / `indexOf('\n')` / `readLine` over raw header bytes without rejecting a `\r` not followed by `\n`.
+- **Whitespace around the header name / before the colon.** Accepting `Content-Length : 5` (SP/HTAB before `:`) or trimming the name lets one hop see the header and another ignore it. RFC forbids whitespace between field-name and `:` (must reject with 400). Recon: header parsers that `trim()` the name or scan for `:` ignoring leading WS.
+- **Chunk-extension mishandling.** A chunked decoder that skips bytes until `\r` but tolerates an embedded `\n` (or any byte outside `0x09,0x21-0x7E,0x80-0xFF`) in the `chunk-ext` region lets `\n`-based smuggling through. Recon: chunked decoders that "ignore until CR" without validating chunk-ext bytes or requiring `CRLF`.
+- **Dual / obfuscated framing headers not rejected.** Forwarding *or* accepting both `Content-Length` and `Transfer-Encoding`, duplicate `Content-Length`, `Transfer-Encoding: chunked` plus a junk second TE, or TE values matched case-insensitively/substring (`xchunked`). A compliant server returns 400; lenient code picks one and forwards the other.
+- **Obsolete line folding (`obs-fold`).** Honoring leading-space continuation lines in headers (multi-line header parsing) reintroduces classic smuggling; modern parsers must reject.
+- **Trailing-header injection.** Promoting chunked trailer fields into the main header set lets a smuggled `Transfer-Encoding`/`Host` ride in trailers.
+
+These are real source-code findings (Medium-High), not just deployment notes — flag the parsing function and name the specific deviation.
+
+### Client-Side Desync (CSD) and pause-based desync
+
+A distinct, modern variant that needs **no second server** — the discrepancy is between the browser and a single back-end:
+
+- **CSD / CL.0 / H2.0**: the server mishandles `Content-Length` on certain requests — e.g. a route/handler that returns a response *without consuming the request body*, or treats some POSTs as bodyless (**CL.0**: the server effectively reads the request as `Content-Length: 0`; **H2.0**: the HTTP/2 equivalent where the backend ignores the body on an "unexpected" POST). The leftover body is parsed as the start of the next request on the reused connection. Because the victim's own browser can be scripted (via `fetch`/form) to send the poisoning request, this escalates to credential capture / account takeover with no proxy involved. Recon: handlers that early-`return`/redirect on POST without reading the body; endpoints that answer **before draining the body** on routes that don't expect one — static-file handlers, redirects, `404`/`405`/error responses, `GET`-only handlers that still receive a POST. Static signal: `rg -n 'static|sendFile|redirect|301|302|404|405' --glob '*.{js,ts,go,py,java,rb,php}'` paired with POST handlers lacking a body read/drain.
+- **Pause-based desync**: the back-end forwards a partially-received request after a read pause, allowing the tail to be reinterpreted. Server/proxy-internals issue; flag custom code that streams un-terminated requests upstream, and configs that emit early responses on a kept-alive socket (Varnish `return(synth(...))`, Apache `Redirect`/`RewriteRule [R]` before body read).
+
+### Response-queue desync / response smuggling
+
+Distinct from request smuggling: instead of prefixing the *next request*, the attacker desynchronizes the **response queue** so one client receives another client's response (cross-user response leakage), or a smuggled body is concatenated onto a later response. Two statically-detectable gadgets feed this class:
+- **`HEAD` response with a body.** A proxy/handler that emits an entity body (or doesn't suppress `Content-Length`/body) on a `HEAD` lets the declared length concatenate into the next response on the connection. Recon: code paths that write a body without checking `method == HEAD`; nginx/OpenResty body emission without `ngx_http_discard_request_body`; `rg -n 'HEAD' --glob '*.{c,go,js,ts,py,java,lua,conf}'` near response-body writes.
+- **`TRACE` enabled.** `TRACE` reflects the request into a response body, a ready-made gadget for response splitting/smuggling chains. Flag `TraceEnable on` (Apache, default-on before 2.4) and any framework route handling `TRACE`. Recon: `rg -n 'TraceEnable|\bTRACE\b|AllowMethods.*TRACE' --glob '*.{conf,xml,nginx}'`. SAFE: `TraceEnable off`; never emit a body on `HEAD`; cross-ref `http_response_splitting.md` (request-line/path CRLF injection is the precursor that makes this critical).
+
 ## Common False Alarms
 
-- Single-layer architecture: direct client-to-application with no proxy in between
+- Single-layer architecture: direct client-to-application with no proxy in between *and* no custom request parser in the repo.
 - Modern, patched server stack configured to reject ambiguous requests.
+- Using a vetted, spec-compliant parser library at default settings (the bugs above only apply to hand-rolled or lenient parsing).
 
 ---
 

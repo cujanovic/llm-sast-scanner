@@ -21,6 +21,7 @@ When user input is used as the format string (not merely as a data argument) in 
 - **C#**: `string.Format`, `String.Format`, `CompositeFormat.Parse`, and modeled format methods
 - **Ruby**: `Kernel.printf`/`sprintf`, `IO#printf`, `String#%` receiver
 - **Swift**: modeled uncontrolled format-string sinks
+- **Python**: attacker-controlled template passed to `str.format`, `str.format_map`, `string.Formatter().format`/`vformat`, or `"...%s..." % user` where the *template* (not the data) is tainted. Unlike printf-style bugs, Python's `{}` field-access syntax lets the template **traverse object attributes and globals** — see the Python section below.
 
 ## Vulnerable Conditions
 
@@ -42,7 +43,7 @@ When user input is used as the format string (not merely as a data argument) in 
 
 ## Sanitizers / Barriers
 
-Commonly affected languages: Java, C/C++, JavaScript, C#, Ruby, Swift. Python and Go lack dedicated CWE-134 security detection (Python has formatting *correctness* checks only, e.g. wrong argument counts).
+Commonly affected languages: Java, C/C++, JavaScript, C#, Ruby, Swift, **Python**. Go lacks a dedicated CWE-134 security class (its `fmt` verbs do not expose attribute/global traversal). Python is **not** safe here despite lacking printf memory semantics: `str.format`/`format_map` on an attacker-controlled template is a real information-disclosure (sometimes secret-leak / RCE-adjacent) sink because the `{}` mini-language supports attribute and index access (`{0.__class__}`, `{x.__init__.__globals__[...]}`). Do not dismiss Python format calls as correctness-only.
 
 **Java (`ExternallyControlledFormatString`)**
 - **Barrier**: values typed as `NumericType` or `BooleanType` (not format-string carriers)
@@ -88,6 +89,37 @@ Commonly affected languages: Java, C/C++, JavaScript, C#, Ruby, Swift. Python an
 **VULN**: `printf("Unauthorised access attempt by #{params[:user]}: %s", request.ip)`
 **SAFE**: `printf("Unauthorised access attempt by %s: %s", params[:user], request.ip)`
 
+### Python (attribute/global traversal via `str.format`)
+
+Python's `{}` format mini-language allows attribute access (`{0.attr}`), index access (`{0[key]}`), and chaining. If an attacker controls the **template** passed to `.format()`/`.format_map()`/`Formatter().vformat()`, they can walk from any passed object to module globals and read secrets — no printf-style memory bug required.
+
+**VULN (full template control):**
+```python
+# user_template comes from request; objects are passed as data
+template = request.args["greeting"]          # e.g. "{user.__class__.__init__.__globals__[CONFIG][SECRET_KEY]}"
+return template.format(user=current_user)    # leaks app secret_key / DB DSN / config
+```
+
+**VULN (partial template control — real-world pattern):** even when only *part* of the literal is attacker-influenced, the whole string is still parsed as a template:
+```python
+# an id/name the attacker sets becomes part of the path, then the whole literal is .format()'d
+url = ("http://{host}:{port}/log/" + log_relative_path).format(host=h, port=p)
+# attacker sets the run_id inside log_relative_path to "{config.__class__...}" → field access fires
+```
+This is the mechanism behind externally-controlled-format-string findings in Python web apps: attacker-set identifiers flow into a literal that is later `.format()`'d with live objects, exposing `__globals__`, config dicts, `secret_key`, and connection strings (CWE-134 / information disclosure, can rise to **High/Critical** when secrets that enable auth forgery or DB access leak).
+
+**SAFE:**
+```python
+# 1) Only ever .format() a TRUSTED literal template; pass user data as values:
+"Hello {}".format(user_name)
+# 2) For user-supplied templates, use string.Template ($-substitution) which cannot do attribute/index access:
+from string import Template
+Template(user_template).safe_substitute(name=user_name)
+# 3) Never build the template string from any request-controlled fragment before calling .format()/.format_map().
+```
+
+**Barriers:** template is a string literal/constant; user input only appears in the *arguments* to `.format(...)`; f-strings (`f"{x}"`) are evaluated at definition with local scope and are **not** a remote-template sink (but never `eval`/`.format()` a runtime f-string-like user string). `.format_map(user_dict)` with a trusted literal template is safe; the risk is a tainted *template*.
+
 ## Common False Alarms
 
 - User input passed as `%s` data argument with a string-literal format (not the format parameter)
@@ -98,6 +130,7 @@ Commonly affected languages: Java, C/C++, JavaScript, C#, Ruby, Swift. Python an
 ## Business Risk
 
 - **C/C++**: memory corruption, arbitrary read/write, potential RCE (critical severity)
+- **Python**: `str.format`/`format_map` on a tainted template traverses `__globals__`/config → leaks `secret_key`, DB connection strings, tokens (High/Critical when the leaked secret enables auth forgery or DB access)
 - **Java/C#/JS**: `FormatException`/crash → DoS; positional specifiers (`%1$tm`) leak unintended object fields
 - **Logging integrity**: `%d`/`%s` injection in usernames corrupts audit trails ( overlaps with CWE-117)
 - **Compliance**: unintended PII exposure via format positional access in error messages

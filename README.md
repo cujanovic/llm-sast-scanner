@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **96 vulnerability classes** — covering web, API, authentication, cloud/IaC, nginx config, mobile, smart-contract, BaaS (Supabase/Firebase) authorization, and the OWASP LLM Top 10 for AI/agent apps.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **101 vulnerability classes** — covering web, API, authentication, cloud/IaC, nginx config, mobile, smart-contract, BaaS (Supabase/Firebase) authorization, and the OWASP LLM Top 10 for AI/agent apps.
 
 Instead of pattern-matching with hardcoded rules, it gives an agent a disciplined, evidence-based methodology: identify untrusted input, trace it through the code, and confirm whether it reaches a dangerous sink without a sanitizer in between — then verify every candidate through an adversarial "Judge" stage to cut false positives.
 
@@ -16,7 +16,7 @@ Traditional SAST tools rely on fixed rule sets and tend to drown teams in false 
 
 | Component | What it is |
 |-----------|-----------|
-| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 96 vulnerability reference knowledge bases. |
+| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 101 vulnerability reference knowledge bases. |
 | **`llm-sast-scanner-full-scan-loop/`** | A wrapper skill for an exhaustive, convergence-driven, line-by-line audit of an entire repository, guaranteeing 100% line coverage. |
 | **`AGENTS.md` / `CLAUDE.md`** | The repo-level orchestrator playbook that drives parallel multi-agent scanning and report consolidation. `CLAUDE.md` is a symlink to `AGENTS.md`. |
 | **`.claude/skills/`, `.agents/skills/`** | Per-runtime skill discovery directories — both symlink to the single canonical skill source, so the two runtimes can never drift apart. |
@@ -69,13 +69,13 @@ Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated
 
 ## Vulnerability coverage
 
-96 reference knowledge bases, organized into categories:
+101 reference knowledge bases, organized into categories:
 
 | Category | Focus |
 |----------|-------|
-| **Injection** | SQLi, XSS, RCE/command injection, SSTI, NoSQL, GraphQL, XXE, LDAP, XPath, prototype pollution, prompt injection, and more |
+| **Injection** | SQLi, XSS, RCE/command injection, environment variable injection, SSTI, SSI/ESI injection, NoSQL, GraphQL, XXE, XSLT, LDAP, XPath, prototype pollution, prompt injection, and more |
 | **Access Control & Auth** | IDOR/BOLA, privilege escalation & missing auth, JWT/OAuth/OIDC/SAML/MFA, default credentials, hardcoded secrets (CWE-798, secret literals at rest / client-exposure model), brute force, verification-code abuse, business logic, mass assignment, session fixation & puzzling, reverse-proxy access bypass, email-parser differential, BaaS client-side authorization (Supabase RLS / Firebase Security Rules) |
-| **Data Exposure & Crypto** | weak crypto/hashing, information disclosure, insecure cookies, TLS/certificate validation, cleartext transmission, shared-client cache/dedup cross-user leak, trust-boundary, privacy/PII handling |
+| **Data Exposure & Crypto** | weak crypto/hashing, information disclosure, insecure cookies, TLS/certificate validation, cleartext transmission, shared-client cache/dedup cross-user leak, trust-boundary, client-IP/network-origin trust (XFF spoofing), privacy/PII handling |
 | **Server-Side Attacks** | SSRF, path traversal/LFI/RFI, client-side path traversal, prototype pollution (client & server), insecure deserialization, file upload, JNDI, race conditions, temp-file & permission issues |
 | **Protocol & Infrastructure** | CSRF, open redirect, reverse tabnabbing, request smuggling, response splitting, host-header poisoning, correlation/tracing header injection, CORS, WebSockets, postMessage, XSSI/JSONP, clickjacking, CSP, XS-Leaks, cache deception, DoS/ReDoS, GraphQL DoS |
 | **Cloud & IaC** | Terraform/CloudFormation/ARM/Bicep/Pulumi, subdomain takeover (dangling-DNS candidate flagging), Kubernetes/cloud orchestration, CI/CD & container/Docker security, nginx/web-server configuration |
@@ -83,7 +83,7 @@ Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated
 | **AI / LLM Application Security** | OWASP LLM Top 10 — prompt injection, insecure output handling, excessive agency, system-prompt leakage, RAG/vector weaknesses, ML supply-chain poisoning, agent config poisoning |
 | **Output & Hardening** | output encoding, format strings, ASP.NET misconfiguration, embedded malicious code, improper input validation (semantic-type mismatch) |
 | **Supply Chain** | dependency confusion, unpinned/unverified dependencies, malicious lifecycle scripts |
-| **Language / Platform** | PHP, mobile (Android/iOS), C/C++ memory safety, Solidity smart contracts, batch/ETL/mainframe pipelines |
+| **Language / Platform** | PHP, Android security, iOS security, Electron/desktop app security, C/C++ memory safety, Solidity smart contracts, batch/ETL/mainframe pipelines |
 
 The full per-class list (with files and CWE mappings) lives in `llm-sast-scanner/references/`.
 
@@ -157,7 +157,7 @@ llm-sast-scanner/                      ← repo root
 ├── CLAUDE.md                          # → symlink to AGENTS.md
 ├── llm-sast-scanner/                  # core skill (canonical source)
 │   ├── SKILL.md                       # 7-step workflow + Judge + adversarial + project-memory protocol
-│   └── references/                    # 96 vulnerability knowledge bases
+│   └── references/                    # 101 vulnerability knowledge bases
 ├── llm-sast-scanner-full-scan-loop/   # exhaustive convergence-audit skill
 │   └── SKILL.md
 ├── .claude/skills/                    # → symlinks to the two skill dirs above

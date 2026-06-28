@@ -68,6 +68,14 @@ if re.search(r"[\x00-\x1f\x7f]", fully_decode(user_input)):
 response.headers["X-User"] = user_input   # prefer a framework header API that rejects CR/LF
 ```
 
+## Header Mirroring & Client-Controlled Content-Type
+
+Beyond a single tainted header write, two structural shapes reflect *whole* request headers back and are easy to miss:
+
+- **Mirroring inbound request headers into the response** — a loop that copies request headers onto the response (`for (const k of Object.keys(req.headers)) res.setHeader(k, req.headers[k])`, or a proxy "passthrough headers" config). This hands the client control over response headers wholesale: it enables CR/LF splitting (if any value carries line breaks), leaks chatty internal headers, and — most importantly — lets the client set response headers the app assumes only it controls (`Content-Type`, `Location`, `Refresh`, `Set-Cookie`, cache directives). **SAST signal**: any code path that enumerates `req.headers`/inbound header map and writes them to the response; flag even when individual values look inert.
+- **Honoring a request-supplied `Content-Type` on the response → content-type confusion → XSS.** When the response Content-Type is taken from (or overridable by) the request — common with the "set Content-Type only if not already present" idiom after headers were mirrored — an endpoint that returns a *non-HTML* type containing reflected input (a JSON/`pageProps` blob, a server-component/`text/x-component` payload, an API echo) can be flipped to `text/html`. The reflected input (often an unescaped URL parameter, because escaping was deemed unnecessary for the "safe" type) then executes as HTML. If the flipped response is also cacheable, this is a **stored XSS via cache poisoning** (cross-ref `web_cache_deception.md`, `xss.md`). **SAST signal**: response `Content-Type` derived from request input, or a `if (!res.getHeader('Content-Type')) ...` set *after* request headers were mirrored; combined with reflected request data in the body.
+- **Request param reflected into `Set-Cookie`** (tracking/marketing/A-B params echoed into a cookie): an unvalidated value in the cookie enables cookie injection and, with a payload the WAF would normally block, a persistent self-DoS (the poisoned cookie is replayed on every request and rejected) or escalation when the cookie is later reflected into HTML. Treat `Set-Cookie` value built from request input as a header sink (canonicalize-then-reject CR/LF and constrain the value).
+
 ## Sanitizers / Barriers
 
 Commonly affected languages: Java (servlet + Netty), Python. JavaScript, Go, C#, Ruby, and PHP require manual review.

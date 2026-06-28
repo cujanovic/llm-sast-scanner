@@ -149,7 +149,7 @@ const firebase = { apiKey: "AIzaSyEXAMPLEclientApiKey" }; // Firebase client api
 - Runtime secret leakage (logs/errors/responses/source maps served live): `information_disclosure.md`.
 - Client-shipped admin/service keys for BaaS: `baas_security.md`.
 - Secrets in IaC/CI/containers: `iac_security.md`, `cicd_container_security.md`.
-- Mobile artifact secrets: `mobile_security.md`.
+- Mobile artifact secrets: `android_security.md` / `ios_security.md`.
 
 ## Core Principle
 

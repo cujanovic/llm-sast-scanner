@@ -135,7 +135,15 @@ const origin = req.headers.origin || '';
 if (origin.includes('example.com')) upgrade.accept();  // bypass: https://attacker.example.com.evil.net
 ```
 
-**SAFE**: parse `Origin` to `(scheme, host)`; require exact match against a fixed allowlist (`https://app.example.com`); reject missing, malformed, or non-HTTPS origins when cookies authorize the socket.
+**SAFE**: parse `Origin` to `(scheme, host)`; require exact match against a fixed allowlist (`https://app.example.com`); reject missing, malformed, or non-HTTPS origins when cookies authorize the socket. In particular **reject `Origin: null`** — a sandboxed iframe, `data:`/`file:` document, or some redirect chains send `Origin: null`, and an allowlist that contains `"null"` (or treats falsy/`"null"` as same-origin) is CSWSH-able from any attacker page. Recon: `rg -n "===\s*['\"]null['\"]|allowedOrigins.*null|origin\s*\|\|\s*['\"]" --glob '*.{js,ts,go,java}'`.
+
+## Guessable resource id in the upgrade URL / first message (no auth)
+
+Some WS endpoints "authenticate" by embedding a session/user/room identifier in the **upgrade path** (`/ws/<uuid>`, `/socket/<userId>`) or accept it in the **first frame**, with no token validation in the upgrade handler. If the id is guessable, enumerable, leaked (Referer, logs), or simply not bound to the caller's session, any client connects to another user's stream → IDOR over WebSocket. **Recon**: `rg -n "/ws/|/socket|/subscriptions|/realtime" --glob '*.{js,ts,py,java,go,conf}'` for routes with a path param, then confirm the upgrade/`onConnect`/first-message handler validates that the id belongs to the authenticated principal. **SAFE**: authenticate the upgrade with a credential the attacker can't replay (short-lived token), then authorize the requested resource against that identity — never trust an id from the URL/first message alone. Cross-ref `idor.md`.
+
+## WebSocket upgrade smuggling (tunnel via non-101 response)
+
+A reverse proxy that decides "this is a WebSocket upgrade" from `Upgrade: websocket` + a `101` heuristic — but does **not** validate the handshake (`Sec-WebSocket-Version`, `Sec-WebSocket-Key`, masking, and that the backend actually returned `101`) — can be tricked into leaving the TCP connection **open as a raw tunnel** when the backend rejects the handshake with another status (e.g. `426 Upgrade Required` for an invalid `Sec-WebSocket-Version: 1337`). The client then speaks raw HTTP/TLS to the backend through the proxy, bypassing the edge's routing/ACL/WAF (a WebSocket analogue of h2c smuggling). **Recon**: proxy WS config that forwards the upgrade without validating the response — `rg -n 'Upgrade.*websocket|proxy_http_version|Sec-WebSocket|map \$http_upgrade' --glob '*.{conf,nginx,vcl,yml,yaml}'`, `rg -n 'upgrade|websocket' --glob 'Caddyfile*'`. **SAFE**: the proxy must tunnel **only** after a valid `101 Switching Protocols` with a correct `Sec-WebSocket-Accept`, and close the connection on any other status; validate `Sec-WebSocket-Version: 13`. Cross-ref `smuggling_desync.md`, `reverse_proxy_access_bypass.md`.
 
 ## GraphQL Subscription Endpoints Without Auth
 
