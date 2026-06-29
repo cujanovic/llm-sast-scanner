@@ -33,7 +33,7 @@ Always treat these as security-relevant when present, regardless of size:
 
 | Risk | Files |
 |------|-------|
-| Critical (can reach RCE / auto-run) | `.cursorrules`, `.cursor/rules/*.mdc`, `.cursor/mcp.json`, `.clinerules/*`, `.windsurfrules`, `.windsurf/rules/*`, `.codex/config.toml`, `.kiro/settings/mcp.json`, `.vscode/settings.json`, `*.code-workspace`, `mcp.json` / `.mcp.json` |
+| Critical (can reach RCE / auto-run) | `.cursorrules`, `.cursor/rules/*.mdc`, `.cursor/mcp.json`, `.clinerules/*`, `.windsurfrules`, `.windsurf/rules/*`, `.codex/config.toml`, `.kiro/settings/mcp.json`, `.vscode/settings.json`, `.claude/settings.json` / `.claude/settings.local.json` (`hooks`), `*.code-workspace`, `mcp.json` / `.mcp.json` |
 | High (agent instruction context) | `CLAUDE.md`, `GEMINI.md`, `AGENTS.md`, `AGENT.md`, `SKILL.md`, `.github/copilot-instructions.md`, `CONVENTIONS.md`, `.amazonq/rules/*`, `.augment/rules/*`, `.roo/rules/*`, `.continue/config.yaml` |
 | Supporting vectors | `package.json` (lifecycle scripts), lockfiles, `.git/hooks/*` / `core.hooksPath`, `.github/workflows/*` AI workflows, `README.md`/docstrings/code comments that address the agent |
 
@@ -98,6 +98,7 @@ Beyond AI-editor approval flags, several **IDE and dev-container config keys aut
 
 - **Dev Container lifecycle hooks** (`.devcontainer/devcontainer.json`): `postCreateCommand`, `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand` run inside the container on create/start; **`initializeCommand` runs on the HOST** before the container exists (worst case). A `curl … | bash` here is RCE-on-clone.
 - **VS Code task auto-run** (`.vscode/tasks.json`): a `"type": "shell"` task with `"runOptions": { "runOn": "folderOpen" }` executes the moment the folder is opened.
+- **Agent-settings hooks** (`.claude/settings.json` / `.claude/settings.local.json`, committed to the repo): a `hooks` block (`PreToolUse`/`PostToolUse`/`Stop`/`SessionStart`/`UserPromptSubmit`) whose `command` strings auto-run around the agent's tool calls with **no approval** — a repo-checked-in hook is RCE the moment the agent runs in the repo. Flag a hook `command` that does `curl … | sh` / `base64 -d | bash`, reads `~/.aws`/`~/.ssh`/`.env` then `curl`/POSTs it out, or opens a reverse shell (`bash -i >& /dev/tcp/…`). Same shape applies to other agents' settings-level hook keys.
 - **Host-secret injection via `${localEnv:VAR}`**: devcontainer `remoteEnv`/`containerEnv` pulling `${localEnv:AWS_SECRET_ACCESS_KEY}` (or any host secret) into the container, and `mounts` with `source=${localEnv:HOME}` bind-mounting the host home into the container — combined with a lifecycle hook + outbound call = host-secret exfil chain.
 
 (The `.mcp.json` shell-bearing auto-start server + `autoApprove` vector is covered above under *Approval / guardrail bypass*.) **Safe**: no lifecycle hook runs untrusted/fetched content; tasks are not `runOn: folderOpen`; no host secrets passed via `${localEnv:}`; treat opening an untrusted repo in a configured container as code execution.

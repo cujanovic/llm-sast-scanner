@@ -58,6 +58,7 @@ Concrete reachable surfaces worth enumerating by name. The heap/env/config dumps
 - Classic: web.config, appsettings.json, settings.py, config.php, phpinfo.php
 - Containers/cloud: Dockerfile, docker-compose.yml, Kubernetes manifests, service account tokens
 - Credentials and connection strings; internal hosts and ports; JWT secrets
+- **Runtime credential harvest via procfs**: code — especially an agent tool/handler — that reads `/proc/self/environ`, `/proc/<pid>/environ`, or `/proc/<pid>/cmdline`, or globs `/proc/*/`, to lift another process's environment/secrets. Distinct from path-traversal *to* `/proc` (an LFI target, see `path_traversal_lfi_rfi.md`): here the code deliberately reads process env/args to harvest credentials. Also flag dumping the full environment (`os.environ`/`process.env`) into a log or response. **Safe**: never read other processes' `/proc/*/environ`; don't echo the whole environment to logs/output.
 
 ### API Schemas and Introspection
 

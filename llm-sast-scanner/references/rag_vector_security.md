@@ -62,6 +62,17 @@ The core pattern: *a similarity search runs without the requesting user's author
 - Retrieved chunks are concatenated unbounded — and ahead of the system prompt — so a flood of retrieved content displaces the system/safety instructions.
 - Model-emitted citations are rendered without checking that the cited span actually supports the claim.
 
+## Vector-store data-plane & infrastructure
+
+The conditions above are retrieval-*logic* flaws; the vector store is also a **database and a deployable service** with its own sinks — statically detectable and frequently missed:
+
+- **Metadata-filter / query-language injection** — user input concatenated into the store's **structured filter** rather than bound: a Mongo-style selector (`collection.query(where=request.json["filter"])`), a Qdrant/Weaviate `where`/payload filter, **pgvector raw SQL** (`f"… ORDER BY embedding <=> '{user}'"`), or a Redis-Stack `EVAL`/Lua body. Bypasses the tenant/permission scoping or dumps the collection — the *filter expression itself* is an injection sink (cross-ref `nosql_injection.md`, `sql_injection.md`).
+- **Store deployment exposure** — the vector DB reachable with **no auth / default credentials**, bound to `0.0.0.0`/public, or client TLS disabled: `chromadb.HttpClient(host="0.0.0.0")` with no auth token, `QdrantClient(url=…, api_key=None)`, `verify=False`/`ssl_verify=False`, compose exposing `6333`/`8080`/`19530`, or a security group opening the vector port to `0.0.0.0/0`. Anonymous read enables inversion/MIA, write enables poisoning, delete enables destruction (cross-ref `cleartext_transmission.md`, `certificate_validation.md`). Also flag a **client endpoint built from request input** (`QdrantClient(url=f"https://{tenant_host}")`) — attacker redirects the client to a malicious store (cross-ref `ssrf.md`).
+- **ANN index-file unsafe deserialization (RCE)** — loading a serialized index from an untrusted/unvalidated path executes pickle: `FAISS.load_local(path, allow_dangerous_deserialization=True)` (the flag is the exact signal), `pickle.load` of a `.faiss`/`.ann`/`.pkl` index, or hnswlib/Annoy binaries from a user-supplied path (cross-ref `insecure_deserialization.md`).
+- **Ingestion-loader SSRF** — document loaders that **fetch the source URL carried in document metadata** during indexing (LangChain `WebBaseLoader`, `from_documents` following a metadata `source`/`url`) let an attacker plant an internal URL (`169.254.169.254`, `file://`, internal hosts) to pivot/exfiltrate at index time (cross-ref `ssrf.md`).
+- **Auto-reindex self-poisoning** — a pipeline that writes its **own LLM output / agent memory back into the indexed corpus** with no human review (`vectorstore.add_texts(llm_response)`, online-learning/auto-update config) creates a self-amplifying poison loop where one injection compounds across cycles.
+- **Store-destruction / unbounded-retrieval DoS** — `delete_collection`/`drop`/`truncate` reachable from a low-privilege caller (vector DBs have no recycle-bin/MVCC), or a user-controlled `n_results`/`top_k`/batch-upsert size with no cap (cross-ref `denial_of_service.md`).
+
 ## Safe Patterns
 
 ```python

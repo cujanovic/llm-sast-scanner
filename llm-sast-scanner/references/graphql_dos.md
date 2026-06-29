@@ -224,6 +224,8 @@ No `maxAliases` / custom alias-count validation — attacker repeats `{ a1: __ty
 
 **SAFE**: alias-count validation rule; complexity rule that charges per alias.
 
+**Side-effecting mutations amplify beyond CPU**: when the aliased field is a *state-changing mutation with an external side effect* — `sendRecoveryCode`/`verifyPhone`/`requestReset`/`invite`/`charge` that emails, SMS-sends, calls a paid API, or enqueues a job — **each alias fires that side effect once**, so one HTTP request becomes N sends/charges. This bypasses any per-request abuse gate (rate limit, CAPTCHA-per-request, send-cooldown) and turns alias overloading into recipient-flooding + denial-of-wallet, *and* sequential per-alias execution of an expensive mutation adds latency-DoS — not just compute. **Flag** a missing alias/duplicate-root cap specifically on side-effecting mutations; default expensive/side-effecting mutations to **one occurrence per document** (deny-by-default aliasing), and increment the abuse/rate counter **per resolver execution**, not per HTTP request. Cross-ref `denial_of_service.md` (denial of wallet — metered email/SMS), `verification_code_abuse.md` (recovery/OTP send-flood), and `brute_force.md` (aliased auth as a guessing *oracle* — the read-side counterpart).
+
 ### 5. Directive overloading
 
 Many duplicate directives on one selection (`@include` / `@skip` / custom directives × N) without directive-count cap or request body size limit.

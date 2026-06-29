@@ -51,6 +51,7 @@ Rust's borrow checker prevents these bugs in safe code, so most Rust is out of s
 - `std::mem::transmute` — type punning / lifetime laundering (size/validity/alias confusion).
 - `Box::from_raw` / `Rc::from_raw` / `Arc::from_raw` — double-free / use-after-free if the pointer is aliased or freed twice; `std::mem::forget` (leak/ownership loss enabling later misuse).
 - `std::ptr::write` / `read` / `*raw_ptr = …` and raw-pointer casts `x as *mut T` / `as *const T` — arbitrary read/write through unchecked pointers.
+- `Vec::set_len(n)` / `String::as_mut_vec` — sets the length past initialized data, exposing **uninitialized memory** (CWE-908) when `n` outruns what was actually written; `slice::get_unchecked` / `get_unchecked_mut` (and `<*const T>::offset`/`add` used for indexing) elide the bounds check → OOB read/write (CWE-125) when the index/length derives from input.
 
 **Safe / FP**: `unsafe` whose lengths/bounds are provably correct and not externally influenced; `transmute` between layout-identical POD types via `bytemuck`. **Signal**: an `unsafe` sink whose length/pointer/offset derives from untrusted input with no bounds proof. Do **not** dismiss a Rust finding merely because "Rust is memory-safe."
 

@@ -41,8 +41,8 @@ The core pattern: *a model, adapter, or dataset from an untrusted/unverified sou
 
 | Signal | Grep / structural targets |
 |--------|----------------------------|
-| Unsafe model load | `pickle\.load`, `torch\.load\(` without `weights_only=True`, `joblib\.load`, `numpy\.load\(.*allow_pickle\s*=\s*True`, `dill\.load`, `keras\.models\.load_model` |
-| Remote-code load | `from_pretrained\([^)]*trust_remote_code\s*=\s*True`, `AutoModel.*trust_remote_code=True`, `AutoTokenizer.*trust_remote_code=True` |
+| Unsafe model load | `pickle\.load`, `torch\.load\(` without `weights_only=True`, `joblib\.load`, `numpy\.load\(.*allow_pickle\s*=\s*True`, `dill\.load`, `cloudpickle\.load`, `marshal\.load`, `shelve\.open`, `jsonpickle`, `keras\.models\.load_model` (incl. HDF5 `Lambda` layers), `torch\.jit\.load` (TorchScript), ONNX models carrying custom/contrib ops |
+| Remote-code load | `from_pretrained\([^)]*trust_remote_code\s*=\s*True`, `AutoModel.*trust_remote_code=True`, `AutoTokenizer.*trust_remote_code=True`, `torch\.hub\.load\([^)]*trust_repo\s*=\s*True` / `force_reload=True` (runs the repo's `hubconf.py` at load) |
 | Unverified artifacts | `from_pretrained\("` / `PeftModel\.from_pretrained\(` / `hf_hub_download\(` with a non-allowlisted/variable org; `revision` absent (no commit pin) |
 | JS/edge runtime auto-download | transformers.js-style `pipeline\("task","org/model"\)` / `AutoModel`/`AutoTokenizer` wrappers with the `env.allowRemoteModels`/`allowLocalModels` defaults unchanged (remote fetch on) and no `env.localModelPath` or pinned `revision` — model fetched from a public hub on first inference |
 | Unpinned ML deps | `transformers`, `torch`, `langchain`, `sentence-transformers`, `vllm` in requirements with no `==`/hash |
@@ -112,6 +112,13 @@ env.localModelPath = "./models";        // load a vendored, integrity-checked co
 const clf = await pipeline("text-classification", "guard-model");
 // If a remote load is unavoidable: pin a revision/commit and verify a checksum of the cached artifact.
 ```
+
+### Inference-serving exposure & executable model metadata
+
+Two static surfaces beyond the model-*load* call:
+
+- **Inference-server deployment exposure** — the model-serving framework itself reachable with no auth: vLLM / TGI / NVIDIA Triton / Ray Serve, or a Flask/FastAPI model server, launched with `--host 0.0.0.0` / `app.run(host="0.0.0.0")` and **no API token / auth dependency**, Triton's model-control / repository endpoint exposed, or the inference API served without TLS. Anonymous access = free inference (denial-of-wallet), prompt/model theft, or — with model-control enabled — loading attacker weights. **Safe**: bind localhost/private network, require an auth token on the inference route, enable TLS, disable remote model-control in production. (Mirrors the vector-store deployment block in `rag_vector_security.md`; the firewall-layer `0.0.0.0/0` view is `iac_security.md`.)
+- **Executable metadata shipped with a model** — an artifact carries logic that runs at load/render even without pickle: a poisoned **`chat_template`** (Jinja2) in `tokenizer_config.json` / GGUF metadata with conditionals that inject hidden system-prompt overrides or emit attacker URLs when rendered, or Keras HDF5 **`Lambda`** layers (arbitrary Python). Treat `chat_template` / `tokenizer_config.json` from an untrusted model as code, not data. **Safe**: vendor and review the tokenizer/template, pin + checksum, render chat templates only from a trusted fixed source.
 
 ## Severity & Triage
 

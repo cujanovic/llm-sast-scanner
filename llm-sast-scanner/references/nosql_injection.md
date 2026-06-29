@@ -141,6 +141,18 @@ Operator injection does **not** require a JSON body. Body parsers that build nes
   - `$where=1` / `$where=sleep(100)` — server-side JS execution / time-based blind signal (Mongo `$where`)
 - **SAFE**: cast the field to a primitive before use (`String(req.query.pass)`), reject non-string types, or disable nested parsing (`qs` with `{ depth: 0 }` / `parameterLimit`).
 
+## Beyond MongoDB — other NoSQL store injection sinks
+
+The operator-injection model above is MongoDB-specific, but every NoSQL store has its own injection sink when user input is **concatenated into a query/command string** rather than bound as a parameter. These are distinct, statically-detectable sinks across different stores — flag the concatenation; prefer the parameterized form:
+
+- **Redis — RESP command injection / CRLF smuggling**: a raw command built from user input — `r.execute_command(f"SET {key} {val}")`, `send_command(...)`, or a hand-built RESP string — lets a `\r\n` in `key`/`val` smuggle a **second** command (`…\r\nCONFIG SET dir /var/www\r\n…` → file write/RCE, `FLUSHALL`, `CONFIG SET`). User input as the body of `EVAL "<lua>"` is Lua injection. **SAFE**: the client's typed methods (`r.set(key, val)`) frame RESP arguments safely; never `execute_command`/`send_command` with an interpolated command; pass Lua `KEYS`/`ARGV`, never concatenate into the script.
+- **Neo4j — Cypher injection**: `session.run(f"MATCH (u {{name:'{name}'}}) RETURN u")` instead of `session.run("MATCH (u {name:$name}) RETURN u", name=name)`. Escalators: `apoc.*` procedures reachable from injectable Cypher (`apoc.load.json`/`apoc.load.jdbc` → SSRF/file read, `apoc.cypher.runMany`), and a server configured with `dbms.security.procedures.unrestricted=apoc.*`. **SAFE**: `$param` bind parameters; allowlist labels/relationship types (which **cannot** be parameterized) instead of interpolating them.
+- **Cassandra / ScyllaDB — CQL injection**: user input concatenated into `session.execute("… WHERE x = '" + v + "'")` instead of a prepared statement (`session.prepare(…)` + bound values); `' OR '1'='1' ALLOW FILTERING` exposes rows. **SAFE**: prepared statements with bound parameters; never concatenate, especially around `ALLOW FILTERING`.
+- **CouchDB — `_design` view & Mango selector injection**: user input written into a design-document view **map function** (`views.<name>.map = "function(doc){…}"`) is stored server-side JS injection; a Mango `_find` `selector` built from raw request JSON permits operator injection (`$regex`, `$or`, `$gt`) like Mongo. **SAFE**: never build view map functions from user input; validate/allowlist Mango selector keys and force scalar types.
+- **DynamoDB — PartiQL injection**: `ExecuteStatement(Statement=f"SELECT * FROM users WHERE name='{name}'")` is injectable (`x' OR '1'='1`); the typed `get_item`/`query` with `KeyConditionExpression` + `ExpressionAttributeValues` is not. **SAFE**: PartiQL with `Parameters=[…]` placeholders (`?`), or the typed key/condition-expression API.
+
+(Elasticsearch/OpenSearch Painless & Lucene `script_score`/`sort` injection is its own class — see `expression_language_injection.md`.)
+
 ## Safe Patterns
 
 - Explicit string type check before query field assignment

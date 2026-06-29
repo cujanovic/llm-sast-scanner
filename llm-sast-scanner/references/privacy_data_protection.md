@@ -38,8 +38,9 @@ Privacy flaws arise when personal data is collected, stored, transmitted, or sha
 | Identity | `email`, `e_mail`, `phone`, `mobile`, `msisdn`, `ssn`, `social_security`, `national_id`, `passport`, `driver_license`, `tax_id`, `date_of_birth`, `dob`, `birth_date` |
 | Health / biometric | `diagnosis`, `medical_record`, `mrn`, `health`, `prescription`, `fingerprint`, `face_id`, `biometric` |
 | Financial | `iban`, `account_number`, `routing`, `credit_card`, `card_number`, `cvv`, `salary`, `income` |
-| Location / device | `latitude`, `longitude`, `geo`, `gps`, `ip_address`, `device_id`, `advertising_id`, `idfa`, `gaid` |
-| Sensitive attributes | `gender`, `ethnicity`, `religion`, `sexual_orientation`, `political`, `union`, `genetic` |
+| Location / device | `latitude`, `longitude`, `geo`, `gps`, `ip_address`, `device_id`, `advertising_id`, `idfa`, `gaid`, `mac_address`, `browser_fingerprint`, `canvas_fingerprint`, `device_fingerprint` |
+| Sensitive attributes (GDPR Art. 9/10) | `gender`, `ethnicity`, `race`/`racial`, `national_origin`, `religion`, `philosophical_beliefs`, `political`/`political_affiliation`, `union`/`trade_union`, `sexual_orientation`, `genetic`/`dna`, `biometric`/`voiceprint`, plus **criminal/judicial (Art. 10)**: `convictions`, `criminal_record`, `charges`, `pardons`, `disciplinary_action` |
+| Behavioral / profiling | `browsing_history`, `clickstream`, `links_clicked`, `viewing_history`, `search_history`, `purchase_history`, `spending_habits` (profiling / ePrivacy data — taint as a PII *source*, distinct from the analytics *sinks* below) |
 | Audit / actor identity | `created_by`, `createdBy`, `updated_by`, `updatedBy`, `last_updated_by`, `approver`, `assigned_to`, `assignedTo`, `owner`, `reviewer` (reveal *which person* acted on a record — relationship/identity metadata, often over-exposed on shared objects) |
 | Ownership / financial stake | `ownership_percentage`, `ownershipPercentage`, `ownership_status`, `ownershipStatus`, `stake`, `beneficial_owner`, `shareholding` |
 | Child data | `child`, `minor`, `parent_consent`, `coppa`, `under_13`, `age_gate` |
@@ -51,6 +52,7 @@ Also scan: OpenAPI/GraphQL/Proto field names, ORM models, DB migrations, form `n
 - **Strong (1 hit flags it)** — names that rarely appear outside a PII/financial context: `ssn`, `social_security`, `cvv`, `cvc`, `cvv2`, `iban`, `passport`, `national_id`, `aadhaar`/`aadhar`, `tax_id`, `drivers_license`/`license_number`, `routing_number`, `sort_code`, `credit_card`/`card_number`, `dob`/`date_of_birth`, plus any Health/biometric or Sensitive-attribute row above. Also match these as a **token inside a compound** name so `userSsn`, `customer_cvv`, `applicantPassport` are caught.
 - **Weak (require ≥2 distinct)** — common individually but PII in aggregate: `email`, `phone`/`mobile`, `first_name`/`last_name`/`full_name`, `address`/`street_address`/`postal_code`/`zip`, `gender`, `nationality`, `birthday`. Two or more distinct weak fields on the same object ⇒ treat as PII handling.
 - **Normalize before matching:** fold camelCase→snake (`firstName`→`first_name`), unify `-`/`_`/`.` separators, lowercase, but keep digit runs (`cvv2` must survive). This makes `First-Name`, `firstName`, and `first_name` all match one list.
+- **Container context (precision axis):** a *weak* field (`name`, `gender`, `location`, `image`, `dob`) is PII when its enclosing object/table/DTO is a **person-role** — `User`/`Customer`/`Patient`/`Employee`/`Applicant`/`Member`/`Subscriber`/`Cardholder`/`Passenger`/`Guardian`/`Insuree`/`Shareholder`/`Beneficiary` — and is **not** PII on a non-person object (`Server.location`, `Product.name`, an order-line `quantity`). Promote weak fields when the container names a data subject; demote otherwise. This cuts the dominant false-positive (bare `name`/`location`/`status` columns on non-person tables).
 
 This tiering decides *PII presence*; severity still comes from the **sink** (logging, third-party/LLM egress, cross-tenant exposure) per the rules below — a single highly-sensitive strong field (SSN/card/health) reaching a logging or off-tenant sink is high severity regardless of the count.
 
@@ -93,7 +95,7 @@ Trace PII variables into these sinks. For log *content* exposure mechanics, cros
 
 ### Sensitive data to AI/LLM providers, data warehouses & managed third parties
 
-A privacy-relevant data flow also exists when personal data reaches an external **component** — not just an analytics SDK. The risk is off-tenant disclosure of PII/PHI to a processor outside the data-controller boundary. Trace PII into these sinks even when the call looks like ordinary business logic:
+A privacy-relevant data flow also exists when personal data reaches an external **component** — not just an analytics SDK. The risk is off-tenant disclosure of PII/PHI to a processor outside the data-controller boundary. Trace PII into these sinks even when the call looks like ordinary business logic. Include **object storage** (S3/GCS/Azure Blob) and **data lakes** as raw-PII/image/voice persistence sinks (minimization/retention surfaces). Classify each sink as **internal-service (same controller)** vs **off-tenant third-party**: the controller-boundary crossing is the severity driver — PII to a same-controller internal service is a minimization/retention question, while the same data to a third-party processor is a *sharing* disclosure.
 
 | Component class | Grep / structural targets |
 |-----------------|----------------------------|

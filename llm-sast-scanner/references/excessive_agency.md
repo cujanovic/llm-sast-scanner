@@ -159,6 +159,22 @@ Key points a scanner should require: **decode base64/base32 inside the command**
 - **Interpreter-payload bypass** — `python -c "import shutil; shutil.rmtree('/')"`, `node -e …`, `perl -e …`, `ruby -e …` route destructive operations through an interpreter, so there is no shell verb to denylist. Treat `<interpreter> -c/-e <code>` as an opaque code sink (require approval / inspect the code), not an allowed command.
 - **Fail closed on unparseable/opaque input** — if the guard can't statically parse the command (`shlex` error on unbalanced quotes) or the payload is opaque (`bash -c <blob>`), it must **escalate/deny**, never default-allow or crash open. A guard that returns "allow" on a parse exception is the bug.
 
+### Code-interpreter / sandbox isolation (config, not just the bypass flag)
+
+The danger-bypass flag (`allow_dangerous_code=True`) is in the grep list above; the sandbox's **isolation config** is a separate sink. A code-exec sandbox SDK (`Sandbox()` / E2B / Riza / Daytona / `CodeInterpreter()` / `create_pandas_dataframe_agent`) stood up with **no network/egress isolation** (`network_disabled` unset, `network_mode != "none"`, no egress allowlist) lets model-generated code reach the internet (exfil, SSRF, C2); a container launched in the agent's exec path with `privileged=True`, `network_mode="host"`, or host-root `volumes` is a sandbox in name only. **Safe**: disable network by default (`network_disabled=True`/`network_mode="none"`), egress-allowlist when network is needed, drop privileges, no host mounts, set CPU/mem/time caps. Also flag a tool/MCP server the agent **auto-installs unpinned** (`pip install <tool>` / `mcp install <server>` with no `==`/`--require-hashes`, `version: latest`) — a downgrade-to-vulnerable axis distinct from rug-pull.
+
+### Agentic commerce — signed-mandate integrity & replay
+
+When an agent transacts (payments, purchases, transfers) under a **signed mandate / authorization token**, the integrity of that mandate *is* the control — a class the HITL-gate coverage above doesn't reach:
+
+- **Mandate constraint mutability** — authorization fields (`budget`/`limit`/`max_amount`/`allowed_merchants`/`spending_cap`) reassigned after issuance, or set to sentinels (`"unlimited"`/`None`/`-1`) → privilege escalation by widening the mandate.
+- **Replay / missing idempotency on a signed envelope** — a signed mandate/tool-call/transfer accepted with no `nonce`/`jti`/`idempotency_key`/timestamp dedup, so a *validly signed* request double-executes (cross-ref the adjacent-protocols replay note in `mcp_security.md`).
+- **Signature alg-downgrade on the mandate** — `alg` accepted as `none`/`HS256` where EdDSA/ES256 is required; a permissive `jwt.decode(..., algorithms=[...])` (cross-ref `authentication_jwt.md`).
+- **Settlement / escrow finality bypass** — charge/settle with no proof-of-execution; credit accepted on `pending`/`unconfirmed`; single-party `escrow.release` with no quorum; `bypass_escrow`/`skip_escrow` flags.
+- **Mutable audit trail** — `DELETE`/`TRUNCATE`/`.delete()` on `mandate_log`/`audit_trail`/`payment_history` destroys non-repudiation (append-only violation).
+
+**Safe**: treat the mandate as immutable once signed (re-verify signature **and** constraints server-side at spend time), bind a nonce/idempotency key and reject replays, pin the signature algorithm, require settlement proof / multi-party escrow release, and keep the mandate/audit log append-only.
+
 ## Severity & Triage
 
 - Autonomous irreversible action (funds/data deletion/deploy) with attacker-influenceable prompt and no gate: **Critical/High**.

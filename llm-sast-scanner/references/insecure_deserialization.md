@@ -73,7 +73,7 @@ Insecure deserialization happens when an application reconstructs objects from u
 - **SAFE**: pass `[:safe]`, which rejects terms that would create new atoms/funs/external pids; better still, do not `binary_to_term` request/cookie bytes at all — and treat a Phoenix signed-cookie/session store as attacker-controlled if the signing key can leak or verification is skipped.
 
 ### Rust (serde ecosystem)
-- Binary/format deserializers fed untrusted bytes: `bincode::deserialize(...)`, `postcard::from_bytes(...)`, `serde_pickle::from_slice(...)`, and `serde_yaml::from_str(...)` (untrusted YAML → type confusion / resource blow-up). The risk is deserializing into a rich/`#[serde(deny_unknown_fields)]`-less target, or any type whose `Deserialize`/`Drop` does work.
+- Binary/format deserializers fed untrusted bytes: `bincode::deserialize(...)`, `postcard::from_bytes(...)`, `serde_pickle::from_slice(...)`, `rmp_serde::from_slice(...)` (MessagePack), and `serde_yaml::from_str(...)` (untrusted YAML → type confusion / resource blow-up). The risk is deserializing into a rich/`#[serde(deny_unknown_fields)]`-less target, or any type whose `Deserialize`/`Drop` does work.
 - **SAFE**: deserialize only into narrow, fully-typed structs from a trusted source; prefer length/size-bounded formats; never deserialize attacker bytes into trait objects / dynamically-typed values.
 
 ### Apple (Swift / Objective-C)

@@ -43,16 +43,19 @@ A rule that evaluates to a constant `true`, or checks only that the user is *log
 - **Firestore / RTDB rules**: `allow read, write: if true;`, `allow read, write;` (rules v1), `".read": true` / `".write": true`, or `if request.auth != null` guarding per-user documents without comparing `request.auth.uid` to the owner field / `{userId}` path segment
 - **Time-bomb test rules**: `allow read, write: if request.time < timestamp.date(...)` left from `firebase init` — world-open until the date, often shipped
 - Write policy with `USING` but no `WITH CHECK` (Postgres) → row passes the read predicate but the inserted/updated row is unconstrained (privilege fields, foreign tenant id can be set)
+- **Firestore `read` splits into `get` + `list`** — a rule that scopes single-document `allow get` with an owner check but grants `allow read`/`allow list` on the collection **without the same predicate** lets any (logged-in) client *enumerate every document*. Firestore rules do **not** filter query results — they validate the query against the rule — so a permissive `list`/`read` rule returns all rows regardless of the `get` rule. Flag an `allow list`/`allow read` whose condition is weaker than the sibling `allow get`.
+- **`collectionGroup` queries bypass per-collection rules** — a `collectionGroup('x')` query is governed **only** by a rule using the recursive wildcard `match /{path=**}/x/{doc}` matching the collection id, **not** by the per-parent `match /users/{uid}/x/{doc}` rule. Client `collectionGroup('x')` with no recursive-wildcard rule (or a permissive one like `if request.auth != null`) reads that subcollection across **all** parents/tenants. Static signal: `collectionGroup(` in client code + an absent or permissive `{path=**}` rule for that collection.
 
-**Grep seeds**: `USING (true)`, `WITH CHECK (true)`, `if true`, `allow read, write`, `".read": true`, `".write": true`, `request.auth != null`, `request.auth.uid`, `allow .*: if request.time`
+**Grep seeds**: `USING (true)`, `WITH CHECK (true)`, `if true`, `allow read, write`, `".read": true`, `".write": true`, `request.auth != null`, `request.auth.uid`, `allow .*: if request.time`, `allow get`, `allow list`, `collectionGroup(`, `path=\*\*`
 
 ### 4. Anon writes / over-broad mutations to sensitive tables (CWE-862)
 
 - `anon`-role `INSERT`/`UPDATE`/`DELETE` policies on tables like `profiles`, `orders`, `roles`, `balances`, `subscriptions`
 - Client `.insert()/.update()/.delete()` against privileged columns (`role`, `is_admin`, `tenant_id`, `price`) with no `WITH CHECK` constraining them → mass-assignment at the data layer (cross-ref `mass_assignment.md`)
 - RPC / Postgres functions marked `SECURITY DEFINER` and `GRANT EXECUTE ... TO anon` that mutate data without internal authorization checks
+- **`SECURITY DEFINER` function without a pinned `SET search_path`** (or set to a schema an unprivileged role can write, incl. `public`) — the function runs as its **owner** but resolves unqualified object/function names through the *caller's* `search_path`, so a caller who creates a same-named table/function in a writable schema hijacks what the definer executes (privilege escalation, distinct from a missing authz check). Static signal: a `CREATE FUNCTION ... SECURITY DEFINER` body with **no** `SET search_path = ...`. **Safe**: pin `SET search_path = pg_catalog, <fixed schema>` on every `SECURITY DEFINER` function and schema-qualify its references.
 
-**Grep seeds**: `.insert(`, `.update(`, `.upsert(`, `.delete(`, `SECURITY DEFINER`, `GRANT EXECUTE`, `for insert`, `for update`, `for delete`, `to anon`
+**Grep seeds**: `.insert(`, `.update(`, `.upsert(`, `.delete(`, `SECURITY DEFINER`, `GRANT EXECUTE`, `for insert`, `for update`, `for delete`, `to anon`, `search_path`
 
 ### 5. Public storage buckets / open file rules (CWE-732)
 

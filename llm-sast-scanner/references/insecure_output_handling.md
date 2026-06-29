@@ -109,6 +109,8 @@ When model output is rendered as markdown/HTML, an attacker who can steer the mo
 
 Markdown-image rendering is the most dangerous (it fetches with no user click). A scanner that only checks for `<script>` XSS **misses the image/link beacon** exfil channel — flag it as a distinct finding.
 
+**Low-visibility / non-rendered channels (agent code-gen).** Exfil isn't only a *rendered* URL: an agent (or generated code) can **encode-and-hide** sensitive data so it passes human review yet leaks later — base64/hex of an env var, secret, or file content written into a **code comment, log line, filename, test snapshot/fixture, or generated-artifact metadata**; or a **delayed/CI exfil** where a workflow/hook/scheduled job is planted that POSTs captured data to an external endpoint after the run. Static smell: a value sourced from `env`/secret/file is base64/hex-encoded and then written into a comment/log/filename/snapshot, or a newly-added CI step/cron/git-hook sends data to an outbound URL. Treat the encoding-into-a-low-visibility-sink as the exfil medium, not just the visible URL beacon (cross-ref `excessive_agency.md`, `cicd_container_security.md`).
+
 **Remediation — egress filtering of model output:** before rendering or returning output, enforce an **allowlist of outbound URL hosts** and hard-block any image/link/script target not on it; additionally scan output for secret shapes (`sk-…`, `ghp_…`/`github_pat_…`, `AKIA[0-9A-Z]{16}`, JWT `eyJ…\.…\.…`, Slack `xox[bpoa]-…`, Google `AIza[0-9A-Za-z_-]{35}`, plus a high-entropy ≥40-char fallback) and PII (email/phone/SSN; **Luhn-validate** card numbers to cut false positives), and strip or block on a hit.
 
 ## Streaming Output
