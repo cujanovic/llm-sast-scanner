@@ -16,7 +16,7 @@ Traditional SAST tools rely on fixed rule sets and tend to drown teams in false 
 
 | Component | What it is |
 |-----------|-----------|
-| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 101 vulnerability reference knowledge bases. |
+| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 102 vulnerability reference knowledge bases. |
 | **`llm-sast-scanner-full-scan-loop/`** | A wrapper skill for an exhaustive, convergence-driven, line-by-line audit of an entire repository, guaranteeing 100% line coverage. |
 | **`AGENTS.md` / `CLAUDE.md`** | The repo-level orchestrator playbook that drives parallel multi-agent scanning and report consolidation. `CLAUDE.md` is a symlink to `AGENTS.md`. |
 | **`.claude/skills/`, `.agents/skills/`** | Per-runtime skill discovery directories — both symlink to the single canonical skill source, so the two runtimes can never drift apart. |
@@ -69,7 +69,7 @@ Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated
 
 ## Vulnerability coverage
 
-101 reference knowledge bases, organized into categories:
+102 reference knowledge bases, organized into categories:
 
 | Category | Focus |
 |----------|-------|
@@ -156,7 +156,7 @@ llm-sast-scanner/                      ← repo root
 ├── CLAUDE.md                          # → symlink to AGENTS.md
 ├── llm-sast-scanner/                  # core skill (canonical source)
 │   ├── SKILL.md                       # 7-step workflow + Judge + adversarial + project-memory protocol
-│   └── references/                    # 101 vulnerability knowledge bases
+│   └── references/                    # 102 vulnerability knowledge bases
 ├── llm-sast-scanner-full-scan-loop/   # exhaustive convergence-audit skill
 │   └── SKILL.md
 ├── .claude/skills/                    # → symlinks to the two skill dirs above

@@ -9,7 +9,7 @@ description: >
 metadata:
   version: "1.40.0"
   domain: application-security
-  references: 101 vulnerability knowledge bases
+  references: 102 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
