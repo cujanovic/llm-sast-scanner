@@ -44,6 +44,7 @@ The core pattern: *a model, adapter, or dataset from an untrusted/unverified sou
 | Unsafe model load | `pickle\.load`, `torch\.load\(` without `weights_only=True`, `joblib\.load`, `numpy\.load\(.*allow_pickle\s*=\s*True`, `dill\.load`, `keras\.models\.load_model` |
 | Remote-code load | `from_pretrained\([^)]*trust_remote_code\s*=\s*True`, `AutoModel.*trust_remote_code=True`, `AutoTokenizer.*trust_remote_code=True` |
 | Unverified artifacts | `from_pretrained\("` / `PeftModel\.from_pretrained\(` / `hf_hub_download\(` with a non-allowlisted/variable org; `revision` absent (no commit pin) |
+| JS/edge runtime auto-download | transformers.js-style `pipeline\("task","org/model"\)` / `AutoModel`/`AutoTokenizer` wrappers with the `env.allowRemoteModels`/`allowLocalModels` defaults unchanged (remote fetch on) and no `env.localModelPath` or pinned `revision` — model fetched from a public hub on first inference |
 | Unpinned ML deps | `transformers`, `torch`, `langchain`, `sentence-transformers`, `vllm` in requirements with no `==`/hash |
 | Data ingestion | `load_dataset(`, `prepare_fine_tuning_data`, `train(` consuming files/URLs with no checksum/validation step nearby |
 
@@ -95,6 +96,22 @@ def load_training(source: str) -> list[dict]:
 ```
 
 Additional barriers: maintain an ML-BOM; verify LoRA/PEFT adapters against a trusted registry and base-model compatibility; process untrusted data in a network-isolated sandbox; monitor training loss/gradient norms for anomalies.
+
+### JS / edge inference runtimes (runtime auto-download)
+
+Browser/Node/edge ML runtimes (transformers.js-style `pipeline(...)`, `AutoModel`/`AutoTokenizer` wrappers) **download the model from a public hub on first inference** unless told otherwise. The default `env.allowRemoteModels = true` with no pinned `revision` and no vendored `env.localModelPath` is the same unverified-artifact / unpinned-revision exposure as the Python case (CWE-494/829) — but it happens lazily at runtime, so a hub- or CDN-hosted artifact can be swapped without any code change, and a grep for `from_pretrained`/`hf_hub_download` will miss it entirely.
+
+```js
+// VULN — remote, unpinned, integrity-unchecked model fetched on first call
+const clf = await pipeline("text-classification", "some-org/guard-model");
+
+// SAFE — vendored local model, remote fetch disabled
+import { env, pipeline } from "@huggingface/transformers";
+env.allowRemoteModels = false;          // never fetch from the hub at runtime
+env.localModelPath = "./models";        // load a vendored, integrity-checked copy
+const clf = await pipeline("text-classification", "guard-model");
+// If a remote load is unavoidable: pin a revision/commit and verify a checksum of the cached artifact.
+```
 
 ## Severity & Triage
 

@@ -37,10 +37,22 @@ Manual memory management in C/C++ enables stack/heap corruption, out-of-bounds a
 
 **What it is NOT**
 - **Logic bugs with safe bounds** — correct `snprintf` with `sizeof(dest)` is not overflow
-- **Managed-language buffer issues** — Rust `Vec` bounds checks, Java arrays; out of scope unless FFI boundary
+- **Managed-language buffer issues** — Rust `Vec` bounds checks, Java arrays; out of scope unless FFI boundary **or a Rust `unsafe` block** (see Rust carve-back below)
 - **Full format-string exploitation analysis** — delegate to `format_string_injection.md`
 - **Benign memory leaks alone** — unfreed heap at exit; flag `realloc`-loses-block and ownership-loss patterns that enable later corruption
 - **DoS from large allocation** — see `denial_of_service.md` unless integer wrap causes undersized buffer then OOB write
+
+### Rust `unsafe` (the carve-back — memory-safe by default, *except* here)
+
+Rust's borrow checker prevents these bugs in safe code, so most Rust is out of scope — **but `unsafe` blocks (and FFI) re-introduce the full C memory-bug surface** the checker can no longer verify. Treat the following as in-scope memory-safety sinks, mapped to their C equivalents:
+
+- `std::ptr::copy` / `copy_nonoverlapping(src, dst, n)` — unchecked `memcpy`-equivalent: OOB write if `n`/lengths are attacker-influenced or miscomputed.
+- `std::slice::from_raw_parts(ptr, len)` / `from_raw_parts_mut` — fabricates a slice of caller-supplied `len`: OOB read/write when `len` exceeds the real allocation.
+- `std::mem::transmute` — type punning / lifetime laundering (size/validity/alias confusion).
+- `Box::from_raw` / `Rc::from_raw` / `Arc::from_raw` — double-free / use-after-free if the pointer is aliased or freed twice; `std::mem::forget` (leak/ownership loss enabling later misuse).
+- `std::ptr::write` / `read` / `*raw_ptr = …` and raw-pointer casts `x as *mut T` / `as *const T` — arbitrary read/write through unchecked pointers.
+
+**Safe / FP**: `unsafe` whose lengths/bounds are provably correct and not externally influenced; `transmute` between layout-identical POD types via `bytemuck`. **Signal**: an `unsafe` sink whose length/pointer/offset derives from untrusted input with no bounds proof. Do **not** dismiss a Rust finding merely because "Rust is memory-safe."
 
 ## Recon Indicators
 
@@ -491,6 +503,35 @@ uint32_t i = ntohl(get_net_u32());
 if (i >= buff_size) return ERROR;
 return buff[i];
 ```
+
+### Chained-entry (TLV) parser advancing by an attacker `next`
+
+A parse loop over length/offset-delimited entries (TLV, SMB2 / extended-attribute chains, record lists) that advances by an attacker-controlled `next`/offset field is a distinct sink — both for out-of-bounds access **and** for an infinite-loop / pointer-stagnation DoS.
+
+```c
+// VULN — casts before proving a header is present; advances by attacker `next`; no progress check
+struct entry *e = (struct entry *)buf;
+while ((const uint8_t *)e < buf + buf_len) {
+    memcpy(key, e->data, e->name_len);             // e->name_len unbounded vs key[]
+    e = (struct entry *)((const uint8_t *)e + e->next);  // e->next == 0 loops forever; can also overshoot
+}
+
+// SECURE — prove header present, advance in-bounds and progressing, sub-lengths contained
+while (remaining >= sizeof(struct entry)) {        // cast only after a full header is present
+    struct entry *e = (struct entry *)cur;
+    if (e->next < sizeof(struct entry)) return ERR;          // must clear ≥1 header → forward progress
+    if (e->next > remaining) return ERR;                     // advance stays in-bounds
+    if ((size_t)e->name_len + e->value_len > e->next - sizeof(*e)) return ERR;  // sub-lengths contained
+    /* ... use e->name_len / e->value_len, now bounded ... */
+    cur += e->next; remaining -= e->next;          // progress guaranteed by next ≥ sizeof(header)
+}
+```
+
+- **Reject zero / non-advancing `next`** (`next < sizeof(header)`): otherwise the cursor stagnates → infinite loop, a DoS from one crafted message (cross-ref `denial_of_service.md`).
+- **Cast only after a full header is present** (`remaining >= sizeof(struct entry)`) — never read `e->field` before proving those bytes exist.
+- **Contain sub-lengths within the entry** (`header + name_len + value_len <= next`), doing `offset+len` math in a widened unsigned type (`size_t`/`u64`) to avoid `u16`/`u32` truncation.
+
+**Crypto / decompression helpers are length-driven write sinks too.** Treat any `(dst, src, len)` routine that copies an attacker `len` into a fixed buffer — `*_crypt`/`*_decrypt`, ARC4/AES key & stream helpers, `inflate`/`decompress_*`/`unzip` — as a `memcpy`-equivalent sink (require `len <= sizeof(dst)`, or size `dst` from a validated `len`), not just the classic `memcpy`/`strcpy` family. e.g. `decrypt_arc4(session_key /*16*/, src, value_len)` overflows when `value_len > 16`.
 
 ### Return stack address / dangling local
 

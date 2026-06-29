@@ -22,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 101 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 102 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -37,7 +37,7 @@ documenting the sources, sinks, and sanitizers/barriers used to detect and triag
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor, Improper Input Validation (semantic-type mismatch / missing format validation, standalone Low) |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
-| **Language/Platform** | PHP Security, Android Security, iOS Security, Electron / Desktop App Security, C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
+| **Language/Platform** | PHP Security, TYPO3 CMS Security (Fluid / TypoScript / Extbase), Android Security, iOS Security, Electron / Desktop App Security, C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
 
 ---
 
@@ -204,6 +204,7 @@ references/expression_language_injection.md — Expression language injection (S
 references/jndi_injection.md             — JNDI injection (Log4Shell class)
 references/denial_of_service.md          — Denial of service / resource exhaustion
 references/php_security.md               — PHP-specific security issues
+references/typo3_security.md             — TYPO3 CMS (PHP): Fluid template escape-bypass XSS (f:format.raw/htmlentitiesDecode, $escapeOutput=false) & SSTI (f:render/f:cObject), TypoScript config-as-code RCE/injection (userFunc/insertData/data=GP:/typolink), GeneralUtility::_GP taint sources, QueryBuilder->quote() SQLi, Extbase mass assignment (allowAllProperties/IgnoreValidation), FAL/FILE_DENY_PATTERN upload bypass (CWE-79/89/94/434/915; gate: typo3/cms-core, ext_emconf.php, *.typoscript, Configuration/TCA/, Templates/*.html with xmlns:f)
 references/android_security.md           — Android security: insecure storage (SharedPreferences/SQLite/external/Keystore), exported component & intent injection, deep-link/WebView RCE (addJavascriptInterface/file-URL access), insecure IPC (ContentProvider/PendingIntent), crypto misuse (ECB/static-IV/weak-key/java.util.Random), allowBackup, clipboard/FLAG_SECURE leakage, client-only root detection (gate: *.kt/*.java + AndroidManifest.xml/build.gradle)
 references/ios_security.md               — iOS security (Swift/Obj-C): insecure storage (UserDefaults/plist/Core Data/file-protection), Keychain misuse, deep-link/URL-scheme → WKWebView/open, ATS bypass (NSAllowsArbitraryLoads), crypto misuse (DES/3DES/RC4/hardcoded keys/arc4random), TLS trust bypass (missing SecTrustEvaluateWithError), clipboard/screen-capture leakage, client-only jailbreak detection (gate: *.swift/*.m + Info.plist/*.xcodeproj/Podfile)
 references/electron_desktop_security.md  — Electron / desktop web-runtime hardening: BrowserWindow webPreferences (nodeIntegration/contextIsolation/sandbox/webSecurity), unsafe preload contextBridge & ipcMain handlers, unrestricted navigation, shell.openExternal (CWE-1188/829/94)

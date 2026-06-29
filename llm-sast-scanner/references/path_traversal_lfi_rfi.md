@@ -182,6 +182,8 @@ Skip: fully hardcoded paths, config/env-only paths with no user component, fixed
 - Files within archives containing `../` or absolute paths escape target extract directory
 - Test multiple formats: zip/tar/tgz/7z
 - Verify symlink handling and path canonicalization prior to write
+- **Cross-OS absolute-path desync**: an absolute-path classifier that recognizes only one OS's form (e.g. `path.startswith('/')`) mis-classifies a foreign-OS absolute target — a Windows `C:\…` link on a Unix check, or `/etc/…` on a Windows-only check — as *relative*, so a "relative is safe" gate accepts it. Detect absolute paths for **both** conventions (leading `/`, drive-letter `^[A-Za-z]:[\\/]`, UNC `^\\\\`) before branching on relative/absolute.
+- **Entry-type-gated link guard**: a "dangerous link" / containment check conditioned on entry kind (`if entry.isdir: …`) lets *file* symlink entries skip validation entirely. Run the guard for every entry — files, directories, and symlinks alike; never short-circuit on `isDir`.
 - Impact: overwrite config/templates or drop webshells into served directories
 
 ```python

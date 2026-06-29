@@ -21,6 +21,7 @@ When user input is used as the format string (not merely as a data argument) in 
 - **C#**: `string.Format`, `String.Format`, `CompositeFormat.Parse`, and modeled format methods
 - **Ruby**: `Kernel.printf`/`sprintf`, `IO#printf`, `String#%` receiver
 - **Swift**: modeled uncontrolled format-string sinks
+- **Objective-C / Cocoa**: `NSLog(userInput)`, `[NSString stringWithFormat:userInput]` / `+localizedStringWithFormat:`, `[NSString initWithFormat:]`, `[NSException raise:format:]`, `[label setText:[NSString stringWithFormat:userControlled]]`, and the C bridge `printf([userInput UTF8String])` — user input as the **format** string. The `%@` object specifier and `%n` make this a read/leak/crash primitive. **SAFE**: always a literal format with data as an argument — `NSLog(@"%@", userInput)`.
 - **Python**: attacker-controlled template passed to `str.format`, `str.format_map`, `string.Formatter().format`/`vformat`, or `"...%s..." % user` where the *template* (not the data) is tainted. Unlike printf-style bugs, Python's `{}` field-access syntax lets the template **traverse object attributes and globals** — see the Python section below.
 
 ## Vulnerable Conditions

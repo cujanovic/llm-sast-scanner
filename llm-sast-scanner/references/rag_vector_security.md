@@ -17,6 +17,9 @@ The core pattern: *a similarity search runs without the requesting user's author
 - **Indirect injection via RAG**: untrusted documents are embedded without validation; retrieved chunks carry hidden instructions/zero-width text that reach the model (chains with `prompt_injection.md`)
 - **Embedding exposure / inversion**: API returns raw embedding vectors, enabling reconstruction of sensitive source text
 - **Knowledge-base poisoning**: an attacker who can add documents biases or backdoors future answers
+- **Retrieval-ranking / top-k poisoning**: a crafted chunk (keyword stuffing, embedding-space crafting) outranks legitimate sources into the top-k — ranking by raw similarity alone, with no per-source trust/authority weighting, lets a poisoned doc dominate the context
+- **Context-window exhaustion**: a flood of retrieved chunks (many or oversized) pushes the system prompt / safety instructions out of the window — no per-source context-share cap, and retrieved content placed ahead of the system prompt
+- **Citation spoofing**: the model emits fabricated or mismatched citations rendered to the user without verifying the cited claim against the actual retrieved span
 
 **What it is NOT**
 - The downstream prompt-following behavior itself — see `prompt_injection.md` (RAG is the *delivery channel*)
@@ -35,6 +38,8 @@ The core pattern: *a similarity search runs without the requesting user's author
 - Per-tenant collections/namespaces, or a mandatory `tenant_id` filter verified server-side
 - Document validation before embedding (length, injection patterns, zero-width/hidden chars), provenance tracking
 - Return only content + scores from search APIs — never raw embeddings; add noise/quantize if vectors must leave
+- Trust/authority-weighted ranking plus a per-source context-share cap, so no single (possibly poisoned) source dominates the top-k or the window; keep the system prompt fixed and positioned so retrieved data cannot displace it
+- Verify model-emitted citations against the retrieved spans (claim-to-source grounding) before rendering them to the user
 
 ## Recon Indicators
 
@@ -53,6 +58,9 @@ The core pattern: *a similarity search runs without the requesting user's author
 - User-supplied or crawled documents are embedded without scanning for injection markers or hidden characters.
 - An `/embed` endpoint returns raw vectors for arbitrary input.
 - Any user with write access to the index can insert documents that later steer answers for other users.
+- Top-k ranks by raw similarity only (no trust/authority weight, no per-source cap), so a crafted high-similarity chunk outranks legitimate sources.
+- Retrieved chunks are concatenated unbounded — and ahead of the system prompt — so a flood of retrieved content displaces the system/safety instructions.
+- Model-emitted citations are rendered without checking that the cited span actually supports the claim.
 
 ## Safe Patterns
 
@@ -88,6 +96,29 @@ def safe_to_index(text: str) -> bool:
 ```python
 # SAFE — search API returns content + score only, never raw vectors
 return jsonify({"results": [{"content": r.content, "score": float(r.score)} for r in hits]})
+```
+
+```python
+# SAFE — trust-weighted ranking + per-source context cap; system prompt fixed, retrieved data after it
+hits = db.similarity_search(embed(query), k=k*4, filter=perm_filter)
+ranked = sorted(hits, key=lambda h: h.score * SOURCE_TRUST.get(h.metadata["source"], 0.5), reverse=True)
+budget, per_source = [], {}
+for h in ranked:                                  # cap any one source's share of the window
+    s = h.metadata["source"]
+    if per_source.get(s, 0) >= MAX_PER_SOURCE: continue
+    per_source[s] = per_source.get(s, 0) + 1
+    budget.append(h)
+    if len(budget) >= k: break
+# system prompt is fixed and the message role keeps it out of reach of retrieved data
+messages = [{"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": f"{datamark([h.content for h in budget])}\n\nQ: {query}"}]
+```
+
+```python
+# SAFE — verify each citation is grounded in its retrieved span before rendering
+for marker, span_id in parse_citations(resp):
+    if span_id not in retrieved or not claim_supported_by(resp, marker, retrieved[span_id]):
+        raise CitationError(f"unsupported/spoofed citation {marker}")   # NLI or span-overlap check
 ```
 
 ## Severity & Triage

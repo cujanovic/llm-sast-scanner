@@ -165,6 +165,17 @@ The contrast between `permit!` vs `permit(:name, :email)` is the canonical safe 
 **SAFE**: `const { name, email } = req.body; User.update({ name, email })`.
 **SAFE**: `_.pick(req.body, ['name', 'email'])` or `lodash/omit(req.body, ['role', 'isAdmin'])` — prefer pick (allowlist).
 
+### TypeScript validation-library passthrough (Zod / Yup) → ORM write
+
+A schema validator is a mass-assignment **allowlist only when it strips keys it didn't declare**. Zod's default `.parse()`/`.safeParse()` *does* strip unknown keys — but `.passthrough()`, `.catchall(z.any())`, and `.merge(z.record(...))` / `.and(z.record(...))` opt out and **retain attacker-chosen keys** on the parsed output. The validated object is then **still tainted**: spreading or passing it into a column-scoped ORM write assigns whatever extra columns the request carried. The validator looked like a guard but admitted `role`/`isAdmin`/`credits`.
+
+**VULN**: `const P = z.object({ name: z.string() }).passthrough(); const parsed = P.parse(req.body); await db.update(users).set({ ...parsed })` — `parsed` still carries undeclared columns.
+**VULN**: `.catchall(z.any())` on the schema, or `await db.insert(orders).values(parsed)` — same hole via insert.
+**VULN (Yup)**: `schema.validate(body, { stripUnknown: false })`, or a schema with no `.noUnknown()` — unknown keys survive validation.
+**SAFE**: rely on Zod's default strip (do **not** call `.passthrough()`/`.catchall()`), or `.strict()` (throws on any unknown key); Yup `.noUnknown()` / `validate(..., { stripUnknown: true })`. Then still bind only declared columns into the ORM call.
+
+**Key rule for SAST**: treat any spread/pass of a *parsed/validated* object into an ORM write as a sink — **post-validation data is not an allowlist unless the schema strips unknown keys**. Column-scoped writes that are sinks here: Drizzle `.values(obj)` / `.set(obj)`, Prisma `create({ data: obj })` / `update({ data: obj })`, Mongoose `create`/`updateOne`. Recon: `rg -n "\.passthrough\s*\(|\.catchall\s*\(|stripUnknown\s*:\s*false"` then check whether the parsed result feeds an ORM `values`/`set`/`data`.
+
 ## Common False Alarms
 
 - `permit` with explicit safe field list even when params originate from remote input.

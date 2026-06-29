@@ -113,6 +113,8 @@ function validateRedirect(requested, registeredList) {
 }
 ```
 
+**`@`-userinfo bypass + the trailing-slash discriminator.** A prefix check is also defeated by the URL *userinfo* component: `https://app.example.com@evil.com/cb` passes `startsWith("https://app.example.com")`, but a browser parses everything before the `@` as userinfo and navigates to **evil.com**. Exploitability turns on a **trailing slash**: `startsWith("https://app.example.com")` (no slash) is vulnerable (`...com@evil.com` matches the prefix), while `startsWith("https://app.example.com/")` (with slash) is **not** — the `@` then falls after the first path `/`, so the authority stays the legit host. (URL rule: `@` separates userinfo from host; the host component ends at the first `/`, `?`, or `#`.) Use this as a true/false-positive discriminator on prefix-match findings: a **no-trailing-slash** prefix is exploitable via both `@`-userinfo and the `.evil.com` sibling-domain trick; a **trailing-slash** prefix closes the `@`-userinfo vector (still verify there's no path wildcard / open redirect path). The robust fix remains exact-match against the registered set.
+
 ```javascript
 // VULN: callback without state verification — CSRF / forced login
 app.get('/oauth/callback', async (req, res) => {

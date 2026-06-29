@@ -93,6 +93,20 @@ Use as a domain-scoping checklist; not all categories apply to every application
 - Replay prior steps with altered parameters (e.g., swap price after approval but before capture)
 - Split a single constrained action into many sub-actions under the threshold (limit slicing)
 
+### Rollback / Restore / Undo Re-authorization
+
+The forward path is guarded; the **undo direction** often is not. Operations that *reconstruct persisted state* from a historical snapshot — undelete, restore-from-backup, revert-to-revision, undo, un-cancel, un-ban — frequently re-write privileged or access-control fields (`role`, `permissions`, `acl`, `sharedWith`, `visibility`, `status`, `ownerId`, `tenantId`, membership) straight from the snapshot **without re-validating them against *current* policy**. The result is *privilege/access resurrection*:
+
+- **Undelete restores a revoked privilege** — a soft-deleted account is restored from a snapshot carrying its old `role: "admin"` even though an admin demoted the user before deletion; the restore re-persists admin rights the DB had already revoked.
+- **Revert-to-revision restores stale authorization** — reverting a document to an old revision copies that revision's `visibility`/`sharedWith`, silently re-publishing a now-private resource and re-granting collaborators who were since removed.
+- **Restore/undo resurrects banned or expired state** — un-ban, restore a cancelled subscription at its old tier, re-activate a membership in an org the user was removed from.
+
+This is distinct from two patterns covered elsewhere: it is **not** forward state-machine abuse (skip/reorder/replay *forward* steps, above), and **not** stale-role-via-cached-token (`privilege_escalation.md` — a role never re-checked at use); here an undo operation *actively re-writes* revoked state back into storage. An ownership check on the tombstone/revision is **necessary but insufficient** — it authorizes *who* restores, not *what* privileged state gets resurrected.
+
+- **SAST signal**: an undelete/restore/revert/undo handler that writes authority/visibility fields from a stored snapshot, revision, or tombstone with no re-check that those values are still valid under current policy. Recon: `rg -ni "restore|undelete|undo|revert|recover|rollback|reinstate|unarchive" --glob '*.{js,ts,py,go,rb,java,cs}'` then check whether the write copies `role`/`acl`/`visibility`/`status`/`owner`/`tenant` from the historical record.
+- **Safe**: on restore, re-derive privileged and ACL/visibility fields from *current* policy (never trust the snapshot's copy); re-run the same authorization and validation the create/forward path enforces; restore only non-authority content fields and recompute role/visibility/membership from current state; refuse to restore a resource into a state that would violate current rules.
+- Bulk **import / restore-from-backup** planting cross-tenant or foreign-owner records is the data-injection sibling — see `idor.md` (Bulk & Batch: imports referencing foreign `ownerId`/`tenantId` bypass creation-time checks).
+
 ### Concurrency and Idempotency
 
 - Parallelize identical operations to bypass atomic checks (create, apply, redeem, transfer)

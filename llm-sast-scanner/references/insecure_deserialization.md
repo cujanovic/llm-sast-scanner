@@ -68,6 +68,18 @@ Insecure deserialization happens when an application reconstructs objects from u
 - **SpEL** (Spring): `#{...}` expressions in user-controlled contexts
 - **MVEL/EL**: Dynamic evaluation of user input
 
+### BEAM (Erlang / Elixir)
+- `:erlang.binary_to_term(input)` / `erlang:binary_to_term(Input)` **without** the `[:safe]` / `[safe]` option — deserializes attacker bytes into arbitrary terms (new **atoms** → atom-table exhaustion DoS, see `denial_of_service.md`; funs/pids; historically reaches gadget chains). Also `:erlang.binary_to_term(input, [])` (empty opts ≠ safe).
+- **SAFE**: pass `[:safe]`, which rejects terms that would create new atoms/funs/external pids; better still, do not `binary_to_term` request/cookie bytes at all — and treat a Phoenix signed-cookie/session store as attacker-controlled if the signing key can leak or verification is skipped.
+
+### Rust (serde ecosystem)
+- Binary/format deserializers fed untrusted bytes: `bincode::deserialize(...)`, `postcard::from_bytes(...)`, `serde_pickle::from_slice(...)`, and `serde_yaml::from_str(...)` (untrusted YAML → type confusion / resource blow-up). The risk is deserializing into a rich/`#[serde(deny_unknown_fields)]`-less target, or any type whose `Deserialize`/`Drop` does work.
+- **SAFE**: deserialize only into narrow, fully-typed structs from a trusted source; prefer length/size-bounded formats; never deserialize attacker bytes into trait objects / dynamically-typed values.
+
+### Apple (Swift / Objective-C)
+- `NSKeyedUnarchiver.unarchiveObject(with:)` (Swift) / `[NSKeyedUnarchiver unarchiveObjectWithData:]` (Obj-C) — the legacy **non-secure-coding** unarchive of attacker data instantiates arbitrary classes. Also `PropertyListSerialization.propertyList(from:...)` / `[NSPropertyListSerialization propertyListWithData:]` on untrusted bytes.
+- **SAFE**: `NSKeyedUnarchiver.unarchivedObject(ofClass:from:)` / `unarchivedObject(ofClasses:from:)` with `requiresSecureCoding = true` and an explicit class allowlist.
+
 ## Detection Patterns (Static Analysis)
 
 ### High-Confidence Indicators

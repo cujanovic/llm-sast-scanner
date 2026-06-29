@@ -189,6 +189,18 @@ location / {
 
 **Recon**: `proxy_pass` to a non-local/third-party upstream **without** a matching `proxy_hide_header`/`proxy_ignore_headers X-Accel-Redirect`; an `internal` location holding sensitive files reachable via `X-Accel-Redirect`.
 
+## OpenResty / Lua handler code (`*_by_lua*`, `content_by_lua`, `.lua` modules)
+
+The directive-level findings above do not cover **Lua handler code** running inside nginx (OpenResty, Kong, APISIX, lua-nginx-module). The taint sources are the same request-derived `ngx.var.*` / `ngx.req.*` values, but the sinks are Lua API calls. Scan `.lua` files and inline `*_by_lua_block` bodies for:
+
+- **Shared-dict cache poisoning** — `ngx.shared.<dict>:set(key, …)` / `:add` / `:replace` / `:incr` where `key` is request-derived (`ngx.var.arg_*`, `ngx.var.http_*`, a path segment). `ngx.shared.*` is **shared across every nginx worker process**, so one poisoned write serves all subsequent requests on any worker — a cross-worker cache-poisoning / trust-boundary sink with no per-request isolation. **Safe**: namespace keys with a server-trusted prefix; never key a shared dict directly on raw request input. (Cross-ref `web_cache_deception.md`, `shared_client_cache_leak.md`.)
+- **Internal subrequest / SSRF** — `ngx.location.capture(uri)` / `capture_multi` or `ngx.exec(uri)` where `uri`/upstream is built from request input, e.g. `local u = "http://" .. ngx.var.arg_target .. "/api"`. Lua's string-concat operator is `..` (not `+`), so URL building reads as `"http://" .. var`. These reach internal `@named`/`/internal` locations and external hosts. **Safe**: fixed upstreams or an allowlist; never concatenate request input into a capture/exec target. (Cross-ref `ssrf.md`.)
+- **Open redirect** — `ngx.redirect(ngx.var.arg_next)` (or any request-derived target) with no allowlist. (Cross-ref `open_redirect.md`.)
+- **Command injection** — `os.execute(cmd)` / `io.popen(cmd)` with `cmd` built by `..` from `ngx.var.*`. (Cross-ref `rce.md`.)
+- **Greedy / unanchored host allowlist** — host/URL validation via `ngx.re.match(host, ".*allowed%.com.*")` (PCRE) or `string.match`/`string.find` with a **Lua pattern**. Two pitfalls: (1) an unanchored/greedy pattern matches `allowed.com.attacker.com` and `evil.com/allowed.com` — anchor with `^…$` and compare the **parsed host**, not a substring; (2) **Lua patterns are not regex** — `%` is the escape char (so `%.` is a literal dot) and there is no alternation, so allowlist logic copied from a regex is frequently wrong. (Cross-ref `ssrf.md`, `open_redirect.md`, `regex_injection_redos.md`.)
+
+**Recon**: `rg -n "ngx\.shared\.\w+:(set|add|replace|incr)|ngx\.location\.capture|ngx\.exec\s*\(|ngx\.redirect\s*\(|os\.execute\s*\(|io\.popen\s*\(|ngx\.re\.match" --glob '*.lua'` and the same inside `*_by_lua_block { … }` in `nginx.conf`; then trace whether the key/URL/target/command is `ngx.var.*`-derived.
+
 ## Cross-References (enrich these classes with the nginx signal)
 
 - **Path traversal** → `path_traversal_lfi_rfi.md` (alias/`location` mismatch)

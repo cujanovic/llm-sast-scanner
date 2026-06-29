@@ -105,6 +105,16 @@ Grep for route/handler definitions, then verify each sensitive endpoint has **bo
 
 Trace middleware order: middleware registered **after** the route does not protect it. Check **every HTTP method** on the same path.
 
+### Build-strippable assertion as a security control (CWE-617)
+
+A close sibling of fail-open: the guard is present in source but **compiled/optimized out of the production build**, so it never runs and the protected action proceeds unchecked. Distinct from the env-flag/test-mode skips above (those are runtime branches) — here the security check is implemented with an assertion that the *release/optimized* configuration silently elides.
+
+- **PHP**: `assert($actor->isAdmin())` / `assert($sig_valid)` — a **no-op when `zend.assertions=-1`** (the recommended production setting), so the check disappears in prod. (Pre-8.0, `assert()` on a string also *evaluated* it — code injection.)
+- **Python**: `assert user.can_read(doc)` (authz) or `assert verify(token)` — **stripped under `python -O` / `PYTHONOPTIMIZE=1`**, so optimized deployments lose the check.
+- **Rust**: `debug_assert!(ctx.authorized)` — **compiles to nothing in `--release`**; use `assert!` only if a panic is the intended control, but prefer a real branch.
+
+**SAST signal**: an `assert(...)` / `debug_assert!(...)` whose expression is a security decision (auth/role/permission, signature/token/HMAC verify, ownership, redaction, license/quota). Recon: `rg -n "assert\s*\(" --glob '*.{php,py}'` and `rg -n "debug_assert!" --glob '*.rs'` then check whether the asserted expression is a security check. **Safe**: enforce with an always-run branch that fails closed — `if (!$actor->isAdmin()) throw new ForbiddenException();` / `if not user.can_read(doc): raise PermissionError` / `if !ctx.authorized { return Err(Denied) }`.
+
 ### Fail-Open Security Checks (CWE-636 / CWE-755)
 
 A security decision (authentication, authorization, signature/token verification, license/quota check) wrapped in error handling that **proceeds as allowed when the check throws** instead of denying. The exception path silently grants access — exactly the case attackers trigger by forcing the check to error (malformed token, unreachable auth service, null lookup).
@@ -436,6 +446,7 @@ if (req.session.adminVerified) return next();
 
 - UI hiding admin nav/buttons is not authorization. **SAST signal**: frontend `if (user.role === 'admin')` with no corresponding server guard on the API the UI calls.
 - **VULN**: API trusts client header mirroring UI state (`X-Admin-Mode: true`, `X-Requested-With` as auth substitute).
+- **VULN — framework-internal / "internal" header trusted as a trust or identity marker**: a handler treats the presence of a header the *framework or gateway sets internally* — e.g. `x-middleware-subrequest`, `x-middleware-*`, `x-next-*`, or a custom `x-internal`/`x-trusted`/`x-from-gateway` — as proof the request is internal/authenticated. An external client can send the same header, so it is bypassable. **SAST signal**: a conditional reading such a header that then skips auth, returns privileged data, or marks the request "internal." **Safe**: strip framework-internal and `internal`/`trusted` headers at the trust boundary (edge/proxy/load balancer) on every inbound request, and re-verify authorization in the handler — never treat a client-settable header as proof of origin. (Same failure mode as the spoofable-IP-header trust above; it also defeats middleware-only auth — re-check authz in the handler, not only at the edge.)
 
 ---
 

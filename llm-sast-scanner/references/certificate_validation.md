@@ -156,6 +156,10 @@ params.setRevocationEnabled(false); // no addCertPathChecker replacement
 | .NET | `ServerCertificateValidationCallback` always returns `true` |
 | Paramiko SSH | `AutoAddPolicy()`, `WarningPolicy()` |
 | Android WebView | `onReceivedSslError` → `handler.proceed()` |
+| Erlang/Elixir | `ssl:connect(..., [{verify, verify_none}])` / `:ssl.connect(..., [verify: :verify_none])`; `{fail_if_no_peer_cert, false}` on a server (no `verify_peer`) |
+| Swift Alamofire | `ServerTrustManager(evaluators: [host: DisabledTrustEvaluator()])` (disables evaluation per-host) |
+| Obj-C AFNetworking | `AFSecurityPolicy.allowInvalidCertificates = YES`, `validatesDomainName = NO` |
+| Obj-C WebKit/NSURLConnection | `[NSURLRequest setAllowsAnyHTTPSCertificate:YES forHost:]`; `didReceiveAuthenticationChallenge` → `continueWithoutCredentialForAuthenticationChallenge` |
 
 Distinguish test-only usage (`_test.go`, `*Test.java`, mock servers) from production client initialization.
 

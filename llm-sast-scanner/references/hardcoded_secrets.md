@@ -52,6 +52,15 @@ Decide whether the file reaches a client. Treat as **publicly accessible** when 
 - **Type defs / docs / examples** — `interface Config { apiKey: string }`, doc comments, `.env.example` (template; only a finding if a matching real `.env` is committed or the value is real), hash checksums, build IDs, commit SHAs.
 - **`process.env` references with no literal** — a `NEXT_PUBLIC_*` *name* is only a finding when a real value is hardcoded in source, not when read from a gitignored env.
 
+## Adjacent case: secret with a weak fallback (default-on-unset)
+
+The "skip `process.env.*`" rule has **one exception**: a secret-named env read with a **string-literal fallback** — `process.env.JWT_SECRET || "dev-secret"`, `?? "changeme"`, Python `os.getenv("SECRET_KEY", "dev")`, Lua `os.getenv("KEY") or "..."`, Ruby `ENV["X"] || "..."`. The literal is **not** a placeholder to ignore: it is the value the process actually runs on **whenever the env var is unset**, so a missing secret in production silently falls back to a guessable, source-visible default → forgeable JWTs/sessions, fail-open auth.
+
+- **Flag the fallback literal regardless of length or "placeholder" wording.** `"changeme"` / `"dev-secret"` in the *fallback position* **are** the live secret when the env is unset, so the normal placeholder and `{16,}`-length suppressions do **not** apply here.
+- This is a **config-failure backdoor**, distinct from a literal assigned directly: the literal activates only on the unset path. Fix = **fail closed** — read with no literal default and throw on absence (`const s = process.env.JWT_SECRET; if (!s) throw …`), never `|| "<literal>"`.
+- Recon: `rg -n "(SECRET|TOKEN|KEY|PASSWORD|CREDENTIAL|AUTH)\w*\s*(\|\||\?\?)\s*['\"]|getenv\([^)]*(SECRET|TOKEN|KEY|PASSWORD)[^)]*,\s*['\"]"`.
+- The non-secret analogue — a *security control* gated on a truthy env flag (`if (process.env.DISABLE_AUTH)`) — is in `environment_variable_injection.md`.
+
 ## Recon Indicators
 
 Grep for provider formats and secret-named assignments, then resolve the client/backend routing above.
@@ -103,7 +112,7 @@ rg -ni "(api[_-]?key|secret|token|client[_-]?secret|signing[_-]?key|private[_-]?
 rg -n "NEXT_PUBLIC_|REACT_APP_|VITE_|VUE_APP_|NG_APP_"
 ```
 
-**Skip during recon:** `node_modules/`, `dist/`/`build/` *vendor* output (but DO inspect first-party bundles for client exposure), `.git/` blobs, `process.env.*` / `os.environ` / `System.getenv`, obvious placeholders, public keys, `*.lock` hashes.
+**Skip during recon:** `node_modules/`, `dist/`/`build/` *vendor* output (but DO inspect first-party bundles for client exposure), `.git/` blobs, `process.env.*` / `os.environ` / `System.getenv` (**except** when followed by a `||` / `??` / `or` string-literal fallback — see *Adjacent case* above), obvious placeholders, public keys, `*.lock` hashes.
 
 ## Verify (two questions)
 

@@ -44,6 +44,15 @@ This is distinct from command injection (no shell metacharacters needed — the 
 
 **Tainted variable name = High by default** (attacker can choose any of the above). **Tainted value of a fixed, non-security variable = Medium/Low** depending on what reads it.
 
+## Adjacent smell: insecure env-flag parsing (a config bug, not injection)
+
+Distinct from the injection sink above (no attacker-controlled write) — this is the developer-side bug of **gating a security control on a raw env-flag read used as a boolean**. In JS a non-empty string is truthy (`Boolean("false") === true`), and the same trap exists in other languages (Python `os.environ.get("X")` truthiness, Go non-empty string, shell `[ -n "$X" ]`):
+
+- `if (process.env.DISABLE_AUTH) { …skip auth… }` — setting `DISABLE_AUTH=false` is a non-empty string → still truthy → **auth stays disabled**.
+- `if (process.env.ENABLE_RATE_LIMIT) { app.use(rateLimit()) }` — unset → `undefined` → falsy → the control is **never installed** (fail-open by default).
+
+**Safe**: parse the flag explicitly and fail closed — `process.env.DISABLE_AUTH === "true"` (default security ON; an unset or unrecognized value must keep the control enabled), and require an explicit opt-out rather than relying on truthiness. A security control whose *enabled* state depends on an env-flag's truthiness, with no fail-closed default, is the smell.
+
 ## Vulnerable vs Safe
 
 **VULN (Node.js — attacker controls both name and value → can set `LD_PRELOAD`/`JWT_SECRET`):**

@@ -54,6 +54,33 @@ Also scan: OpenAPI/GraphQL/Proto field names, ORM models, DB migrations, form `n
 
 This tiering decides *PII presence*; severity still comes from the **sink** (logging, third-party/LLM egress, cross-tenant exposure) per the rules below — a single highly-sensitive strong field (SSN/card/health) reaching a logging or off-tenant sink is high severity regardless of the count.
 
+### PII value-shape signatures (scanning *content*, not field names)
+
+The field-name table decides whether a struct/endpoint *handles* PII. To detect PII **values** leaving through a content sink — model output/completions, logs, telemetry payloads, URLs — match value shapes:
+
+| PII | Regex | Note |
+|-----|-------|------|
+| Email | `\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b` | |
+| Phone | `\+?\d[\d\s().-]{6,}\d` | noisy — require PII context or ≥2 signals |
+| US SSN | `\b\d{3}-\d{2}-\d{4}\b` | |
+| Credit card | `\b(?:\d[ -]?){13,16}\b` | **Luhn-validate** before flagging |
+
+False-positive controls (essential — these regexes are otherwise noisy): **Luhn-validate** (mod-10) every card candidate before reporting — most random 13–16-digit runs fail Luhn; **exclude a card-shaped span from the phone match** so one number isn't double-counted; treat value-shape scanning as **locale-sensitive** (enable per region). Use these to power an egress/output filter and to confirm a field-name hit actually carries PII. For secret value shapes (API-key/token regexes + high-entropy fallback) see `information_disclosure.md`.
+
+**Health & financial identifiers** — higher-impact (PHI/PCI/GDPR), but the bare digit shapes are *extremely* noisy, so report only on a **passing checksum** or an **adjacent identifier keyword**:
+
+| Identifier | Regex | Required validation |
+|-----------|-------|---------------------|
+| Medical record no. | `\b(?:MRN\|MR#\|MED)\s*[-:#]?\s*\d{6,10}\b` (case-insensitive) | keyword-anchored by the prefix itself |
+| NPI (US provider) | `\b\d{10}\b` | **Luhn over `80840` + the 10 digits** (CMS checksum) — mandatory; a bare 10-digit run is noise |
+| DEA registration | `\b[A-Z][A-Z9]\d{7}\b` | **check digit**: over the 7 digits, `(d1+d3+d5) + 2·(d2+d4+d6) ≡ d7 (mod 10)` |
+| IBAN | `\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}[A-Z0-9]{0,16}\b` | **mod-97 (ISO 7064)**: move first 4 chars to the end, map `A`→10…`Z`→35, value `% 97 == 1` |
+| UK NHS number | `\b\d{3}[-\s]?\d{3}[-\s]?\d{4}\b` | **mod-11** over first 9 digits (weights 10…2); check = `11 − (sum % 11)`, `11`→`0`, `10`→invalid |
+| US driver's license | state-specific, e.g. CA `\b[A-Z]\d{7}\b`, FL `\b[A-Z]\d{12}\b`, IL `\b[A-Z]\d{11}\b` | context-anchor (a "license" keyword nearby) — low specificity alone |
+| US passport | `\b[A-Z]{1,2}\d{6,7}\b` | context-anchor — low specificity alone |
+
+The checksum (NPI/DEA/IBAN/NHS) or keyword context (MRN/DL/passport) is **mandatory**, not optional: `\b\d{10}\b` and `\b\d{3} \d{3} \d{4}\b` match vast amounts of benign numeric data. These matter most when health/billing values reach a **log, off-tenant HTTP/analytics, or an LLM prompt** — a PHI/financial disclosure (cross-ref `information_disclosure.md` LLM02).
+
 ### Logging / analytics / telemetry sinks
 
 | Sink type | Grep / structural targets |

@@ -88,6 +88,7 @@ For each outbound hit: confirm allowlist validation and internal-IP/metadata blo
 6. **Unauthenticated inbound**: POST to `/webhooks/stripe` (or generic provider route) parses body and updates account state with no signature header check.
 7. **Replay**: same signed payload accepted indefinitely; no `timestamp` skew window (e.g. ±5 minutes) or event-id idempotency store.
 8. **Secret disclosure**: create-webhook response includes `signing_secret`; secret written to application logs on delivery failure.
+9. **Signature verified over the wrong bytes**: HMAC computed over a *re-serialized* parsed body (`createHmac(...).update(JSON.stringify(await req.json()))`, `hmac(json.dumps(parsed))`) instead of the **exact raw request bytes** the sender signed. `JSON.stringify`/`json.dumps` of the parsed object differs from the original payload in key order, whitespace, and number/unicode escaping, so the digest can never match a legitimate signature — and frameworks that auto-parse the body (Next.js `req.json()`, Express default `json()` middleware, FastAPI model binding) make this the *default* mistake, pushing developers to weaken or skip the check to make it "work." **Capture and HMAC the raw bytes before any parse.** SAST signal: an HMAC `update(...)` whose argument is a parsed/stringified body rather than a raw buffer/`req.rawBody`/`await req.text()`.
 
 ## Vulnerable vs Safe Code Examples
 
@@ -133,7 +134,16 @@ app.post('/webhooks/events', (req, res) => {
   res.sendStatus(200);
 });
 
-// SAFE — HMAC verify + timestamp window + constant-time compare
+// VULN — HMAC over a RE-SERIALIZED parsed body: digest can never match the sender's raw-byte signature
+app.post('/webhooks/events', express.json(), (req, res) => {        // auto-parses & discards raw bytes
+  const expected = crypto.createHmac('sha256', WEBHOOK_SECRET)
+    .update(JSON.stringify(req.body)).digest('hex');                // wrong input: re-serialized, not raw
+  if (req.headers['x-signature'] !== expected) return res.sendStatus(401); // also non-constant-time
+  processOrderUpdate(req.body);
+  res.sendStatus(200);
+});
+
+// SAFE — HMAC verify + timestamp window + constant-time compare (note: HMAC over the RAW body bytes)
 import crypto from 'crypto';
 app.post('/webhooks/events', express.raw({ type: '*/*' }), (req, res) => {
   const sig = req.headers['x-signature'];

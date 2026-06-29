@@ -151,6 +151,18 @@ rg -n "(requests\.(get|post)|fetch|http\.(Get|NewRequest)|HttpClient|RestTemplat
 rg -n "[\"'\`]https?://[^\"'\`]*(\?[^\"'\`]*=)?\$\{|f[\"']https?://[^\"']*\{" --glob '*.{py,js,ts}'
 ```
 
+## Unsafe Consumption of APIs (OWASP API10:2023)
+
+The inverse direction of Server-Side Parameter Pollution above. SSPP is about the request you **build** from user input; this is about the response you **consume**. **A field from a third-party / upstream API response is exactly as untrusted as user input** — if an attacker compromises (or simply operates) the upstream service, they control that field. Treat any `resp.json()[...]` / `response.data.*` value that flows into a dangerous sink (SQL, shell, file path, redirect, SSRF, HTML, deserialization) as tainted.
+
+- **Default exploitability is `reachable`**, not theoretical: under a supply-chain threat model the upstream is assumed attacker-influencable. Downgrade to `conditional` only when architecture shows the service is same-trust-boundary (VPC + mTLS + same deploy unit). **Ambiguous boundary → treat as third-party and flag.**
+- **Validation must sit BETWEEN the response extraction and the sink.** Validating *other* fields, or validating *after* the sink call, does not count. The taint path is: `response.json()` → (no validation) → sink.
+- **Typed deserialization is implicit validation; untyped is not.** Java `objectMapper.readValue(body, OrderDto.class)` (typed POJO) constrains the shape → safe-ish; `readValue(body, Map.class)` / `Dictionary<string,object>` / Go `json.Unmarshal(body, &map)` keeps it free-form → still tainted. A numeric cast (`int(field)`) only neutralizes injection if the result reaches a **parameterized** placeholder, not string concatenation.
+- **Second-order variant**: an upstream field stored to DB/cache/file unvalidated, then later read into a sink — trace write→read→sink (e.g. caching an upstream `callback_url`, later `POST`ing to it = SSRF).
+
+**VULN**: `data = requests.get(partner_url).json(); db.execute("... status='" + data["status"] + "'")` — upstream field straight into SQL with nothing in between.
+**SAFE**: validate/normalize the extracted field against an expected schema/enum *before* the sink (`OrderResp.model_validate(resp.json())`, typed POJO, allowlist/regex on the specific field), and bind via parameterized queries. Cross-ref the sink's own class (`sql_injection.md`, `rce.md`, `ssrf.md`, `path_traversal_lfi_rfi.md`, `xss.md`, `insecure_deserialization.md`).
+
 ## Safe Patterns
 
 **Response shaping**

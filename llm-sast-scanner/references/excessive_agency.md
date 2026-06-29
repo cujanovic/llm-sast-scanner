@@ -45,6 +45,7 @@ The core pattern: *a model is wired to a tool/credential/action whose blast radi
 | Admin/broad creds in agent path | `user=["']?admin`, `DB_ADMIN`, `root`, wildcard IAM (`"Action":"*"`), broadly-scoped `scope=`/`Authorization` reused for tool calls |
 | Autonomous high-impact action | `send_email(`, `transfer`, `delete_account`, `refund`, `deploy`, `charge`, `payout` invoked directly from `action = llm...` with no approval/confirm branch |
 | Missing gate | absence of `requires_approval`, `confirm`, `human_in_the_loop`, rate-limit, or audit-log around the above |
+| Unscreened command at execution boundary | a model-chosen command reaching `subprocess.run(cmd, shell=True)` / `os.system` / `exec` with no decode + denylist + normalization step before it runs (esp. in autonomous recon/pentest agents) |
 
 ## Vulnerable Conditions
 
@@ -105,6 +106,58 @@ return execute_action(action) if level == "low" else execute_with_audit(action)
 ```
 
 Additional barriers: per-user/per-action rate limiting and quotas; audit logging of every tool invocation (user, action, params, result) with anomaly alerts; separate agents/contexts for different privilege tiers.
+
+### Framework HITL-gate APIs and their bypasses
+
+The generic rule "gate high-impact actions behind human approval" maps to concrete framework primitives. Two failure shapes: an explicit **bypass flag**, and a **gate that doesn't actually block**.
+
+- **Danger-bypass flag literals (grep, treat as high-confidence)**: `allow_dangerous_requests=True`, `allow_dangerous_code=True`, `auto_approve=True`, `bypass_confirmation=True`, `skip_human_review`, `skip_approval`, `no_confirm`, `force_execute`, `dangerously_allow`, and AutoGen `human_input_mode="NEVER"` (`"ALWAYS"`/`"TERMINATE"` = human-in-loop). LangChain documents `allow_dangerous_requests=True` as explicitly disabling the safety warning.
+- **Real gate APIs whose *presence* is the FP-killer**: LangChain `HumanApprovalCallbackHandler` (on the executor or per-tool `callbacks=[...]`); LangGraph `interrupt_before=[...]` / `interrupt_after=[...]` in `.compile(checkpointer=..., interrupt_before=[...])`; LlamaIndex `before_action=fn`; Vercel AI `onStepFinish` guard.
+- **"Logging is not a gate."** A callback (e.g. `on_tool_start`) that only logs and returns — without raising, blocking, or prompting a human — does **not** stop the tool. Audit logging is a separate barrier; a log-only hook fails to constitute the approval gate. Require the gate to *raise/throw/return-to-block*.
+- **Partial gate (node-membership)**: LangGraph `interrupt_before=["plan"]` gates a benign node while the **destructive** node (`execute_payment`) is absent from the interrupt list → still ungated. Verify the destructive node is actually in the interrupt set, not merely that an interrupt exists.
+
+### Tool dispatch — the model chooses which function runs
+
+Distinct from *authority* (above): here the **model's output selects which function/route executes**. The dispatch code only ever sees clean tool-call JSON — never the injected instruction that produced it — so **the model is an untrusted dispatcher**, and a fully trusted user's session is still dangerous. Severity is gated on whether **any attacker-influenceable text** (a RAG doc, a prior tool result, an email/PDF body, an agent-to-agent message) can reach the context window — *not* on who is prompting.
+
+- **Reflection / dict dispatch keyed on model output**: `TOOL_MAP[name](**args)`, `getattr(obj, name)(args)`, `globals()[name]`, `handlers.get(name)(args)` (and Ruby `send`/`public_send`, Java `getMethod(name).invoke`, Go `MethodByName(name).Call`). The sink mechanics are the dynamic-dispatch RCE in `rce.md`; the addition here is that the **model** supplies `name`/`args`, so an allowlist must run **before** the lookup. (See `rce.md` for the reflection sink list.)
+- **LangGraph edge-routing on verbatim model output**: `add_conditional_edges(node, lambda s: s["next"], {... "admin_cleanup": "admin_cleanup"})` where `s["next"]` is the model's chosen route and a destructive node is in the edge map. There is no callable lookup at all — reaching the node *is* the action — so a function-name allowlist won't catch it; the route value itself must be constrained.
+- **Registry-narrow ≠ safe — check the argument schema**: a one-tool registry can still ship an unconstrained arg (`{"path": {"type": "string"}}` with no `enum`/`pattern`/`maxLength`, or `additionalProperties` absent while the impl does `**input`). The argument schema is a separate attack surface from the tool list.
+- **`JSON.parse` alone is not validation.** A typed-schema validation (`pydantic .model_validate`, Zod `.parse`, `jsonschema.validate`/Ajv) must run **after** the parse and **before** dispatch — and an `enum` over safe values still needs `realpath`/`startswith(base)` to defeat symlink escape. Cross-ref `mcp_security.md` (tool arg-schema) and `prompt_injection.md` (the upstream injection that steers the dispatch).
+
+### Command-execution guardrail (screen the agent's chosen command)
+
+When an agent legitimately needs a command/shell tool, add a guardrail at the **execution boundary** that screens the command the model actually chose — defense-in-depth *behind* least-functionality and typed params, for the case where injection (often indirect — see `prompt_injection.md`) hijacked the model's intent.
+
+```python
+# SAFE — decode, normalize, then denylist the chosen command BEFORE running it
+import base64, re, unicodedata
+DANGEROUS = [r"rm\s+-rf\s+/", r":\(\)\s*\{\s*:\|:&\s*\};:",      # wipe, fork bomb
+    r"\bnc\b.*\d+\.\d+\.\d+\.\d+", r"\b(curl|wget)\b.*\|\s*(sh|bash)",  # reverse shell / curl|sh
+    r"/dev/tcp/", r"bash\s+-i\s*>&", r"socat\s+TCP:.*EXEC",      # bash/socat reverse shell
+    r"\$\((env|id|whoami)\)", r"`(env|id|whoami)`"]              # recon/exfil substitution
+
+def screen(cmd: str) -> None:
+    norm = unicodedata.normalize("NFKD", cmd).replace("${IFS}", " ")   # defeat homograph + ${IFS} evasion
+    candidates = [norm]
+    for enc in re.findall(r"[A-Za-z0-9+/=]{16,}", norm):               # decode-before-execute
+        try: candidates.append(base64.b64decode(enc).decode("utf-8", "ignore"))
+        except Exception: pass
+        try: candidates.append(base64.b32decode(enc).decode("utf-8", "ignore"))
+        except Exception: pass
+    for c in candidates:
+        if any(re.search(p, c, re.I) for p in DANGEROUS):
+            raise PermissionError("blocked dangerous command")
+```
+
+Key points a scanner should require: **decode base64/base32 inside the command** (`echo <enc> | base64 -d`, `… | base32 -d`) and re-check the *decoded* payload, not just the literal string; **normalize evasion** (`${IFS}`→space, leetspeak/homoglyphs, commands reassembled from shell variables) before matching; and treat the denylist as a **secondary** control — a denylist is bypassable, so the primary defense remains an allowlist of fixed commands run with `shell=False`/argv (and a human gate for anything outside it).
+
+**A denylist/`argv[0]` guardrail is incomplete unless it also handles these evasions** (flag the guard as bypassable if it doesn't):
+
+- **Transparent-wrapper / env-assignment stripping** — `sudo rm -rf /`, `env X=1 rm -rf /`, `nohup`/`nice`/`ionice`/`time`/`exec <danger>` defeat an `argv[0]`-based denylist because the dangerous program isn't `argv[0]`. Strip leading wrappers and `FOO=bar` env-assignments before matching.
+- **Recurse into command-substitution and `bash -c` bodies** — split on `; && || |` and inspect the bodies of `$(...)`, backticks, and `bash -c '<payload>'` (and `sh -c`/`zsh -c`); a guard that only reads the outer argv misses `bash -c '<danger>'` and `eval "$(…)"`.
+- **Interpreter-payload bypass** — `python -c "import shutil; shutil.rmtree('/')"`, `node -e …`, `perl -e …`, `ruby -e …` route destructive operations through an interpreter, so there is no shell verb to denylist. Treat `<interpreter> -c/-e <code>` as an opaque code sink (require approval / inspect the code), not an allowed command.
+- **Fail closed on unparseable/opaque input** — if the guard can't statically parse the command (`shlex` error on unbalanced quotes) or the payload is opaque (`bash -c <blob>`), it must **escalate/deny**, never default-allow or crash open. A guard that returns "allow" on a parse exception is the bug.
 
 ## Severity & Triage
 

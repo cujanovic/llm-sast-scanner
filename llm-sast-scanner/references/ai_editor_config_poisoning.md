@@ -92,6 +92,16 @@ Grep targets (in the target-file set above):
 - GitHub Actions: `${{ github.event.* }}` interpolated into an AI/agent step; `actions/checkout` of a PR head ref followed by privileged execution
 - Gist/pastebin URL piped to a shell; password-protected archive downloaded + extracted with a hardcoded password + executed (ToxicSkills pattern)
 
+### Repo-config auto-execution at open / clone / container-create
+
+Beyond AI-editor approval flags, several **IDE and dev-container config keys auto-run shell with no confirmation** — cloning or opening the repo (or "Reopen in Container" / Codespaces) is enough. Flag these keys when the repo is untrusted:
+
+- **Dev Container lifecycle hooks** (`.devcontainer/devcontainer.json`): `postCreateCommand`, `onCreateCommand`, `updateContentCommand`, `postStartCommand`, `postAttachCommand` run inside the container on create/start; **`initializeCommand` runs on the HOST** before the container exists (worst case). A `curl … | bash` here is RCE-on-clone.
+- **VS Code task auto-run** (`.vscode/tasks.json`): a `"type": "shell"` task with `"runOptions": { "runOn": "folderOpen" }` executes the moment the folder is opened.
+- **Host-secret injection via `${localEnv:VAR}`**: devcontainer `remoteEnv`/`containerEnv` pulling `${localEnv:AWS_SECRET_ACCESS_KEY}` (or any host secret) into the container, and `mounts` with `source=${localEnv:HOME}` bind-mounting the host home into the container — combined with a lifecycle hook + outbound call = host-secret exfil chain.
+
+(The `.mcp.json` shell-bearing auto-start server + `autoApprove` vector is covered above under *Approval / guardrail bypass*.) **Safe**: no lifecycle hook runs untrusted/fetched content; tasks are not `runOn: folderOpen`; no host secrets passed via `${localEnv:}`; treat opening an untrusted repo in a configured container as code execution.
+
 ## Vulnerable Conditions
 
 - An auto-loaded agent file contains imperative command/exec directives, secrecy/log-suppression instructions, or fabricated conversation turns

@@ -328,7 +328,18 @@ Generative-AI apps disclose sensitive data through model outputs: training-data 
 
 **Sanitizers / safe patterns**:
 - Sanitize/anonymize PII before training or fine-tuning; do not feed raw secrets into prompts (see `system_prompt_leakage.md`).
-- Apply an output filter that scans completions for secret/PII patterns (API keys `sk-…`/`AKIA…`, private keys, SSNs, card numbers) and redacts before returning.
+- Apply an output filter that scans completions (and any logged prompt/completion) for secret and PII value shapes, and redacts/blocks before returning. Concrete secret value shapes:
+
+  | Secret | Regex |
+  |--------|-------|
+  | OpenAI key | `\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b` |
+  | GitHub token | `\b(?:gh[pousr]_[A-Za-z0-9]{36,}\|github_pat_[A-Za-z0-9_]{22,})\b` |
+  | AWS access key id | `\bAKIA[0-9A-Z]{16}\b` |
+  | JWT | `\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b` |
+  | Slack token | `\bxox[bpoa]-[A-Za-z0-9-]{10,}\b` |
+  | Google API key | `\bAIza[0-9A-Za-z_-]{35}\b` |
+
+  For unstructured secrets matching no known prefix, add a **high-entropy fallback**: flag a ≥40-char `[A-Za-z0-9+/=_-]` run only when its Shannon entropy clears ~4.5 bits/char (keeps random tokens, drops prose/IDs). Keep a **secret allowlist** to suppress known example/placeholder tokens. For PII value shapes (email/phone/SSN/card with Luhn validation), see `privacy_data_protection.md`.
 - Enforce permission- and tenant-scoped retrieval so context never includes unauthorized documents (see `rag_vector_security.md`).
 - Avoid logging full prompts/responses that may contain credentials or PII (see "Sensitive logging" above).
 

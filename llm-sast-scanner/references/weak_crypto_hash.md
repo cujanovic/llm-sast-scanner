@@ -13,9 +13,10 @@ Identify deprecated cryptographic algorithms, broken hash functions, and predict
 - `MessageDigest.getInstance("MD5")` — MD5 is broken
 - `MessageDigest.getInstance("SHA1")` or `"SHA-1"` — SHA-1 is broken
 - `MessageDigest.getInstance("MD2")` or `"MD4"` — obsolete
+- Other-runtime spellings of the same weak digests: Python `hashlib.md5`/`hashlib.sha1`; Node `crypto.createHash('md5'|'sha1')`; PHP `md5()`/`sha1()`; Go `crypto/md5`/`crypto/sha1`; **Apple CommonCrypto `CC_MD5`/`CC_SHA1` (and streaming `CC_MD5_Init`/`CC_SHA1_Init`), `SecDigestGetData(kSecDigestMD5/kSecDigestSHA1, …)`; Apple CryptoKit `Insecure.MD5.hash(...)` / `Insecure.SHA1.hash(...)`** (the type is literally namespaced `Insecure`).
 
 **SAFE** (any match):
-- `MessageDigest.getInstance("SHA-256")`, `"SHA-384"`, `"SHA-512"`
+- `MessageDigest.getInstance("SHA-256")`, `"SHA-384"`, `"SHA-512"`; Apple `CC_SHA256` / CryptoKit `SHA256`/`SHA512`. For passwords use bcrypt/scrypt/Argon2/PBKDF2, never a bare hash.
 
 **Mandatory**: When you see `MessageDigest.getInstance(...)`, write:
 `Hash check: algorithm=? -> weak(MD5/SHA1/MD2/MD4) or strong(SHA-256+) -> VULN or SAFE`

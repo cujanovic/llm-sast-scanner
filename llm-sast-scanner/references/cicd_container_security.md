@@ -53,6 +53,8 @@ Build pipelines and container images are high-value supply-chain targets. Attack
 | Latest tags | `FROM\s+\S+:latest`, `FROM\s+\S+\s*$` (implicit latest), `image:\s*\S+:latest` |
 | Secrets in layers | `ARG\s+(TOKEN\|PASSWORD\|SECRET\|KEY)`, `ENV\s+.*(_TOKEN\|_KEY\|PASSWORD\|SECRET)=`, `RUN\s+.*(curl\|wget).*(-H|--header).*`, `COPY\s+\.npmrc` |
 | Remote ADD | `ADD\s+https?://` |
+| Fetch-and-exec in RUN | `RUN` containing `(curl\|wget)\b.*\|\s*(sh\|bash)` — remote script piped straight into a shell at build time, no checksum (distinct from `ADD https://`) |
+| Disabled sandbox profile | `security_opt:` with `seccomp:unconfined` / `apparmor:unconfined` (compose), or `--security-opt\s+(seccomp\|apparmor)=unconfined` (docker run) — turns off the kernel-level confinement |
 | No digest | `FROM\s+\S+:\S+` without `@sha256:`; `image:\s*\S+:\S+` without digest in compose/Helm |
 | Daemon socket | `/var/run/docker\.sock`, `docker\.sock` volume mount in compose or CI service config |
 | Privileged runtime | `privileged:\s*true`, `--privileged`, `cap_add:\s*\[?\s*ALL` |
@@ -78,6 +80,8 @@ rg -n '>> ?"?\$GITHUB_(ENV|OUTPUT)|eval .*steps\..*outputs|\$\(.*steps\..*output
 - Production image uses `:latest` or unpinned tag for base or runtime `container:` image
 - `ARG NPM_TOKEN` + `RUN npm ci` without BuildKit secret mount — token persists in layer history
 - `ADD http(s)://example.com/script.sh` fetches remote content without hash verification
+- `RUN curl … | sh` / `RUN wget … | bash` fetches and executes a remote script at build time with no checksum (same supply-chain risk as `ADD https://`, but inside `RUN`) — pin + verify: `RUN curl -fsSL <url> -o f && echo "<sha256>  f" | sha256sum -c && sh f`
+- `security_opt: [seccomp:unconfined, apparmor:unconfined]` (compose) or `--security-opt seccomp=unconfined` (run) disables the seccomp/AppArmor syscall sandbox — a distinct weakening from `privileged`/`cap_add` — keep the default profiles or supply a custom one, never `unconfined`
 - Deploy manifests reference `registry/app:1.2.3` without `@sha256:` digest
 - CI pulls and deploys public base images with no signature/provenance verification step
 
@@ -87,6 +91,11 @@ rg -n '>> ?"?\$GITHUB_(ENV|OUTPUT)|eval .*steps\..*outputs|\$\(.*steps\..*output
 - Use `pull_request` (not `pull_request_target`) for untrusted code; restrict secrets to protected-branch `push`/`workflow_dispatch` with environment approval
 - Pass untrusted strings only as structured env vars to vetted actions — never interpolate into `run:` shell; use `env:` + fixed script with no eval
 - Pin actions to immutable commit SHA: `uses: org/action@abc1234deadbeef...`
+
+**Expression-injection precision (FP/FN nuances)**:
+- **Why env-var passthrough is the fix — parse-time vs shell-time**: `${{ … }}` is expanded by the Actions **template engine before the shell ever runs**, splicing the attacker value straight into the script *source* (a `"; rm -rf / #` in a PR title becomes script text). Moving the value into an `env:` block and referencing it as `$VAR` in `run:` is safe because the shell receives it as **data**, not script source. This is the #1 false positive: a value that "appears in `run:`" via `$VAR` from `env:` is **safe**; only inline `${{ }}` *inside the `run:` text* is the sink. (Caveat: writing untrusted input to `$GITHUB_ENV` and then using it re-opens the hole.)
+- **`actions/github-script` is JavaScript injection, not shell**: `${{ github.event.* }}` inside the `script:` body is interpolated into the **JS source** — fix is to read `context.payload.*` (already a JS object), not `${{ }}`, and not env-var passthrough.
+- **`github.head_ref` vs `github.ref`**: `github.head_ref` (PR source branch), `github.event.pull_request.head.ref`, `*.head.label` are attacker-controlled; but on a `pull_request`/`pull_request_target` event **`github.ref` is the server-controlled merge ref `refs/pull/N/merge`** — don't flag `github.ref` the way you flag `head_ref`.
 - Set explicit minimal `permissions:` per job; use OIDC with scoped cloud role per environment
 - Mask secrets platform-side; never echo secret env vars; disable debug trace in production pipelines
 

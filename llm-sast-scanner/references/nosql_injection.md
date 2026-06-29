@@ -59,6 +59,7 @@ The attacker sends: `{"username": {"$gt": ""}, "password": {"$gt": ""}}` to bypa
 - **VULN**: `User.find({username: req.body.username})` — if `req.body.username` is an object `{$gt: ""}`, injection succeeds
 - **VULN**: `User.findOne({email: req.body.email, password: req.body.password})` — both fields are injectable
 - **VULN**: `db.collection('users').find(req.body.query)` — entire query sourced from request body
+- **VULN**: `Model.find().populate({ path: 'author', match: req.query.filter })` — attacker JSON in the populate **`match`** clause reaches Mongo operators (incl. `$where` server-side JS / `$regex`) against the joined collection. The sink is **not** the top-level `find()` argument, so rules that only watch `find`/`findOne` filters miss it; `sanitizeFilter`/`strictQuery` historically did **not** cover `populate.match`. Treat **any** chained position that accepts a filter sub-document as a sink: `populate({match})`, `$elemMatch`, aggregate `$match` stages, `.where(...).equals(tainted)`.
 - **SAFE**:
   ```js
   if (typeof req.body.username !== 'string') return res.status(400).json({error: 'Invalid input'});

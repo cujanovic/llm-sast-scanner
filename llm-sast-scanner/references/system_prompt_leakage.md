@@ -33,6 +33,7 @@ The core pattern: *a secret, internal detail, or access-control rule lives insid
 - Secrets via environment/secret manager, used only in tool/handler code — never in prompt text
 - Authorization and limits enforced in code (RBAC, server-side checks), not described in the prompt
 - External (non-LLM) input filters for extraction attempts and output filters for prompt/secret patterns
+- A unique, unguessable **canary nonce** injected into the system prompt and scanned for on every output path (deterministic leak detection; see Safe Patterns)
 - Design assumption: "the prompt will leak" — nothing security-critical depends on its secrecy
 
 ## Recon Indicators
@@ -80,6 +81,21 @@ def safe_reply(resp: str, system_prompt: str) -> str:
         return "I can't share that."
     return resp
 ```
+
+```python
+# SAFE — canary / honeytoken: deterministic, near-zero-FP leak detection
+import secrets
+CANARY = f"ref-{secrets.token_hex(16)}"               # unguessable 128-bit nonce, per-deploy or per-session
+system_prompt = STATIC_BEHAVIORAL + f"\n[internal-reference:{CANARY}]"   # idempotent, stable end-of-prompt location
+
+def safe_reply(resp: str) -> str:
+    if CANARY in resp:                                # any appearance == the prompt was regurgitated
+        log_security_event("prompt_leak_blocked")
+        return "I can't share that."
+    return resp
+```
+
+The canary is the most reliable leak signal: a high-entropy random nonce cannot appear in legitimate output unless the prompt containing it was extracted and echoed — unlike token-overlap/paraphrase heuristics, which miss partial or reworded leaks. Make the nonce per-deployment or per-conversation, inject it idempotently at a stable end-of-prompt location, and run the detector on **every** output path — including tool-call arguments and streamed deltas, not just the final user-facing message. The static smell: a system prompt with sensitive content whose only leak protection is a heuristic substring/overlap check (or nothing), with no unguessable canary.
 
 ## Severity & Triage
 

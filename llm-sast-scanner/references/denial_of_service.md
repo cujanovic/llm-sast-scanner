@@ -44,6 +44,13 @@ m.matches();  // attacker can supply catastrophic pattern
 - Backtracking-heavy lookahead: `(?=.*a)(?=.*b).*`
 - User-supplied regex patterns evaluated server-side
 
+**Writing a backtracking-safe regex** — a *hardcoded* pattern can still be catastrophic (e.g. `(\w+\s*)+please`), so "the regex is a constant" is not sufficient. When you must match untrusted text:
+- Quantify only a single character class or a fixed alternation — never a *group* that itself contains a quantifier (`(\w+\s*)+` → `[\w\s]+`).
+- No nested or overlapping quantifiers (`(a+)+`, `(a|ab)+`).
+- Bound open-ended quantifiers with an explicit upper limit (`{0,N}`) and cap how far a single run is scanned.
+- Bound the number of matches collected (stop after N).
+- For tokenizing/searching long untrusted text, prefer an allocation-free linear scan over a backtracking regex.
+
 ```python
 # VULNERABLE Python: user-controlled regex
 import re
@@ -275,17 +282,50 @@ Commonly affected languages: JavaScript, Java, Python, Ruby, C#, Go, Rust, Swift
 
 LLM inference is expensive, so resource and *cost* exhaustion ("denial of wallet") is a real DoS vector for AI endpoints. The amplifier is attacker-controlled token volume, not just request count.
 
-**Sources**: user prompt length/complexity; uncapped `max_tokens`; recursive/agentic loops; high-volume or systematic querying (also a model-extraction signal).
+**Sources**: user prompt length/complexity; uncapped `max_tokens`; recursive/agentic loops; high-volume or systematic querying (also a model-extraction signal). **Context-window flooding** is a concrete amplifier: a long run of repeated/identical characters or a near-duplicate filler block padded into the prompt inflates token count and crowds out instructions — e.g. a single character repeated hundreds of times.
 
 **Sinks**: `*.create`/`generate`/`invoke` calls with no input-size cap and no output `max_tokens`; chat endpoints with no per-user rate limit or token/cost budget; agent loops with no step/iteration cap.
 
 **Sanitizers / safe patterns**:
-- Enforce input size limits (chars/estimated tokens) and reject token-amplifying repetitive input before calling the model.
+- Cap input by **bytes/chars** and **truncate with an explicit flag** (never silently drop) before the model call; reject token-amplifying repetitive input.
+- Flag a **repeated-character run above a threshold** (e.g. a run of >200 identical chars within an input over a few hundred chars) as a context-flooding signal.
 - Always set an output `max_tokens` cap.
 - Apply multi-tier rate limits (per minute/day) and per-user **token/cost budgets**; return `429`/`503` rather than processing unbounded load.
 - Bound agent loops (max steps) and monitor for systematic high-volume querying (model-extraction pattern).
 
+**Framework cap-parameter specifics** (the absence of these is the finding):
+- **Output cap by SDK**: OpenAI `max_tokens` / `max_completion_tokens` (the latter is required for o-series/reasoning models — `max_tokens` is ignored there); Anthropic `max_tokens` (SDK-required, so the risk is an *effectively unbounded* value like `100_000` on a user-facing path); Vercel AI `maxTokens`.
+- **Agent-loop cap by framework**: LangChain `AgentExecutor(max_iterations=, max_execution_time=)` — `max_iterations` **defaults to 15** (bounded by default, but routinely raised, or explicitly set to `None` = unlimited), while **`max_execution_time` defaults to `None` = no wall-clock cap**; flag an explicit `max_iterations=None`/very-high value, or a loop whose only bound is time with no cap set; LangGraph `recursion_limit` in `.compile`/config; LlamaIndex `ReActAgent.from_tools(max_function_calls=)`; Vercel AI `maxSteps`.
+- **Global-client-default false-negative trap**: a bare `openai.chat.completions.create(...)` with no `max_tokens` may be capped by an `OpenAI(default_query={"max_tokens": ...})` / default on the client constructor — **check the client constructor before flagging a bare call site.**
+- **Model-refusable base case**: a depth/step counter is sound, but a loop whose only exit is the model emitting "Final Answer" is *not* bounded — adversarial tool output can prevent that string indefinitely. The guard must be one the model output cannot bypass.
+- **Recursive / fan-out spawn** over a user-controlled task list (`asyncio.gather(*[...])`, `Promise.all(tasks.map(...))`, subagent fan-out) with no element-count or depth cap is the **critical** tier (exponential cost).
+- **Input axis is separate from output axis**: a correct `max_tokens` does nothing about an unbounded user-supplied document concatenated into the prompt — that exhausts the context window and inflates token-count cost independently. Cap input bytes/chars even when the output cap is set.
+
 **Triage**: uncapped input *and* output on a public, attacker-reachable LLM endpoint with no rate limit/budget → Medium/High (denial of wallet / service). A missing rate limit alone is a defense-in-depth gap (Info/Low) unless unbounded token amplification is demonstrable. Prefer `brute_force` for auth-endpoint flooding; use this section for inference cost/volume exhaustion.
+
+## Denial of wallet — metered third-party calls (non-LLM)
+
+"Denial of wallet" is not only an LLM-token problem. A low-friction endpoint that triggers a **metered, billable third-party call per request** is an amplifiable resource even when each call is cheap and bounded: the attacker loops it to run up *your* bill, drain a provider quota, or abuse a paid channel. The amplifier here is **inter-request** (many cheap calls → large cost), not the intra-request allocation/recursion/token-expansion the rest of this file models — so the "don't flag a mere missing rate limit" rule does **not** dismiss it: the per-request billable cost *is* the unbounded resource.
+
+**Sinks** (a request-reachable call to a paid provider with no abuse gate):
+- **Email**: `resend.emails.send`, `sgMail.send` (SendGrid), `ses.sendEmail`, Postmark/Mailgun send → mail bombing + send-cost / sender-reputation burn.
+- **SMS / voice**: `twilio…messages.create`, `sns.publish` (SMS), Vonage/MessageBird send → **SMS pumping / toll fraud** (attacker controls premium-rate destination numbers).
+- **Payments / ledger**: Stripe/PayPal `…create` (charges, payment intents, transfers, payouts) reachable without authorization.
+- **Push / fan-out**: FCM/APNs/webhook fan-out that sends N messages per request with no cap.
+
+**Detection**: a route handler / server action / public endpoint that reaches one of the above with **no abuse gate** — *none of* authentication, rate limit / throttle, CAPTCHA / bot check, or a per-recipient/per-user cap. A public endpoint is acceptable **iff** it has at least one such gate.
+
+**Safe patterns**: require auth or a per-IP/per-user rate limit before the metered call; CAPTCHA on unauthenticated send paths; per-recipient and per-window caps; for SMS, a destination-country/number allowlist (anti-pumping).
+
+**Triage**: unauthenticated (or trivially reachable) endpoint that fires a metered email/SMS/payment call with no gate → Medium (denial of wallet); High when the channel is high-cost (SMS/voice/payments) or the cap is entirely absent. Distinguish from `verification_code_abuse`/`brute_force` (flooding a *victim* with codes) — this class is the attacker draining *your* budget/quota.
+
+## Atom-table exhaustion (BEAM / Erlang / Elixir)
+
+On the BEAM VM the **atom table is a fixed-size, non-garbage-collected global** (default cap ~1,048,576). Converting unbounded **user input** to atoms grows it permanently; once full, the node **crashes** — a single attacker can take down the whole VM (availability DoS, CWE-400/CWE-770). This is BEAM-specific and absent from generic resource-exhaustion checks.
+
+**Sinks** (flag when the argument is request-derived): Erlang `list_to_atom(UserInput)`, `binary_to_atom(UserBin, utf8)`; Elixir `String.to_atom(input)`, `:erlang.binary_to_atom(bin, :utf8)`. Also indirect: routing/JSON libraries configured to decode keys *as atoms* (e.g. `Jason.decode(body, keys: :atoms)`, `Poison` atom keys) on attacker JSON.
+
+**Safe**: use the `*_to_existing_atom` family — `String.to_existing_atom/1`, `binary_to_existing_atom/2`, `list_to_existing_atom/1` — which only resolve already-defined atoms (attacker input can't grow the table); or keep identifiers as binaries/strings and decode JSON with **string** keys (`keys: :strings`). **Triage**: request-reachable `to_atom` on unbounded input → Medium/High (node crash).
 
 ## Goroutine / async-task resource leaks (Go)
 
@@ -334,6 +374,18 @@ srv := &http.Server{
 **Sanitizers / safe patterns**: set `ReadHeaderTimeout` (and ideally `ReadTimeout`/`WriteTimeout`/`IdleTimeout`) on the `http.Server`; for long-lived/streaming handlers use per-request `http.ResponseController` deadlines instead of leaving the server-wide timeouts at zero; front the service with a timeout-enforcing reverse proxy.
 
 **Triage**: a public/attacker-reachable Go listener with no `ReadHeaderTimeout`/`ReadTimeout` → Medium (slow-client connection exhaustion). Internal-only listeners, or servers behind a proxy that enforces timeouts, are Low/Info. A server with read/idle timeouts configured is not a finding.
+
+## Slow-body / slow-JSON-stream (low-bandwidth body-read DoS)
+
+A distinct, framework-agnostic evolution of slow-client: the attacker sends a **valid request body prefix** (e.g. `{"items":[{"a":1},`) via `Transfer-Encoding: chunked` (no `Content-Length`), then drips ~1 byte/sec and **never sends the closing `}`/`]`**. The server's **body reader / JSON parser blocks waiting for a body that never completes**, pinning a worker thread / goroutine / event-loop slot per connection — a few dozen connections exhaust the pool. It hits PHP/Laravel, .NET/Kestrel, Flask, Rails, Node, Go, Rust alike.
+
+This is **not** header-Slowloris and **not** R.U.D.Y./Slow-POST: the headers complete normally (so `ReadHeaderTimeout` does **not** help), and there is no declared `Content-Length` (so body-size caps and Content-Length checks never trigger, and valid JSON sails past WAFs).
+
+- **Smell:** a handler/middleware that reads or parses the **whole request body** (`express.json()`, `await req.json()`, `json.NewDecoder(r.Body).Decode`, `request.get_json()`, `JSON.parse(await readBody())`, model/DTO binding) with **no body-read timeout and no minimum body-data-rate** on the server. A request body **size** limit does **not** mitigate this — the attack is bounded by *time*, not *size*.
+- **`ReadHeaderTimeout` is insufficient — it covers headers, not the body.** A Go server with `ReadHeaderTimeout` set but no whole-request `ReadTimeout` (or per-request `http.ResponseController` read deadline) is still vulnerable; treat header-timeout-only as a finding for body-reading endpoints.
+- **Safe / framework knobs:** nginx `client_body_timeout` (+ `client_max_body_size`); Apache `RequestReadTimeout body=10,MinRate=500`; Kestrel `MinRequestBodyDataRate` (**disabled by default** — must be set non-null); Node `server.requestTimeout` (≥18, default now non-zero but verify it isn't disabled); Go whole-request `ReadTimeout` or a per-request body deadline; or front the app with a proxy that buffers the full body before forwarding. Prefer a streaming parser with a read-buffer/time cap over buffering the whole body.
+
+**Triage**: a public/attacker-reachable endpoint that parses a request body with no body-read timeout / minimum data rate → Medium (worker-pool exhaustion; **High** in per-connection-worker models like PHP-FPM or thread-per-request, or in autoscaled microservices where it cascades). A body-size limit alone does not downgrade it; a configured body-read timeout / min-data-rate does.
 
 ## Unreleased resource leaks (CWE-404 / CWE-772)
 
