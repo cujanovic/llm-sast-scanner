@@ -4,12 +4,12 @@ description: >
   General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
   Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
   "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
-  code review of any language or framework.   Covers 102 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  code review of any language or framework.   Covers 103 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
   version: "1.40.0"
   domain: application-security
-  references: 102 vulnerability knowledge bases
+  references: 103 vulnerability knowledge bases
 ---
 
 # SAST Vulnerability Analysis
@@ -22,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 102 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 103 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -37,7 +37,7 @@ documenting the sources, sinks, and sanitizers/barriers used to detect and triag
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor, Improper Input Validation (semantic-type mismatch / missing format validation, standalone Low) |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
-| **Language/Platform** | PHP Security, TYPO3 CMS Security (Fluid / TypoScript / Extbase), Android Security, iOS Security, Electron / Desktop App Security, C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Batch / ETL / Mainframe Data-Pipeline Security |
+| **Language/Platform** | PHP Security, TYPO3 CMS Security (Fluid / TypoScript / Extbase), Android Security, iOS Security, Electron / Desktop App Security, C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Solana / Anchor Program Security (Rust), Batch / ETL / Mainframe Data-Pipeline Security |
 
 ---
 
@@ -247,6 +247,7 @@ references/cicd_container_security.md     — CI/CD pipeline + container/Docker 
 references/nginx_security.md              — nginx/OpenResty config: alias traversal, CRLF/response splitting, proxy_pass SSRF, header redefinition, access-control bypass, regex ReDoS, info disclosure
 references/memory_safety_c_cpp.md        — C/C++ memory safety: buffer overflow, UAF, unsafe string funcs, integer overflow, toolchain hardening
 references/smart_contract_security.md    — Solidity/EVM smart contracts: reentrancy, access control, unsafe delegatecall/low-level calls, integer over/underflow, oracle/MEV, proxy-upgrade, ERC-20/721/1155
+references/solana_smart_contract_security.md — Solana/Anchor programs (Rust): missing signer/owner/account-data checks, account-type confusion (cosplay), arbitrary CPI, PDA bump canonicalization & PDA sharing, unsafe account closing (revival), duplicate mutable accounts, reinitialization, lamport/precision arithmetic (distinct account model from EVM; gate: solana_program/anchor_lang, declare_id!, #[program], Anchor.toml)
 references/insecure_output_handling.md   — Insecure handling of LLM/model output reaching HTML/SQL/shell/HTTP/eval sinks (OWASP LLM05)
 references/excessive_agency.md           — Excessive LLM/agent functionality, permissions, or autonomy without human approval (OWASP LLM06)
 references/system_prompt_leakage.md      — Secrets / authorization logic in system prompts; reliance on prompt secrecy (OWASP LLM07)

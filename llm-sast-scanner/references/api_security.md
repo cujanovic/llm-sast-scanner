@@ -163,6 +163,19 @@ The inverse direction of Server-Side Parameter Pollution above. SSPP is about th
 **VULN**: `data = requests.get(partner_url).json(); db.execute("... status='" + data["status"] + "'")` — upstream field straight into SQL with nothing in between.
 **SAFE**: validate/normalize the extracted field against an expected schema/enum *before* the sink (`OrderResp.model_validate(resp.json())`, typed POJO, allowlist/regex on the specific field), and bind via parameterized queries. Cross-ref the sink's own class (`sql_injection.md`, `rce.md`, `ssrf.md`, `path_traversal_lfi_rfi.md`, `xss.md`, `insecure_deserialization.md`).
 
+## OpenAPI / JSON-Schema Contract Audit (secure-by-schema)
+
+When the repo ships an **OpenAPI/Swagger** spec or JSON-Schema definitions (`openapi.yaml`/`swagger.json`/`*.openapi.*`, FastAPI/NestJS/`springdoc` generated specs, `components/schemas`), the contract itself is a **high-signal static artifact**: a schema that omits bounds accepts **unbounded, open-ended input**, and the runtime validator (which is generated *from* the schema) then enforces nothing. Audit every request body/parameter schema for these — each missing constraint is a finding tied to a concrete class:
+
+- **Unbounded strings** — a non-`enum` `type: string` with **no `maxLength`** (and ideally no `pattern`). Accepts arbitrary-size input → memory/CPU blowup, log/storage flooding, and a larger surface for injection/ReDoS. → DoS (`denial_of_service.md`).
+- **Unbounded arrays** — `type: array` with **no `maxItems`** (and no `minItems`). A client sends a million-element array → resource exhaustion, amplification of any per-item work (N+1 DB, N outbound calls). → DoS.
+- **Unbounded numbers** — `type: number`/`integer` with **no `minimum`/`maximum`**. Enables out-of-range values, overflow, negative quantities/amounts driving business-logic abuse. → DoS / `business_logic.md`.
+- **Open objects (over-posting / mass assignment)** — object schema that does **not** set `additionalProperties: false` (or bound it with `maxProperties`). The validator accepts *extra* fields the client invents, which a permissive binder then maps onto internal model attributes → **mass assignment** (`mass_assignment.md`). `additionalProperties: true` or omitted = open.
+- **Operation without auth** — an operation (especially unsafe `post`/`put`/`patch`/`delete`) with **no `security` requirement** and no global `security` covering it → unauthenticated state change (`privilege_escalation.md` / `authentication_jwt.md`).
+- **Insecure security scheme** — `securitySchemes` using HTTP **Basic**, an **API key in `query`** (leaks via logs/Referer/history) or in a **cookie** (CSRF-prone), or OAuth/OIDC flows whose `tokenUrl`/`authorizationUrl` are `http://`. Cross-ref `insecure_cookie.md`, `cleartext_transmission.md`.
+
+**Why it's worth flagging at the contract layer:** for spec-first / generated-validation stacks the schema *is* the input filter — a missing `maxLength`/`additionalProperties:false` is the actual vulnerability, not a style nit. **Grep seeds:** `rg -n "type:\s*string" **/*openapi* **/*swagger*` then check each lacks `maxLength`; `rg -n "additionalProperties:\s*true|^\s*type:\s*object" <spec>` (objects without `additionalProperties: false`); `rg -n "in:\s*query|type:\s*http\b|scheme:\s*basic" <spec>` (key-in-query / Basic). **False alarms:** enum-constrained strings, fixed-shape internal-only specs behind strict mTLS, and `additionalProperties` deliberately typed (`additionalProperties: {type: string}`) for a map — confirm the binder doesn't over-map.
+
 ## Safe Patterns
 
 **Response shaping**

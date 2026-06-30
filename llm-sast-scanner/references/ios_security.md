@@ -1,6 +1,6 @@
 ---
 name: ios_security
-description: iOS/macOS application security (Swift / Objective-C) — insecure storage (UserDefaults/plist/Core Data/file-protection), Keychain misuse, deep-link/URL-scheme handling to WKWebView/open, App Transport Security bypass (NSAllowsArbitraryLoads), crypto misuse (DES/3DES/RC4, hardcoded keys, arc4random), TLS trust bypass (missing SecTrustEvaluateWithError), clipboard/screen-capture leakage, client-only jailbreak detection (CWE-312/295/319/327/798/939). Load when an iOS/Swift/Objective-C project is present (*.swift/*.m + Info.plist/*.xcodeproj/Podfile).
+description: iOS/macOS application security (Swift / Objective-C) — insecure storage (UserDefaults/plist/Core Data/file-protection), Keychain misuse (weak kSecAttrAccessible class), local-authentication/biometric bypass (boolean LAContext.evaluatePolicy, weak SecAccessControl ACL), deep-link/URL-scheme handling to WKWebView/open, App Transport Security bypass (NSAllowsArbitraryLoads, low TLSMinimumSupportedProtocolVersion), crypto misuse (DES/3DES/RC4, hardcoded keys, arc4random), TLS trust bypass (missing SecTrustEvaluateWithError), clipboard/keyboard-cache/screen-capture leakage, client-only jailbreak detection (CWE-287/295/305/312/319/327/524/798/939). Load when an iOS/Swift/Objective-C project is present (*.swift/*.m + Info.plist/*.xcodeproj/Podfile).
 ---
 
 # iOS Security (Swift / Objective-C)
@@ -114,6 +114,82 @@ let options = [NSPersistentStoreFileProtectionKey: FileProtectionType.complete]
 rg -n 'writeToFile:|write\(toFile:|NSUserDefaults|UserDefaults\.standard\.set|setValue\(.*forKey:' --glob '*.{swift,m,mm}'
 rg -n 'kSecClass|SecItemAdd|SecItemCopyMatching' --glob '*.{swift,m,mm}'
 ```
+
+---
+
+#### Weak Keychain Accessibility Class
+
+A Keychain item's `kSecAttrAccessible` value controls *when* the secret is readable. The two non-`ThisDeviceOnly` "always available" classes leave the secret extractable from an unlocked-but-backed-up or off-device image.
+
+**VULN**:
+```swift
+let query: [String: Any] = [
+    kSecClass as String: kSecClassGenericPassword,
+    kSecAttrAccount as String: "authToken",
+    kSecAttrAccessible as String: kSecAttrAccessibleAlways,            // readable even when locked; also syncs to backups
+    kSecValueData as String: token.data(using: .utf8)!
+]
+SecItemAdd(query as CFDictionary, nil)
+```
+
+**SAFE** — bind to this device and (ideally) to passcode being set:
+```swift
+kSecAttrAccessible as String: kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly
+// or kSecAttrAccessibleWhenUnlockedThisDeviceOnly / kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+```
+
+**TRUE POSITIVE**: a Keychain add/update using `kSecAttrAccessibleAlways`, `kSecAttrAccessibleAlwaysThisDeviceOnly` (deprecated), or `kSecAttrAccessibleAfterFirstUnlock` for credential/token/key material. `*Always*` is the strongest finding (survives backup + readable while locked).
+
+**FALSE POSITIVE**: `kSecAttrAccessibleAfterFirstUnlock` on a background-task secret that legitimately must be read while the device is locked — downgrade, but prefer the `ThisDeviceOnly` variant to block backup extraction.
+
+---
+
+#### Local-Authentication (Biometric) Bypass & Weak Access-Control Flags
+
+Two distinct iOS-specific failures, both CWE-287/CWE-305:
+
+**VULN — boolean-only biometric gate** (the result is just a `Bool`, patchable by Frida/objection at runtime; nothing cryptographically depends on it):
+```swift
+let ctx = LAContext()
+ctx.evaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, localizedReason: r) { ok, _ in
+    if ok { self.unlockSecret() }     // gate is a bool — bypassable by hooking the callback
+}
+```
+
+**VULN — weak biometric ACL** (`.biometryAny` / `.userPresence` / `.touchIDAny` let an attacker who can *enroll a new fingerprint/face* on the device authenticate as the user):
+```swift
+let acl = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+                                          .biometryAny, nil)   // or .userPresence / .touchIDAny
+```
+
+**SAFE** — protect the secret *in the Keychain* with `.biometryCurrentSet` so the OS (not app code) enforces auth, and the secret is invalidated if the enrolled biometric set changes:
+```swift
+let acl = SecAccessControlCreateWithFlags(nil, kSecAttrAccessibleWhenPasscodeSetThisDeviceOnly,
+                                          .biometryCurrentSet, &error)
+// store under kSecAttrAccessControl: acl — decryption now requires the current biometric, not a swappable bool
+```
+
+**TRUE POSITIVE**: `LAContext().evaluatePolicy(...)` whose only consequence is an `if ok { ... }` branch unlocking data, with no Keychain-backed `SecAccessControlCreateWithFlags`; or any `SecAccessControlCreateWithFlags` using `.biometryAny`, `.userPresence`, `.touchIDAny`, or `.devicePasscode`.
+
+**FALSE POSITIVE**: `evaluatePolicy` used purely for a low-value UX gate (e.g., re-revealing already-displayed non-secret data) where no protected asset hangs off the boolean.
+
+**Grep:**
+```bash
+rg -n 'kSecAttrAccessibleAlways|kSecAttrAccessibleAfterFirstUnlock\b' --glob '*.{swift,m,mm}'
+rg -n 'evaluatePolicy|deviceOwnerAuthentication|\.biometryAny|\.userPresence|\.touchIDAny|SecAccessControlCreateWithFlags' --glob '*.{swift,m,mm}'
+```
+
+---
+
+#### Sensitive Field Without Keyboard-Cache Disabled
+
+iOS caches typed text for autocorrection; secret values typed into a field that allows autocorrection persist in the keyboard dictionary on disk (CWE-524).
+
+**VULN**: a `UITextField`/`UITextView` collecting a password, PIN, card number, or seed phrase without `isSecureTextEntry = true` **and** without `autocorrectionType = .no` (Obj-C `UITextAutocorrectionTypeNo`).
+
+**SAFE**: `field.isSecureTextEntry = true; field.autocorrectionType = .no` (secure entry implies no cache; set both explicitly for non-password sensitive fields like card/seed where masking is undesirable).
+
+**FALSE POSITIVE**: search boxes, usernames, and other non-secret fields — autocorrection is expected there.
 
 ---
 
@@ -307,6 +383,11 @@ webView.load(URLRequest(url: URL(string: urlString)!))
 **TRUE POSITIVE**: `NSTemporaryExceptionAllowsInsecureHTTPLoads: true` for a domain used as a production API endpoint, especially combined with `NSIncludesSubdomains: true`.
 
 **FALSE POSITIVE**: Exceptions restricted to `localhost` or `127.0.0.1` for local development tooling — valid test configuration; do not flag in CI/CD SAST unless the build target is a release variant.
+
+**Also flag (programmatic minimum-TLS, CWE-326/CWE-757):** a `URLSessionConfiguration` setting `TLSMinimumSupportedProtocolVersion` to `.TLSv10`/`.TLSv11`/`.TLSv12` (TLS 1.3 should be the floor), or any use of the deprecated `tlsMinimumSupportedProtocol` / `kTLSProtocol1` API — these silently negotiate down to a weak protocol regardless of ATS plist settings.
+```bash
+rg -n 'TLSMinimumSupportedProtocol|tlsMinimumSupportedProtocol|TLSv1[01]\b|kTLSProtocol1\b' --glob '*.{swift,m,mm}'
+```
 
 ---
 
@@ -503,6 +584,11 @@ rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrit
 | arc4random for security token generation | iOS | CWE-338 | HIGH |
 | TLS certificate accepted without SecTrustEvaluateWithError | iOS | CWE-295 | CRITICAL |
 | Secrets in plist / unprotected Core Data | iOS | CWE-312 | HIGH |
+| Keychain item with `kSecAttrAccessibleAlways` / `AfterFirstUnlock` (non-`ThisDeviceOnly`) | iOS | CWE-312 | MEDIUM |
+| Boolean-only `LAContext.evaluatePolicy` biometric gate (no Keychain binding) | iOS | CWE-287 | HIGH |
+| Weak biometric ACL (`.biometryAny` / `.userPresence` / `.touchIDAny`) | iOS | CWE-305 | MEDIUM |
+| Sensitive field without secure entry / keyboard cache disabled | iOS | CWE-524 | LOW |
+| Programmatic `TLSMinimumSupportedProtocolVersion` < TLS 1.3 | iOS | CWE-326 | MEDIUM |
 | Deep link parameter to navigation sink | Android / iOS | CWE-939 | HIGH |
 | Sensitive data copied to clipboard | Android / iOS | CWE-200 | MEDIUM |
 | Credential screen without FLAG_SECURE / secure field | Android / iOS | CWE-200 | MEDIUM |
@@ -653,6 +739,8 @@ Consolidated SAST grep anchors — pair with taint heuristics above; hits alone 
 ```bash
 # Storage
 rg -n 'UserDefaults|NSUserDefaults|writeToFile|SecItemAdd|kSecClass|NSPersistentStore' --glob '*.{swift,m,mm}'
+# Keychain accessibility / local auth
+rg -n 'kSecAttrAccessibleAlways|kSecAttrAccessibleAfterFirstUnlock\b|evaluatePolicy|SecAccessControlCreateWithFlags|\.biometryAny|\.userPresence|\.touchIDAny' --glob '*.{swift,m,mm}'
 # Deep links / WebView
 rg -n 'open url:|openURLContexts|WKWebView|loadHTMLString|load\s*\(\s*URLRequest' --glob '*.{swift,m,mm}'
 # Transport / ATS

@@ -76,9 +76,15 @@ These are **configuration and flag queries**, not taint-flow analyses. The insec
 
 **Grep seeds**: `.ASPXAUTH`, `ASP.NET_SessionId`, `Request\.Cookies\[`, `User\.Identity\.IsAuthenticated`, `<deny users="\?">`, `<authorization>`
 
+### Output caching over authorized/personalized content (CWE-525 — cache serves auth response cross-user)
+
+- **`[OutputCache]` on an `[Authorize]`-protected action** (MVC/Web API) — the cached response is served on subsequent requests **before the `[Authorize]` filter re-evaluates**, so a personalized/authorized page is handed to other users (or unauthenticated callers) until it expires. Same bug via `<%@ OutputCache %>` on a page, `[ResponseCache]` (ASP.NET Core) without `VaryByHeader`/`Location=None` on authenticated content, or IIS `<caching>`/`<outputCache>` enabled for paths that return per-user data.
+- **Safe**: never cache authenticated/per-user responses — `[OutputCache(NoStore=true, Duration=0)]` / `[ResponseCache(Location=ResponseCacheLocation.None, NoStore=true)]` on authorized actions; if caching is required, `VaryByCustom`/`VaryByHeader` on the identity dimension (and confirm the proxy/IIS layer keys on it too). The general cache-vs-identity model is in `web_cache_deception.md`. **Grep seeds**: `\[OutputCache`, `OutputCache .*Duration`, `\[ResponseCache`, `<%@ *OutputCache`, `<outputCache .*enabled="true"` — then check whether the same action/controller carries `[Authorize]` or returns per-user data.
+
 ## Vulnerable Conditions
 
 - Production deployment with `debug="true"` — stack traces, source hints, performance/memory impact (CWE-011 / CWE-532 in query tags)
+- **ASP.NET Core** equivalent: `app.UseDeveloperExceptionPage()` reachable on a production path — called unconditionally (no `if (env.IsDevelopment())` guard), `ASPNETCORE_ENVIRONMENT`/`AddDeveloperExceptionPage` left on `Development` in a deployed config, or **no** `app.UseExceptionHandler("/Error")` for the non-dev branch. Leaks the full exception, stack trace, and source snippets to the client (the .NET Core analog of `debug="true"`).
 - Global `validateRequest="false"` on Web Forms / legacy ASP.NET pages
 - `requestValidationMode` below 4.5 while relying on platform XSS filtering
 - Multi-megabyte `maxRequestLength` on public-facing upload endpoints

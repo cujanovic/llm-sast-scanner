@@ -374,6 +374,24 @@ s.setAllowUniversalAccessFromFileURLs(false);
 
 **FALSE POSITIVE**: WebView loading only `file:///android_asset/` with file access enabled and JavaScript disabled.
 
+---
+
+#### Dynamic Code Loading from an Untrusted Source (CWE-494 / CWE-470)
+
+Loading executable code at runtime from a location an attacker can write to — external storage, the app cache after an unauthenticated/cleartext download, or an intent-supplied path — is arbitrary code execution: another app or a network attacker swaps the payload and the host app runs it with its own permissions.
+
+**VULN** — class loader fed an attacker-reachable path:
+```java
+// world-readable/writable external storage → any app can replace the dex/apk
+DexClassLoader loader = new DexClassLoader(
+    "/sdcard/Download/plugin.apk", optDir, null, getClassLoader());
+loader.loadClass("com.evil.Payload").getMethod("run").invoke(...);
+```
+
+**TRUE POSITIVE**: `DexClassLoader` / `PathClassLoader` / `InMemoryDexClassLoader` / `DelegateLastClassLoader`, or `createPackageContext(pkg, CONTEXT_IGNORE_SECURITY | CONTEXT_INCLUDE_CODE)`, where the dex/apk/jar path resolves to external storage (`getExternalStorage*`, `/sdcard`), a world-readable cache, an intent extra, or a file just fetched over the network (especially HTTP). Same risk for `System.load`/`loadLibrary` of a `.so` from those locations.
+
+**SAFE**: load only from the app's own private, non-world-writable storage (`getCodeCacheDir()`, `getFilesDir()`) over code you shipped or fetched over TLS **and** verified (signature/pinned hash) before loading; prefer not loading external code at all.
+
 **Grep (Android Java/Kotlin):**
 ```bash
 rg -n 'setAllowFileAccess|setAllowUniversalAccessFromFileURLs|setAllowFileAccessFromFileURLs|setAllowContentAccess|addJavascriptInterface|setJavaScriptEnabled' --glob '*.{java,kt}'
@@ -700,9 +718,14 @@ if (!server.verifyIntegrityToken(verdict.token)) abortSensitiveFlow()
 
 **FALSE POSITIVE**: Root/jailbreak detection used for analytics or warning banners only, with no security decision tied to the result.
 
+**Sibling resiliency families (same bypassable-client weakness):** root/jailbreak detection is one of four MASVS-RESILIENCE families; the identical "client-only, defeats on an instrumented device, must not be the sole guard" logic applies to all of them — flag any of these used as the lone gate on a sensitive flow:
+- **Anti-debugging** — `Debug.isDebuggerConnected()`, `ApplicationInfo` `FLAG_DEBUGGABLE`/`isDebuggable` checks, `ptrace`/`TracerPid` reads (defeated by patching the check or detaching the debugger).
+- **Emulator detection** — `Build.FINGERPRINT`/`MODEL`/`MANUFACTURER`/`HARDWARE`/`PRODUCT` compared against `goldfish`/`ranchu`/`generic`/`genymotion`/`/genyd`/`vbox` (defeated by spoofing `Build` fields).
+- **File / code integrity (self-tamper / signature)** — `PackageManager.GET_SIGNATURES`/`GET_SIGNING_CERTIFICATES` compared to a hardcoded signing cert, or a `classes.dex` CRC check via `ZipFile.getEntry("classes…")` (defeated by re-signing or patching the embedded expected value).
+
 **Grep:**
 ```bash
-rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrity|AppAttest|DeviceCheck' --glob '*.{java,kt,swift,m,mm}'
+rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrity|AppAttest|DeviceCheck|isDebuggerConnected|isDebuggable|TracerPid|Build\.(FINGERPRINT|MODEL|MANUFACTURER|HARDWARE|PRODUCT)|goldfish|ranchu|genymotion|GET_SIGNATURES|GET_SIGNING_CERTIFICATES|getEntry\("classes' --glob '*.{java,kt,swift,m,mm}'
 ```
 
 
@@ -790,6 +813,7 @@ rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrit
 - Network call with no certificate pin for the target domain (Android)
 - `WebViewClient.onReceivedSslError` handler that accepts all certs (`trustsAllCerts`) (Android)
 - TLS configuration allowing weak/insecure protocols (Swift/iOS)
+- **`network_security_config.xml` trust *misconfiguration*** — distinct from the *absent-pinning* case above; here the config actively **weakens** trust: `<trust-anchors>` containing `<certificates src="user"/>` (trusts user-installed CAs, so any device-local or MITM-proxy CA is honored); a `<debug-overrides>` block present in a **release** build (it injects debug CAs that override the base config); or `cleartextTrafficPermitted="true"` on a `<domain-config>` (re-opens plaintext HTTP for that domain). On `targetSdkVersion < 24` the platform default **already trusts user-added CAs**, so an app that ships no NSC opting out (`<certificates src="system"/>`) is implicitly MITM-able by anyone who can install a CA. **Grep:** `rg -n '<certificates\s+src="user"|<debug-overrides|cleartextTrafficPermitted="true"|<trust-anchors' --glob '*.xml'` — then confirm the file is the manifest's `android:networkSecurityConfig` target and the build is a release artifact. Cross-ref `certificate_validation.md` (pin-set side).
 
 ### CWE-489 — Debug exposure
 
@@ -858,6 +882,7 @@ iOS cookie storage and ATS plist keys (`NSAllowsArbitraryLoads`) remain heuristi
 **Android WebView config chain:**
 - `getSettings()` → `setJavaScriptEnabled`, cross-origin file access methods, `setAllowContentAccess`
 - `loadUrl` / `postUrl`, `addJavascriptInterface`, `setWebViewClient` → `shouldOverrideUrlLoading`
+- **Safe Browsing disabled** — `WebSettings.setSafeBrowsingEnabled(false)` or manifest `<meta-data android:name="android.webkit.WebView.EnableSafeBrowsing" android:value="false"/>` turns off Google Safe Browsing for in-app WebView navigations, so the WebView renders known-malicious / phishing URLs with no platform interstitial. Flag on WebViews that load remote or user-influenced URLs (pair with the CWE-079 WebView taint above); a WebView restricted to bundled `file:///android_asset/` content is a downgrade. **Grep:** `EnableSafeBrowsing|setSafeBrowsingEnabled\s*\(\s*false`.
 
 **iOS WebView config:**
 - `baseURL` parameter on HTML load APIs — must not be `nil` or user-controlled

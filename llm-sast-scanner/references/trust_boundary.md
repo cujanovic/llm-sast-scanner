@@ -1,6 +1,6 @@
 ---
 name: trust-boundary
-description: Trust boundary violation detection (CWE-501), header-based identity/origin spoofing, and network-origin / IP-range trust bypass via shared multi-tenant cloud, CI/CD, and serverless egress (CWE-290/291)
+description: Trust boundary violation detection (CWE-501), header-based identity/origin spoofing, network-origin / IP-range trust bypass via shared multi-tenant cloud, CI/CD, and serverless egress (CWE-290/291), and mutable internal-state exposure — returning/storing live references to mutable objects and mutable public-static fields (CWE-374/375/582/607)
 ---
 
 # Trust Boundary Violation (CWE-501)
@@ -113,6 +113,56 @@ export async function GET() {
 ```
 
 **SAFE**: identity comes from a server-verified session/token re-derived per request; gateway-injected identity headers are explicitly stripped at the trust boundary before the app reads them; authorization is re-checked in every protected handler — not only in middleware/edge; upgrade `next` to a patched release.
+
+## Mutable Internal-State Exposure (CWE-374 / CWE-375 / CWE-582 / CWE-607)
+
+A second trust-boundary class, common in Java/JVM and applicable to any reference-semantics language: an object hands out, or absorbs, a **live reference to mutable internal state** instead of a copy. The caller (or untrusted code sharing the JVM — plugins, deserialization gadgets, same-process tenants) can then mutate that state *after* validation, defeating an invariant the object relies on. It matters specifically when the mutable value is **security-relevant** — a roles/permissions array, a `Date` used for token/cert expiry, key/IV bytes, an allow-list collection — or when instances are reachable by untrusted code.
+
+**Two shapes:**
+
+1. **Instance representation exposure** — a getter returns the internal field directly (CWE-374, return side), or a constructor/setter stores the caller's object directly (CWE-375, ingest side). Arrays, `Date`/`Calendar`, `Collection`/`Map`, and `byte[]` buffers are mutable; `String`/boxed primitives/`BigInteger` are not.
+   ```java
+   // VULN — caller can rewrite the role set after construction / after an auth check
+   private String[] roles;
+   public String[] getRoles() { return roles; }          // return side — hands out the live array (CWE-374)
+   public void setRoles(String[] r) { this.roles = r; }   // ingest side — stores the caller's live array (CWE-375)
+   // SAFE — defensive copy on both boundaries (or expose an unmodifiable view)
+   public String[] getRoles() { return roles.clone(); }
+   public void setRoles(String[] r) { this.roles = r.clone(); }
+   // collections: return Collections.unmodifiableList(roles); store new ArrayList<>(r);
+   // Date: return new Date(expiry.getTime());  // or use java.time.Instant (immutable)
+   ```
+
+2. **Mutable static state** (CWE-582/607/500) — a `public static` field that is non-`final` (reassignable) **or** `final` but references a mutable array/collection (the reference is fixed, the *contents* are not). Any code in the JVM can rewrite global security config.
+   ```java
+   public static final String[] ADMIN_IPS = {"10.0.0.1"};  // final ref, but contents writable by anyone (CWE-607)
+   public static int MAX_LOGIN_ATTEMPTS = 3;                // non-final public static → reassignable (CWE-500/582)
+   // SAFE — List.of(...) / Collections.unmodifiableList(...), and make scalars `static final`
+   public static final List<String> ADMIN_IPS = List.of("10.0.0.1");
+   ```
+
+**TRUE POSITIVE**: getter `return`s a field, or constructor/setter assigns a parameter, where the field type is a mutable array/`Date`/`Calendar`/`Collection`/`Map`/`byte[]` **and** the value is security-relevant or the class is reachable by untrusted code; any `public/protected static` non-final field; `public static final` array/mutable-collection.
+
+**FALSE POSITIVE**: the field is an immutable type (`String`, boxed primitive, `BigInteger`, `record` of immutables, `java.time.*`); the getter already returns a copy / `unmodifiable*` view; package-private/internal-only class with no untrusted reachability and no security-relevant content (encapsulation nit, not a finding). Severity is usually Low–Medium — escalate when the mutated object directly feeds an authn/authz/crypto/expiry decision.
+
+**Grep seeds:**
+```bash
+rg -n 'public\s+static\s+(?!final)[A-Za-z<>\[\]]+\s+\w+\s*=' --glob '*.java'   # non-final public static
+rg -n 'public\s+static\s+final\s+\w+\[\]|public\s+static\s+final\s+(List|Map|Set|Collection)' --glob '*.java'  # mutable static
+rg -n 'return\s+(this\.)?\w+;\s*$' --glob '*.java'   # candidate getters — confirm field is a mutable type returned without .clone()/copy
+```
+
+## Cloud / Serverless Event Payloads as Untrusted Input (FaaS)
+
+In a Lambda/Cloud-Function/Azure-Function handler, the **`event` object is attacker-influenced data, not a trusted internal call** — every field crossing into the function is a taint source, even when the trigger is "internal." Treat these as sources and trace them to the usual sinks (command/SQL/XXE/SSRF/cloud-API) in `rce.md`, `sql_injection.md`, `xxe.md`, `ssrf.md`:
+
+- **S3 event** — `event['Records'][0]['s3']['object']['key']` (and `bucket.name`) are set by whoever can upload; URL-decode, then it commonly flows to `os.system`/`subprocess`/path joins. An uploaded object's **content** later parsed by the function (XML/CSV/YAML) is equally untrusted (XXE / `yaml.load`).
+- **SNS / SQS / Kinesis / EventBridge** — `event['Records'][i]['Sns']['Message']` / `body` / `kinesis.data` (often base64) is publisher-controlled; JSON-parsed then spliced into SQL string-format, a shell, or a downstream API call.
+- **API Gateway / Function URL** — `event['queryStringParameters']`, `['headers']`, `['pathParameters']`, `['body']`, `requestContext.authorizer.*` claims are raw request input (same as any web param).
+- **DynamoDB Streams** — `event['Records'][i]['dynamodb']['NewImage']` reflects whatever a writer (possibly a lower-trust path) stored — second-order taint.
+- **Cloud-API parameter injection** — an event field forwarded as an AWS-SDK argument (DynamoDB `ComparisonOperator`/`FilterExpression`, an S3 key, an IAM/STS parameter) without an allow-list lets the caller alter the API's semantics.
+
+**SAFE**: schema-validate the event at the handler boundary (JSON Schema / `pydantic`); never pass event fields to a shell (`shlex.quote`, no `shell=True`); parameterize SQL; harden XML parsers; allow-list any event-derived value used as a cloud-API argument.
 
 ## FALSE POSITIVE Rules
 

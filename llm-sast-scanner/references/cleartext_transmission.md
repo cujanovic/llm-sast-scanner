@@ -59,6 +59,7 @@ Note: JavaScript/Node has no dedicated cleartext-transmission rule in standard p
 ### Python
 - **VULN**: `requests.post('http://…', data={'ssn': ssn})`
 - **SAFE**: `https://` URLs; `requests` with cert verification enabled
+- **Cleartext stdlib protocol clients** — the plaintext-protocol client classes send credentials and data unencrypted over the wire: `telnetlib.Telnet` (always cleartext — no TLS variant; use SSH), `ftplib.FTP` (use `ftplib.FTP_TLS`), `smtplib.SMTP` without `.starttls()` (or use `smtplib.SMTP_SSL`), `poplib.POP3` (→ `POP3_SSL`), `imaplib.IMAP4` (→ `IMAP4_SSL`), `nntplib.NNTP` (→ `NNTP_SSL`). **VULN**: constructing any of these and then authenticating/transferring without upgrading to the TLS variant or calling `.starttls()` first. **SAFE**: the `*_SSL` class, or `.starttls()`/`.login()` order that negotiates TLS before sending credentials; for remote shells use SSH (`paramiko`/`asyncssh`), never Telnet.
 
 ### Rust
 - **VULN**: sensitive struct serialized into query of `http://service/...`

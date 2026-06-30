@@ -1431,6 +1431,14 @@ formatError: (err) => ({
 - **VULN**: `db.execute("SELECT * FROM users WHERE name = '" + args['name'] + "'")` in any resolver
 - **SAFE**: `db.execute("SELECT * FROM users WHERE id = %s", (id,))` — parameterized
 - **SAFE**: SQLAlchemy ORM: `User.query.filter_by(id=id).first()`
+- **VULN (ORM-backed type auto field over-exposure)** — a code-first ObjectType bound to an ORM model auto-maps **every column** into the GraphQL type, so sensitive columns (`password`, `password_hash`, `token`, `secret`, `is_admin`) become queryable fields unless an explicit allowlist/denylist is set. The detection signal is the **binding**, not an SDL file (code-first schemas have no `.graphql` to grep): an ObjectType whose `Meta.model = <model with sensitive columns>` has **no `only_fields`/`exclude_fields`** (graphene-sqlalchemy `SQLAlchemyObjectType`), no `fields`/`exclude` or `fields = '__all__'` (graphene-django `DjangoObjectType`), or a strawberry SQLAlchemy/Django mapper with no field projection. A single excluded field (`exclude_fields = ('email',)`) does **not** make it safe — every *other* column (e.g. `password`) stays exposed; a resolver-side guard on one field (`resolve_password` checking a client-supplied `identity`) is not field-level auth.
+  ```python
+  class UserObject(SQLAlchemyObjectType):
+      class Meta:
+          model = User              # auto-exposes password/token/is_admin as queryable fields
+          exclude_fields = ('email',)   # only one column hidden — password still queryable
+  ```
+- **SAFE**: explicit allowlist — `Meta: only_fields = ('id', 'username')` (graphene-sqlalchemy) / `fields = ('id', 'username')` (graphene-django); separate public vs admin types; field-level auth (not a client-controlled identity check) on any sensitive column that must stay. Cross-ref the **Sensitive SDL fields** PII bundle above and `mass_assignment.md` (write-side ORM auto-bind).
 
 ### Flask-GraphQL introspection
 - **VULN**: `GraphQLView.as_view('graphql', schema=schema)` with no introspection guard

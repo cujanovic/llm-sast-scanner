@@ -37,7 +37,7 @@ Manual memory management in C/C++ enables stack/heap corruption, out-of-bounds a
 
 **What it is NOT**
 - **Logic bugs with safe bounds** — correct `snprintf` with `sizeof(dest)` is not overflow
-- **Managed-language buffer issues** — Rust `Vec` bounds checks, Java arrays; out of scope unless FFI boundary **or a Rust `unsafe` block** (see Rust carve-back below)
+- **Managed-language buffer issues** — Rust `Vec` bounds checks, Java arrays; out of scope unless FFI boundary **or an `unsafe` block** (Rust/Go/C# carve-backs below)
 - **Full format-string exploitation analysis** — delegate to `format_string_injection.md`
 - **Benign memory leaks alone** — unfreed heap at exit; flag `realloc`-loses-block and ownership-loss patterns that enable later corruption
 - **DoS from large allocation** — see `denial_of_service.md` unless integer wrap causes undersized buffer then OOB write
@@ -54,6 +54,10 @@ Rust's borrow checker prevents these bugs in safe code, so most Rust is out of s
 - `Vec::set_len(n)` / `String::as_mut_vec` — sets the length past initialized data, exposing **uninitialized memory** (CWE-908) when `n` outruns what was actually written; `slice::get_unchecked` / `get_unchecked_mut` (and `<*const T>::offset`/`add` used for indexing) elide the bounds check → OOB read/write (CWE-125) when the index/length derives from input.
 
 **Safe / FP**: `unsafe` whose lengths/bounds are provably correct and not externally influenced; `transmute` between layout-identical POD types via `bytemuck`. **Signal**: an `unsafe` sink whose length/pointer/offset derives from untrusted input with no bounds proof. Do **not** dismiss a Rust finding merely because "Rust is memory-safe."
+
+**Go has the same carve-back** (memory-safe by default, *except* the `unsafe` package and `reflect` header manipulation): `unsafe.Pointer` conversions and `uintptr` round-tripped back to a pointer (the classic GC-invisible dangling-pointer / arbitrary-cast bug), `unsafe.Slice(ptr, n)` / `unsafe.String(ptr, n)` with an attacker-influenced `n` (OOB read/write — the Go analogue of `from_raw_parts`), and rebuilding a `reflect.SliceHeader`/`StringHeader` by hand. These re-introduce the OOB/use-after-free that Go's bounds checks and GC otherwise prevent — `import "unsafe"` in code handling untrusted lengths/offsets is the signal (`cgo` FFI boundaries too).
+
+**C# / .NET has the same carve-back** (managed and bounds-checked by default, *except* the `unsafe` context and the marshalling/`Unsafe` APIs): a method/block marked `unsafe` doing pointer arithmetic (`p[i]`, `*(p + n)`), `stackalloc` with an attacker-influenced element count (stack overflow), a `fixed` pointer walked past the pinned buffer, `System.Runtime.CompilerServices.Unsafe.*` (`Unsafe.Add`/`As`/`AsPointer`/`CopyBlock` — fully unchecked), `MemoryMarshal.Cast`/`GetReference` reinterpreting a `Span<T>`, and the .NET `memcpy` equivalents `Buffer.MemoryCopy` / `Marshal.Copy` / `Buffer.BlockCopy` when the length/count derives from untrusted input. P/Invoke (`[DllImport]`) marshalling a buffer+length into native code is the FFI boundary. **Signal**: the `unsafe` keyword (or `AllowUnsafeBlocks`) in code whose pointer/length/offset traces to input, with no bounds proof — don't dismiss it as "C# is memory-safe."
 
 ## Recon Indicators
 
@@ -83,10 +87,13 @@ Rust's borrow checker prevents these bugs in safe code, so most Rust is out of s
 | `delete\s+\w+` / `delete\[\]` mismatch | High — UB, heap corruption | pair `new`↔`delete`, `new[]`↔`delete[]` |
 | `free\s*\(.*\).*new\s|delete\s*\(.*malloc` | Critical — mixed allocators | never mix C heap and C++ new/delete |
 | `chmod(`, `stat(`, `access(` on path after open | Medium — TOCTOU | `fchmod`/`fstat` on fd; see `race_conditions.md` |
+| `memset(`/`bzero(`/`= {0}` scrubbing a secret buffer (password/key/token) right before `free`/return/scope-exit | Medium — **dead-store eliminated** by the optimizer (the buffer is never read again), so the secret survives in heap/stack memory → recoverable via core dump, swap, heap-spray, or use-after-free (CWE-14 / CWE-244 / CWE-226) | guaranteed-not-elided scrub: `explicit_bzero` (BSD/glibc), `memset_s`/`memset_explicit` (C11 Annex K / C23), `SecureZeroMemory`/`RtlSecureZeroMemory` (Windows), `OPENSSL_cleanse`/`sodium_memzero`, or write through a `volatile` pointer — then free |
 | `->c_str()` / `&local` returned/stored | High — dangling pointer | extend owner lifetime; heap copy |
 | `VLA` / `char buf[n]` with runtime `n` | Medium — stack overflow | cap `n`; use heap for large/unbounded |
+| `std::equal(`, `std::mismatch(`, `std::is_permutation(` with **3 iterators** | Medium — over-reads 2nd range if shorter (CWE-126) | 4-iterator overload `(...,b.begin(),b.end())` or `std::ranges::` form |
+| `realpath(path, buf)` into fixed/undersized `buf` | High — dest must be ≥ `PATH_MAX`; some libc overflow internally (CWE-120/CWE-785) | `realpath(path, NULL)` (glibc allocates) then `free`, or size `buf` to `PATH_MAX` |
 
-Grep anchors: `\b(gets|strcpy|strcat|sprintf|vsprintf|gets|strtok)\s*\(`, `scanf\s*\(\s*["'][^"']*%s`, `strncat\s*\([^)]*,\s*(sizeof|strlen)\s*\(`, `memcpy\s*\([^,]+,[^,]+,\s*[^)]+\)`, `malloc\s*\(\s*strlen\s*\(`, `malloc\s*\([^)]*\*`, `realloc\s*\(\s*\w+\s*,`, `free\s*\([^)]+\)[^;]*;[^}]*\1`, `delete\s+`, `delete\s*\[\s*\]`, `new\s*\[\s*\]`, `alloca\s*\(`, `sizeof\s*\(\s*\w+\s*\)`, `ntohl\s*\(`, `use.?after.?free` (comments/tests).
+Grep anchors: `\b(gets|strcpy|strcat|sprintf|vsprintf|gets|strtok)\s*\(`, `scanf\s*\(\s*["'][^"']*%s`, `strncat\s*\([^)]*,\s*(sizeof|strlen)\s*\(`, `memcpy\s*\([^,]+,[^,]+,\s*[^)]+\)`, `malloc\s*\(\s*strlen\s*\(`, `malloc\s*\([^)]*\*`, `realloc\s*\(\s*\w+\s*,`, `free\s*\([^)]+\)[^;]*;[^}]*\1`, `delete\s+`, `delete\s*\[\s*\]`, `new\s*\[\s*\]`, `alloca\s*\(`, `sizeof\s*\(\s*\w+\s*\)`, `ntohl\s*\(`, `std::(equal|mismatch|is_permutation)\s*\(`, `\brealpath\s*\(`, `(memset|bzero)\s*\([^;]*(pass|pwd|secret|key|token|cred)` then a nearby `free`/return (secret-scrub dead-store), `use.?after.?free` (comments/tests).
 
 ### Risky structural patterns
 
@@ -591,6 +598,23 @@ for (auto it = v.begin(); it != v.end(); )
     if (*it % 2 == 0) it = v.erase(it); else ++it;
 ```
 
+### Unsafe legacy STL algorithm (second-range over-read)
+
+```cpp
+// VULN — single-range overload reads [first2, first2 + distance(first1,last1));
+// if `b` is shorter than `a`, it reads past b's end (CWE-126 over-read).
+bool same = std::equal(a.begin(), a.end(), b.begin());
+auto d   = std::mismatch(a.begin(), a.end(), b.begin());
+bool perm = std::is_permutation(a.begin(), a.end(), b.begin());
+
+// SECURE — C++14 four-iterator overload bounds BOTH ranges...
+bool same = std::equal(a.begin(), a.end(), b.begin(), b.end());
+// ...or the C++20 ranges:: form, which takes whole ranges and is always bounded
+bool same2 = std::ranges::equal(a, b);
+```
+
+The same second-iterator over-read applies to `std::mismatch`, `std::is_permutation`, `std::lexicographical_compare`, and `std::transform` (single-output-range form). It only causes a crash/over-read when the second range is shorter; flag the **three/single-iterator overloads** and treat the four-iterator and `std::ranges::` overloads as safe.
+
 ### Double-free via exception path
 
 ```cpp
@@ -600,6 +624,25 @@ try { delete task; ... } catch (...) { delete task; }
 // SECURE
 try { delete task; task = nullptr; ... } catch (...) { delete task; }
 ```
+
+### Insecure privilege drop — wrong order or unchecked return (CWE-696 / CWE-252 / CWE-271)
+
+A setuid/root process that drops privileges must drop the **group** (and supplementary groups) **before** the user, and must **check every return value**. Calling `setuid()` first discards the root privilege that `setgid()`/`setgroups()` require, so the later `setgid()` **silently fails** and the process keeps its original (often root / `wheel`) group → an incomplete drop that looks safe in review. Equally, `setuid()`/`setgid()` can fail (e.g. `RLIMIT_NPROC`) and an **unchecked** failure leaves the process running as root.
+
+```c
+// VULN — setuid() first drops the privilege needed for setgid(); setgid() then fails unchecked,
+// and supplementary groups (incl. group 0) are never cleared → still privileged.
+setuid(pw->pw_uid);
+setgid(pw->pw_gid);            // fails — no longer root — but return value ignored
+
+// SECURE — drop groups first, then uid; check EVERY return value; verify the drop "sticks"
+if (setgroups(1, &pw->pw_gid) != 0) abort();
+if (setgid(pw->pw_gid) != 0)        abort();   // group BEFORE user
+if (setuid(pw->pw_uid) != 0)        abort();   // user last
+if (setuid(0) != -1)                abort();   // re-acquire must FAIL (drop is permanent, not just seteuid)
+```
+
+**Grep**: `setuid(`/`seteuid(` appearing *before* `setgid(`/`setegid(`/`setgroups(` in the same function; any `set[ug]id`/`setgroups`/`setresuid`/`setresgid` whose return value is not checked; a privilege drop with no `setgroups()` call (supplementary groups, including GID 0, survive). **SAFE**: groups→gid→uid order, all return values checked, and a post-drop assertion that regaining privilege fails. Cross-ref `privilege_escalation.md`.
 
 ## Safe Patterns
 
@@ -690,3 +733,5 @@ Verify binaries in CI (e.g., `checksec --file=./app`) for RELRO, PIE, NX, canary
 - **`ntohl` on constant or pre-validated header field** — downgrade if upstream parser already bounds-checked packet length
 - **`alloca` once outside loop** with compile-time-bounded size — not loop-stack-exhaustion pattern
 - **Guarded `delete` in catch after `delete; ptr=nullptr` in try** — second delete is harmless on NULL
+- **`std::equal`/`mismatch`/`is_permutation` with the four-iterator overload** (`...,b.begin(),b.end()`) or any `std::ranges::` form — both ranges are bounded, so no second-range over-read; do not flag
+- **`std::equal` etc. where the second range is provably ≥ the first** (e.g., both are the same fixed-size `std::array`, or a length check precedes the call) — over-read cannot occur

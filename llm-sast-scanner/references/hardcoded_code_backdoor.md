@@ -39,6 +39,8 @@ Malicious or suspicious logic is often hidden in otherwise trusted code: hex/bas
 - `File.GetLastWriteTime(path)` plus offset compared in conditional branch (planted-file time bomb)
 - `Process.ProcessName` hashed and compared against obfuscated AV/process blocklists
 - P/Invoke to `OpenProcessToken`, `DuplicateTokenEx`, `CreateProcess*`, `LoadLibrary*`, `GetProcAddress`, `ImpersonateLoggedOnUser`, etc.
+- **Obfuscation beyond hex/base64** — the decode-then-execute pattern also hides behind **XOR-decrypt** (`bytes([b ^ k for b in data])`, `c.charCodeAt(0) ^ key`, C `buf[i] ^= key[i%len]`) and **character-code-array reconstruction** (`String.fromCharCode(104,101,…)`, `''.join(chr(c) for c in [...])`, `bytes([...]).decode()`) feeding `eval`/`exec`/`Function`/`compile`/`require`. Same class as the hex/base64 case — a long encoded blob that is **decoded and then executed** is the signature, regardless of codec. (The decode family also appears in `prompt_injection.md`, but there the payload is *attacker input*; here it is **hard-coded in the repo** — an implant, not an injection.)
+- **Cryptominer / resource-hijacking implant** — a planted miner (T1496): mining-pool URLs (`stratum+tcp://`, `stratum+ssl://`, `pool.`/`*.minexmr.com`/`*.nanopool.org` hosts), known miner names/libs (`xmrig`, `cpuminer`, `minerd`, `cryptonight`, `coinhive`, `coinimp`, `cryptoloot`, in-browser WASM miners), a hard-coded wallet address, or miner flags (`--donate-level`, `--cpu-priority`, `--max-cpu-usage`). **High-signal, low-FP** (these strings almost never appear in legitimate app code); common in compromised npm/PyPI packages, trojanized Docker images, and lifecycle (`postinstall`) scripts — cross-ref `supply_chain_security.md`.
 
 ## Safe Patterns
 

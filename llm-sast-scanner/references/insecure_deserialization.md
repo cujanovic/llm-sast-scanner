@@ -485,7 +485,7 @@ Commonly affected languages: Java, Python, JavaScript, Ruby, C#, Go.
 
 **Java sinks modeled**: `ObjectInputStream.readObject`/`readUnshared`; Kryo, XStream, SnakeYAML, JYaml, JsonIO, YAMLBeans, Hessian/Burlap, Castor, Jackson (`enableDefaultTyping`), Fastjson, Gson gadgets, JMS `ObjectMessage`, `XMLDecoder.readObject`, `SerializationUtils.deserialize`, Jabsorb, Jodd, Flexjson; RMI deserialization; Spring HTTP invoker exporter in XML/configuration.
 
-**Python sinks**: `pickle.load(s)`/`pickle.loads`, `cPickle`, `dill`, `marshal.loads`, `jsonpickle.decode`; `yaml.load`/`unsafe_load`/`full_load` without `SafeLoader`; `torch.load` (without `weights_only=True`); decoders where input may execute code.
+**Python sinks**: `pickle.load(s)`/`pickle.loads`, `cPickle`, `dill`, `marshal.loads`, `jsonpickle.decode`; `yaml.load`/`unsafe_load`/`full_load` without `SafeLoader`; `torch.load` (without `weights_only=True`); `numpy.load(..., allow_pickle=True)` / `np.fromfile`-then-`pickle` (an `.npy`/`.npz` with object arrays runs pickle on load — RCE on an untrusted model/data file); `pandas.read_pickle`; `joblib.load` (pickle-backed, common for sklearn models); decoders where input may execute code.
 
 **PHP sinks**: `unserialize()` on superglobals, cookies, sessions, uploads, network bodies; Phar metadata deserialization via `phar://` stream wrappers.
 
@@ -500,6 +500,8 @@ Commonly affected languages: Java, Python, JavaScript, Ruby, C#, Go.
 **OCaml sinks**: `Marshal.from_string` / `Marshal.from_bytes` / `Marshal.from_channel`, and `input_value` (the `Stdlib` wrapper over the same format) on attacker-controlled bytes. The OCaml marshal format is unauthenticated and unverified — unmarshalling violates type safety (a forged blob produces a value of an arbitrary claimed type), so a crafted payload causes memory corruption / crashes and can be leveraged for code execution. Safe: never unmarshal untrusted input; use a typed, validating parser (e.g. a `ppx`-derived JSON/`Sexp` decoder into a fixed type).
 
 **Clojure sinks**: `(read-string s)` and `clojure.core/read` with the default `*read-eval*` true — reader macro `#=(...)` evaluates arbitrary Clojure/Java at read time → RCE. Safe: `(clojure.edn/read-string s)` / `clojure.edn/read` (no eval, no arbitrary tagged-literal execution), or bind `*read-eval*` to `false` (still prefer `edn`).
+
+**Perl sinks**: `Storable::thaw` / `Storable::retrieve` (and `fd_retrieve`) on attacker-controlled bytes — Storable's own docs warn it is **not secure for untrusted data**: the unauthenticated binary format lets a forged blob instantiate arbitrary blessed objects whose `DESTROY`/overload methods then fire (object-injection → code execution), plus hash-flooding/resource abuse. Also `YAML::Load` (vs `YAML::XS` safe modes) and `eval`-based config loaders on request data. Safe: never `thaw`/`retrieve` untrusted input; use `JSON::PP`/`JSON::XS` decoding into plain data with schema validation.
 
 **Sources**: remote/network input on all platforms.
 

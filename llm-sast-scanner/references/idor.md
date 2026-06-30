@@ -390,6 +390,14 @@ Request-controlled filter/query DSLs that the backend forwards into an ORM let a
 - Webhooks and callbacks that reference foreign objects (e.g., `invoice_id`) and process them without verifying the owning principal
 - Third-party importers that sync data into the wrong tenant due to missing tenant binding at ingest time
 
+### Salesforce Apex — Object/Field-Level (CRUD/FLS) Enforcement Missing (CWE-639 / CWE-862)
+
+Apex defaults to **system context for object/field access**: a SOQL query or DML statement reads/writes every field regardless of the running user's profile unless the code explicitly enforces CRUD (object-level) and FLS (field-level). This is **distinct from SOQL injection** (`sql_injection.md`) and from record-level `with sharing` — even an injection-free, allow-listed query over-reads/over-writes columns the user should never touch.
+
+- **VULN**: `Database.query(q)` / `[SELECT ...]` / `insert`/`update`/`upsert` reached from an `@AuraEnabled`, `@RestResource`, `@HttpGet/@HttpPost`, or Visualforce controller **without** a preceding `Schema.sObjectType.X.fields.Y.isAccessible()/isUpdateable()/isCreateable()/isDeletable()` check, `WITH SECURITY_ENFORCED`, `WITH USER_MODE` / `Database.query(q, AccessLevel.USER_MODE)`, or `Security.stripInaccessible(...)`. An explicit `AccessLevel.SYSTEM_MODE` (or the legacy default) on a user-facing entry point is the red flag.
+- **Impact**: a low-privilege user reads restricted fields (`SSN__c`, `Salary__c`, password/token fields), or writes profile-/permission-controlling fields (`IsAdmin__c`) — mass-assignment-style privilege escalation — even though org FLS forbids it.
+- **SAFE**: `WITH SECURITY_ENFORCED` / `USER_MODE` on the query; `Security.stripInaccessible(AccessType.READABLE/UPDATABLE, records)` before return/DML; or per-field `is*()` describe checks; for `@AuraEnabled`, also declare the class `with sharing`. Cross-ref `mass_assignment.md` (write side) and `privilege_escalation.md`.
+
 ## Evasion Patterns
 
 **Parser & Transport**

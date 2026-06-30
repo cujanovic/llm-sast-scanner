@@ -1,6 +1,6 @@
 ---
 name: input_validation
-description: Detect missing or weak input validation as a standalone defense-in-depth finding (CWE-20) — a parameter, field, DTO property, or GraphQL argument whose name/semantics imply a constrained domain (email, zip/postal, phone, url, uuid, date, country, currency, locale, ip, numeric id, enum-like state) is typed as free-form String/JSON/text and reaches a store/use with no format, allowlist, schema, or scalar validation. Applies across all languages and GraphQL even when NO injection sink is present. Excludes legitimately free-text fields and already-validated inputs.
+description: Detect missing or weak input validation as a standalone defense-in-depth finding (CWE-20) — a parameter, field, DTO property, or GraphQL argument whose name/semantics imply a constrained domain (email, zip/postal, phone, url, uuid, date, country, currency, locale, ip, numeric id, enum-like state) is typed as free-form String/JSON/text and reaches a store/use with no format, allowlist, schema, or scalar validation. Also covers validation-order bypasses where a value is normalized/case-mapped/decoded/stripped *after* it is validated (CWE-179/180 — Unicode NFKC, toUpperCase, URL-decode re-creating a payload the filter rejected) numeric NaN/inf parse-coercion bypasses, and Python security checks written as `assert` (silently stripped under `python -O`). Applies across all languages and GraphQL even when NO injection sink is present. Excludes legitimately free-text fields and already-validated inputs.
 ---
 
 # Improper Input Validation (CWE-20 / CWE-1287)
@@ -95,6 +95,41 @@ data = ProfileIn(**request.json)                 # rejects malformed input befor
 
 A numeric field validated *after* coercion can be bypassed with the special float tokens `NaN`, `inf`, `-inf`: tainted request data passed to `float(...)`, `complex(...)`, or `bool(...)` (and `json.loads`, which parses bare `NaN`/`Infinity`) yields a value for which **every comparison is false** (`NaN < limit`, `NaN > limit`, `NaN == NaN` are all `False`). A range/threshold check (`if amount > MAX: reject`) therefore lets `NaN` through, and it can poison aggregates, balances, or auth scoring downstream. Flag tainted input reaching `float()`/`complex()`/`json.loads()` whose result feeds a comparison-based gate without an explicit `math.isnan()`/`math.isfinite()` (or NumPy `np.isnan`) check. **SAFE**: reject non-finite values (`if not math.isfinite(x): abort(400)`) or validate with a schema that disallows `NaN`/`inf` (pydantic `allow_inf_nan=False`).
 
+### Canonicalize / normalize *after* validation (validation-order bypass, CWE-179 / CWE-180)
+
+A general ordering defect: the code validates (or denylist-filters) the **raw** value, then a *later* step **transforms** the same value — Unicode normalization, case mapping, decoding, or character stripping — into something that would have failed the check, or that reconstitutes a payload. The validator inspected one string; the sink receives a different one. Distinct from the semantic-type gap above: validation may be *present and correct*, just in the wrong order.
+
+Concrete transform-after-validation bypasses:
+- **Unicode normalization (NFC/NFKC) after an HTML/keyword filter**: a `<script>`/tag filter passes because the input is `"﹤script﹥"` (small-form `<`/`>`), then a later `Normalizer.normalize(s, NFKC)` (or DB/template normalization) folds it to literal `<script>` → stored/reflected XSS. Same for fullwidth/compatibility forms folding to ASCII metacharacters.
+- **Character deletion/replacement after validation**: stripping non-character or control code points *after* the filter rejoins a split token — input `"<scr﷯ipt>"` passes the `<script>` check, then removal of the non-character `﷯` yields `<script>`.
+- **Case mapping after/within a check**: `toUpperCase()`/`toLowerCase()` is locale- and Unicode-lossy — `"ADMıN"` (dotless ı) uppercases toward `ADMIN`, `"ſcript"` (ſ) and `"ﬀ"` (ﬀ) case/normalize toward ASCII. A reserved-name or role gate that compares a *transformed* copy while trusting the original (or vice-versa) is bypassable.
+
+**SAST signal**: a validation / denylist / `equals`/`matches`/`contains` check on a value, followed — *before the sink* — by `Normalizer.normalize` / `.normalize('NFKC'|'NFC')` / `unicodedata.normalize` / `toUpperCase` / `toLowerCase` / `casefold` / `URLDecoder.decode` / `replaceAll`/`replace` removing characters, applied to the **same** value. The transform downstream of the gate is the bug.
+
+**SAFE**: canonicalize first, validate second — decode/normalize (to a **fixpoint**: repeat until the string stops changing), case-fold, and strip/reject disallowed code points **before** the allowlist/format check, then carry the *canonical* form to the sink unchanged; reject (don't silently strip) non-character/control code points. Domain-specific instances of this same principle: host allowlists `ssrf.md` (normalize/IDNA before compare), path filters `client_side_path_traversal.md` / `path_traversal_lfi_rfi.md` (decode-to-fixpoint before check), identity/reserved-name fields `business_logic.md` (NFKC + confusables skeleton before uniqueness/blocklist).
+
+### Python `assert` used as a security/validation gate (disabled under `-O`, CWE-617)
+
+Python `assert` statements are **removed entirely** when the interpreter runs with `-O`/`-OO` (or `PYTHONOPTIMIZE` set, and `__debug__` becomes `False`) — common in production/optimized container images. Any **security check, input validation, or precondition enforced with `assert` therefore vanishes in production**, so the gate that passes in dev is a no-op in prod.
+
+```python
+# VULN — both checks are stripped under `python -O`; the function then runs with unvalidated/forbidden input
+def transfer(user, amount):
+    assert user.is_authenticated, "must be logged in"   # authz gate — gone under -O
+    assert amount > 0 and amount <= user.balance         # validation — gone under -O
+    do_transfer(user, amount)
+
+# SAFE — raise a real exception that is NOT compiled out
+def transfer(user, amount):
+    if not user.is_authenticated:
+        raise PermissionError("must be logged in")
+    if not (0 < amount <= user.balance):
+        raise ValueError("invalid amount")
+    do_transfer(user, amount)
+```
+
+**TRUE POSITIVE**: an `assert` whose condition performs authorization, authentication, input validation, or a security-relevant precondition (anything an attacker could violate) in code that ships to production. **FALSE POSITIVE**: `assert` in tests, or asserting an internal invariant that no untrusted input can influence (a developer sanity check). **Grep**: `^\s*assert\b` in non-test `.py`, then read the condition — is it guarding against attacker-controlled state?
+
 ## Recon Indicators (Grep)
 
 ```bash
@@ -115,6 +150,8 @@ rg -n "\b(email|e_?mail|zip|postal|phone|msisdn|url|uri|uuid|country|currency|lo
 #   PHP:    filter_var | FILTER_VALIDATE_ | Respect\\Validation | Symfony Validator | Laravel `request->validate`
 #   GraphQL: validated custom scalar (graphql-scalars EmailAddress/URL/UUID), enum type
 rg -n "zod|joi|yup|class-validator|@IsEmail|@IsEnum|@Email|@Pattern|@Valid|hibernate|jakarta.validation|DataAnnotations|EmailAddress|RegularExpression|FluentValidation|pydantic|EmailStr|constr\(|Literal\[|marshmallow|cerberus|go-playground/validator|ozzo-validation|validate:\"|validates|\.permit\(|dry-validation|filter_var|FILTER_VALIDATE|Respect|->validate|validator\.|graphql-scalars|\bEnum\b" --glob '*.{js,ts,py,go,java,cs,rb,php,graphql,graphqls}'
+# Transform-AFTER-validation ordering bug (CWE-179/180): a normalize/case/decode/strip step on the validated value — confirm it runs AFTER the check, before the sink
+rg -n "Normalizer\.normalize|\.normalize\(\s*['\"]?NF(K?[CD])|unicodedata\.normalize|toUpperCase\(|toLowerCase\(|casefold\(|URLDecoder\.decode|replaceAll\(" --glob '*.{js,ts,py,go,java,cs,rb,php}'
 ```
 
 ## Severity / Triage

@@ -65,9 +65,12 @@ Flag any dynamic variable passed to these sinks; taint tracing confirms exploita
 
 **Server-side unescaped output**
 - Jinja2/Django: `\| safe`, `{% autoescape off %}`, `Markup(`, `mark_safe(`, `format_html(` with user args
+- **Engine-level autoescape disabled (whole-app XSS, worse than a single `{% autoescape off %}` block)**: `jinja2.Environment(autoescape=False)` or any `Environment(...)` whose `autoescape` is not `True`/`select_autoescape(...)`; `aiohttp_jinja2.setup(app, autoescape=False)`; Flask `app.jinja_env.autoescape = False` / `render_template_string` on a custom env with escaping off. **Default trap**: a bare `jinja2.Environment()` / `Template(src)` defaults to **autoescape OFF** (unlike Flask's `.html`/`.xml` auto-on), so standalone-Jinja rendering of any request value is XSS-by-default. Same idea elsewhere: Velocity/Freemarker without an output-escaping policy, `MarkupSafe`/`Markup()` wrapping tainted input, Twig `autoescape false`.
 - EJS: `<%- `; Handlebars: `{{{`; Pug: `!{`; Twig: `\| raw`; Blade: `{!!`; Thymeleaf: `th:utext`, `[($`
 - Rails: `raw(`, `.html_safe`, `<%= raw`, `content_tag(...)` built from a `.html_safe`/unescaped value; PHP: `echo $`, `print $`, `<?=` without `htmlspecialchars`
 - Go: `template.HTML(`, `template.JS(`, `text/template` for HTML; C#: `@Html.Raw(`, `MvcHtmlString.Create(`
+- Scala/Play: `play.twirl.api.Html(var)` / `@Html(var)` on a request-derived string (Twirl auto-escapes `@var` but `Html(...)` re-marks raw)
+- **Salesforce Visualforce/Lightning**: `<apex:outputText escape="false" value="{!tainted}"/>` (escaping explicitly off), any `<apex:outputText>`/custom component rendering `{!$CurrentPage.parameters.x}` merge fields, Lightning `aura:unescapedHtml`, LWC `lwc:dom="manual"` + `element.innerHTML`, or `{!tainted}` in inline `<script>`/`on*` attribute context. SAFE: default `escape="true"`, `HTMLENCODE`/`JSENCODE`/`JSINHTMLENCODE` functions
 - String-built HTML: `res.send("<`, `f"<.*{var}`, `render_template_string(f`
 
 **Client DOM / JS sinks**

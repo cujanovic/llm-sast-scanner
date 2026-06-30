@@ -1,6 +1,6 @@
 ---
 name: php_security
-description: PHP-specific vulnerability detection — dangerous functions, type juggling, file inclusion, object injection, framework sinks, configuration weaknesses, variable injection (extract/parse_str/variable variables), dynamic function and method calls, stream-wrapper and Phar deserialization, php://filter chains, and second-order/stored taint via $_SESSION and database reads
+description: PHP-specific vulnerability detection — dangerous functions, type juggling, file inclusion, object injection, framework sinks, configuration weaknesses, variable injection (extract/parse_str/variable variables), dynamic function and method calls, stream-wrapper and Phar deserialization, php://filter chains, second-order/stored taint via $_SESSION and database reads, and the WordPress security model (missing nonce/capability guards, wp_ajax_nopriv unauth AJAX, REST permission_callback, $wpdb SQLi, esc_*/wp_kses/sanitize_* escaper taxonomy)
 ---
 
 # PHP Security
@@ -243,6 +243,16 @@ $data = Yaml::parse($userInput, Yaml::PARSE_OBJECT);
 // SAFE: Yaml::parse($userInput) — no PARSE_OBJECT flag
 ```
 
+**Symfony framework attack surface** (the dominant PHP framework — its authz model and message/serializer subsystems are distinct sinks; sources are `Request::get()`/`getContent()`, route path params, and message payloads):
+
+- **Missing access control on a controller action** — a state-changing or sensitive-read action with **no `#[IsGranted(...)]`/`#[Security(...)]` attribute and no `denyAccessUnlessGranted()`/`isGranted()` call**, and not covered by a firewall `access_control` rule. **Account for inheritance** before flagging: a class-level `#[IsGranted]` (or a parent base-controller `denyAccessUnlessGranted` in the constructor/`__invoke`) covers all its actions — only flag actions left genuinely ungated. Cross-ref `privilege_escalation.md`.
+- **ParamConverter / `#[MapEntity]` / `#[MapRequestPayload]` / `#[MapQueryString]` IDOR** — Symfony auto-resolves a route id into an entity (`function show(#[MapEntity] Order $order)` / old `@ParamConverter`), so the action receives the object **without any ownership check**: any authenticated user passes another user's id and gets their record. Flag auto-mapped entity/DTO args used in read/update/delete with no `$order->getOwner() === $user` (or Voter) assertion. Cross-ref `idor.md`.
+- **Broken Voter** — a `Voter` whose `supports()` is too broad, or whose `voteOnAttribute()` checks only `$user->getRoles()` / `IS_AUTHENTICATED_*` when the action needs a **per-resource ownership** decision (so any logged-in user passes). Also: an attribute used in `#[IsGranted('OWN_THING', subject)]` that **no Voter actually supports** → the access decision silently defaults. Cross-ref `privilege_escalation.md`.
+- **Messenger handler (`#[AsMessageHandler]` / `MessageHandlerInterface`)** — three distinct issues: (1) the transport configured with **`serializer: php`** (PHP-native `serialize()` on the bus) → gadget-chain RCE if an attacker can enqueue/poison a message (cross-ref `insecure_deserialization.md`); (2) a message field flowing into `unserialize`/`Process`/`shell_exec`/raw SQL (**queue-to-shell injection**); (3) a **privileged action gated only by message presence** (`PromoteToAdmin`, `InvalidateUser`) with no authorization re-check — anyone who can dispatch the message escalates. **Safe**: default `JsonSerializer` transport; authorize inside the handler.
+- **Doctrine lifecycle events / listeners** — `postLoad`/`postPersist`/`postFlush`/`postUpdate` (or `EntityListener`) that writes a user-derived field into a sink (stored XSS into a rendered field, log injection) or runs side effects (mailer/HTTP) outside the transaction. Trace entity field → event hook → sink.
+- **Symfony Serializer mass assignment** — `ObjectNormalizer`/`PropertyNormalizer` denormalizing a request body straight onto a Doctrine entity **without serialization `groups` or `setIgnoredAttributes()`** → over-posting of `isAdmin`/`roles`/`owner` (cross-ref `mass_assignment.md`); a custom denormalizer calling `unserialize()` on a transport field is object-injection.
+- **Login authenticator missing `CsrfTokenBadge`** — a custom form-login `Authenticator` whose `authenticate()` omits `new CsrfTokenBadge(...)` disables login CSRF protection (cross-ref `csrf.md`); OAuth/OIDC callback handlers omitting `state`/PKCE verification (cross-ref `oauth_oidc_misconfiguration.md`).
+
 ### WordPress
 
 ```php
@@ -263,6 +273,36 @@ update_option('admin_email', $_POST['email']);  // may allow option injection
 $template = get_template_directory() . '/' . $_GET['template'] . '.php';
 include($template);   // path traversal in template param
 ```
+
+**WordPress authorization model (the WP-specific gap — generic source→sink misses it).** A WordPress action handler is exploitable when it reaches a sink/state-change **without the two guards WordPress requires**, so SAST must model both:
+
+- **Nonce check (CSRF guard)** — a state-changing handler must call `check_ajax_referer(` / `check_admin_referer(` / `wp_verify_nonce(` (and *bail* on failure). Its **absence** on an action that writes data/options/users → CSRF (CWE-352). A `wp_nonce_field`/`wp_create_nonce` that emits a nonce but is never *verified* server-side is not a guard.
+- **Capability check (access-control guard)** — a privileged handler must call `current_user_can('manage_options'|'edit_users'|…)` (or `map_meta_cap`) and bail; its absence → broken access control / privilege escalation (CWE-862/CWE-269). `is_admin()` is **not** an auth check (it only tests the admin *area*, true for any logged-in user hitting wp-admin).
+- **`wp_ajax_nopriv_<action>`** hooks are reachable by **unauthenticated** users — any tainted flow or state change under a `nopriv` handler is anonymous-exploitable; the authed-only `wp_ajax_<action>` twin still needs a capability check.
+- **`register_rest_route(...)` with `'permission_callback' => '__return_true'`** (or a missing/empty `permission_callback`) = an **unauthenticated** REST endpoint; flag any privileged/state-changing REST route whose `permission_callback` doesn't enforce a capability.
+
+```php
+// VULNERABLE: nopriv AJAX, no nonce, no capability → unauth privilege escalation
+add_action('wp_ajax_nopriv_set_role', 'h');
+add_action('wp_ajax_set_role', 'h');
+function h() {
+    $u = new WP_User(intval($_POST['uid']));
+    $u->set_role($_POST['role']);        // anyone → make self administrator
+}
+// VULNERABLE: REST route open to the world
+register_rest_route('p/v1', '/opt', ['methods'=>'POST',
+    'callback'=>'save', 'permission_callback'=>'__return_true']);   // no auth
+// SAFE: nonce + capability gate before any state change
+function h() {
+    check_ajax_referer('set_role');                      // CSRF guard, bails on fail
+    if (!current_user_can('edit_users')) wp_die('', 403); // access-control guard
+    ...
+}
+```
+
+**WP escaper / sanitizer taxonomy (the SAFE side — context-specific, not interchangeable).** Output escapers: `esc_html` (text), `esc_attr` (HTML attribute), `esc_url`/`esc_url_raw` (URL), `esc_js` (inline JS), `esc_textarea`, `wp_kses`/`wp_kses_post` (allowlisted HTML). Input sanitizers: `sanitize_text_field`, `sanitize_email`, `sanitize_key`, `sanitize_file_name`, `absint`/`intval`. DB: only `$wpdb->prepare(` (or `esc_sql` for identifiers) parameterizes — `$wpdb->query`/`get_results`/`get_var` with a concatenated string is SQLi. **Using the wrong-context escaper is still a finding** (e.g. `esc_html` on a value placed inside an HTML attribute or `href`/`src` → attribute/`javascript:` XSS; cross-ref `xss.md`, `output_encoding.md`).
+
+**WP sinks beyond SQLi/eval (recon):** reflected XSS via `add_query_arg`/`remove_query_arg` **echoed without `esc_url`** (they return the current request URI, which is attacker-influenced); privilege/state mutation reachable without a capability check — `update_option`/`add_option`/`update_user_meta`/`update_post_meta`/`add_cap`/`add_role`/`wp_update_user(['role'=>…])`/`activate_plugin`; unrestricted `wp_handle_upload`/`wp_handle_sideload` without an extension/MIME allowlist (`arbitrary_file_upload.md`); SSRF via `wp_remote_get`/`wp_remote_post` on a request-controlled URL (`ssrf.md`); deserialization via `maybe_unserialize` on option/meta/request data (`insecure_deserialization.md`).
 
 ### CodeIgniter
 

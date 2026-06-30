@@ -148,6 +148,7 @@ params.setRevocationEnabled(false); // no addCertPathChecker replacement
 | Node skip verify | `NODE_TLS_REJECT_UNAUTHORIZED=0`, `rejectUnauthorized: false` |
 | Go skip verify | `InsecureSkipVerify: true` |
 | Go SSH host key | `HostKeyCallback: ssh.InsecureIgnoreHostKey()` (golang.org/x/crypto/ssh) |
+| Go gRPC insecure transport | client `grpc.WithInsecure()` / `grpc.WithTransportCredentials(insecure.NewCredentials())`; server `grpc.NewServer()` with no `grpc.Creds(...)` — cleartext gRPC with **no** transport security (cross-ref `cleartext_transmission.md`) |
 | Rust skip verify | `danger_accept_invalid_certs(true)`, `danger_accept_invalid_hostnames(true)` |
 | Java trust-all | empty `checkServerTrusted`, `TrustAllStrategy`, `ALLOW_ALL_HOSTNAME_VERIFIER` |
 | OkHttp bypass | `hostnameVerifier((h,s) -> true)` |

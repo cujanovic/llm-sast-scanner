@@ -13,7 +13,7 @@ Identify deprecated cryptographic algorithms, broken hash functions, and predict
 - `MessageDigest.getInstance("MD5")` — MD5 is broken
 - `MessageDigest.getInstance("SHA1")` or `"SHA-1"` — SHA-1 is broken
 - `MessageDigest.getInstance("MD2")` or `"MD4"` — obsolete
-- Other-runtime spellings of the same weak digests: Python `hashlib.md5`/`hashlib.sha1`; Node `crypto.createHash('md5'|'sha1')`; PHP `md5()`/`sha1()`; Go `crypto/md5`/`crypto/sha1`; **Apple CommonCrypto `CC_MD5`/`CC_SHA1` (and streaming `CC_MD5_Init`/`CC_SHA1_Init`), `SecDigestGetData(kSecDigestMD5/kSecDigestSHA1, …)`; Apple CryptoKit `Insecure.MD5.hash(...)` / `Insecure.SHA1.hash(...)`** (the type is literally namespaced `Insecure`); Rust RustCrypto `Md5::new()` / `Sha1::new()` (the `md5`/`md-5` & `sha1` crates), or `openssl`/`ring` MD5/SHA-1.
+- Other-runtime spellings of the same weak digests: Python `hashlib.md5`/`hashlib.sha1`; Node `crypto.createHash('md5'|'sha1')`; PHP `md5()`/`sha1()`; Go `crypto/md5`/`crypto/sha1`; **Apple CommonCrypto `CC_MD5`/`CC_SHA1` (and streaming `CC_MD5_Init`/`CC_SHA1_Init`), `SecDigestGetData(kSecDigestMD5/kSecDigestSHA1, …)`; Apple CryptoKit `Insecure.MD5.hash(...)` / `Insecure.SHA1.hash(...)`** (the type is literally namespaced `Insecure`); Rust RustCrypto `Md5::new()` / `Sha1::new()` (the `md5`/`md-5` & `sha1` crates), or `openssl`/`ring` MD5/SHA-1; Dart/Flutter `crypto` package `md5`/`sha1` convenience objects (`md5.convert(bytes)` / `sha1.convert(bytes)`, return type `Hash`).
 
 **SAFE** (any match):
 - `MessageDigest.getInstance("SHA-256")`, `"SHA-384"`, `"SHA-512"`; Apple `CC_SHA256` / CryptoKit `SHA256`/`SHA512`. For passwords use bcrypt/scrypt/Argon2/PBKDF2, never a bare hash.
@@ -27,6 +27,7 @@ Identify deprecated cryptographic algorithms, broken hash functions, and predict
 - `Cipher.getInstance("DES/...")` or `"DESede/..."` — weak block cipher
 - `Cipher.getInstance("AES/ECB/...")` — ECB mode is insecure
 - `Cipher.getInstance("RC2/...")` or `"RC4/..."` or `"Blowfish/..."` — weak
+- `javax.crypto.NullCipher` (or a custom `CipherSpi`/`Cipher` whose transform returns the plaintext unchanged) — **no-op "encryption"**: the data is not encrypted at all, so anything relying on it for confidentiality is in cleartext. Flag any `new NullCipher()` / `Cipher.getInstance("...")` resolving to an identity transform on a confidentiality path.
 
 **SAFE** (any match):
 - `Cipher.getInstance("AES/GCM/...")` or other AEAD modes — prefer authenticated encryption; AES/CBC alone (even with random IV) lacks integrity and is vulnerable to padding-oracle attacks unless combined with encrypt-then-MAC
@@ -38,6 +39,7 @@ Identify deprecated cryptographic algorithms, broken hash functions, and predict
 - `new java.util.Random()` — predictable PRNG
 - `Math.random()` — predictable PRNG
 - Using `java.util.Random` for tokens, passwords, session IDs, OTP, or any security context
+- **Other languages — same CWE-330 (a non-crypto PRNG seeding a security value)**: .NET `System.Random` / `new Random()` / `Random.Shared` / `Random.Next()` (→ `RandomNumberGenerator.GetBytes`/`GetInt32`); Python `random.*` — `random()`, `randint`, `randrange`, `choice`, `getrandbits`, `seed` (→ `secrets` / `os.urandom`); Go `math/rand` (→ `crypto/rand`); Node/JS `Math.random()` (→ `crypto.randomBytes`/`randomInt`/`webcrypto.getRandomValues`); PHP `rand`/`mt_rand`/`uniqid`/`lcg_value` (→ `random_int`/`random_bytes`); Ruby bare `rand`/`Random.rand` (→ `SecureRandom`); Dart/Flutter `dart:math` `Random()` — the default constructor is explicitly *not* cryptographically secure (→ `Random.secure()`). Flag only when the output is security-relevant — token, password, session ID, OTP, nonce, salt, API key, password-reset/CSRF token.
 
 **SAFE** (any match):
 - `new java.security.SecureRandom()` — cryptographically secure
@@ -360,6 +362,21 @@ Parse numeric literals for cost/iterations/memory; flag when below minimums. Fla
 
 ---
 
+## Post-Quantum Readiness / Crypto-Agility (harvest-now-decrypt-later)
+
+A **forward-looking** class, distinct from CWE-327 weak crypto: the asymmetric primitives that are *classically strong today* — **RSA, ECDSA, ECDH, DSA, finite-field DH, Ed25519/EdDSA, X25519, ECC curves (P-256/384/521)** — are all breakable by a future cryptographically-relevant quantum computer (Shor's algorithm). Symmetric/hash primitives (AES-256, SHA-384/512) only lose half their strength to Grover and stay safe at large sizes (the key-size guidance below already covers them). So the post-quantum finding is the **inverse** of the classical one: code using RSA-2048 / P-256 / Ed25519 is *not* a CWE-327 weakness, but **is** a migration target.
+
+**Harvest-now-decrypt-later (HNDL)** sets priority: an attacker can record TLS/VPN traffic or stored ciphertext encrypted under a classical key exchange *today* and decrypt it once a quantum computer exists. So **key establishment** (ECDH / RSA-KEM / DH) and **long-lived signatures** (firmware, CA roots, code/document signing) are the urgent sites; ephemeral auth-only signatures are lower priority.
+
+**Detection (recon):**
+- **Key-gen / KEM / signature call sites** by language: Go `rsa.`/`ecdsa.`/`ecdh.`/`dsa.`/`ed25519.`/`elliptic.P*`; Java `KeyPairGenerator.getInstance("RSA"|"EC"|"DSA"|"DH"|"EdDSA")`, `Signature.getInstance("*ECDSA"|"*withRSA")`; Python `cryptography` `rsa.generate_private_key`/`ec.generate_private_key`/`dh.`, PyNaCl Ed25519; Node `crypto.generateKeyPair('rsa'|'ec'|'ed25519'|'x25519'|'dh')`, `crypto.createSign`; OpenSSL `EVP_PKEY_RSA`/`EC`/`X25519`.
+- **TLS configs** lacking a PQ-hybrid key-exchange group — e.g. nginx/Apache `ssl_protocols` without TLSv1.3 **and** a hybrid group such as `X25519MLKEM768`.
+- Emit a **crypto inventory / CBOM** (CycloneDX Cryptographic Bill-of-Materials) of every primitive and its call sites so migration can be tracked.
+
+**Migration targets (NIST PQC, finalized 2024):** key establishment → **ML-KEM** (FIPS 203) or a **hybrid** classical+PQ suite (`X25519MLKEM768`) for defense-in-depth; signatures → **ML-DSA** (FIPS 204) or **SLH-DSA** (FIPS 205, hash-based/conservative); **FN-DSA** (FIPS 206) is draft. National-security systems follow **CNSA 2.0** timelines (software/firmware signing earliest, general TLS/data-in-transit later in the decade).
+
+**Triage (keep severity proportionate):** this is **agility/readiness, not a currently-exploitable bug** — default **Low/Info** unless the path protects **long-lived** secrets or sits under a near-term compliance deadline (then raise). Classical primitives remain fine for ephemeral, non-security, or already-trusted-release-verification paths — **don't churn working crypto without context** (ask about the path's role first). A site can be *both* classically weak and quantum-vulnerable (e.g. RSA-1024) — see the classical key-size table below.
+
 ## Cryptographic Storage — IV, Nonce & Key Size
 
 Extends CWE-327 beyond weak algorithm strings.
@@ -371,6 +388,7 @@ Extends CWE-327 beyond weak algorithm strings.
 | Symmetric at rest | AES-GCM, ChaCha20-Poly1305 (AEAD) | ECB; CBC/CTR without separate MAC |
 | Symmetric key size | AES ≥128-bit (256 preferred) | DES, 3DES, RC4, Blowfish |
 | Asymmetric | RSA ≥2048 with OAEP; Curve25519/Ed25519 | RSA `<2048`; RSA PKCS#1 v1.5 for encryption |
+<!-- "Approved" here is *classical* strength only; RSA/ECC/Ed25519/X25519 are all quantum-vulnerable migration targets — see Post-Quantum Readiness above. -->
 | Integrity | AEAD tag or encrypt-then-MAC | AES-CBC + PKCS padding only |
 
 ### VULN (any match)

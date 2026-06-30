@@ -107,6 +107,8 @@ Log security-relevant events with stable, machine-parseable event types and seve
 
 Include on every security event where applicable: UTC timestamp (ISO 8601), correlation/request ID, app identifier, source IP, user agent, HTTP method/URI — use pseudonymous or hashed user identifiers when full IDs are PII.
 
+**Absence is itself a finding (OWASP A09 / CWE-778 — Security Logging & Monitoring Failures).** The inverse of the injection bug above: not "bad data in the log" but "no log at all." When a security-critical handler — login/MFA, password reset, privilege/role change, payment/transfer, admin action, or an access-control **denial** — emits *nothing* on its success/failure path, the breach is undetectable (no trail for IR/SIEM, no alerting). Statically this is a sink-present / log-absent pattern (the sensitive handler exists; no logger call on the branch). **Keep it low-confidence and low-severity (Info/Low):** absence is noisy to prove and is an audit-checklist item, not a taint finding — only raise it when a specific security-critical path *demonstrably* logs nothing. A log an attacker can `DELETE`/`TRUNCATE`/overwrite fails A09 just as missing logging does (append-only / tamper-evident storage — cross-ref the mutable-audit-trail note in `excessive_agency.md`).
+
 ```json
 {
   "datetime": "2026-06-16T12:00:00Z",

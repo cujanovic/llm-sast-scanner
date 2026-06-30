@@ -387,6 +387,17 @@ This is **not** header-Slowloris and **not** R.U.D.Y./Slow-POST: the headers com
 
 **Triage**: a public/attacker-reachable endpoint that parses a request body with no body-read timeout / minimum data rate → Medium (worker-pool exhaustion; **High** in per-connection-worker models like PHP-FPM or thread-per-request, or in autoscaled microservices where it cascades). A body-size limit alone does not downgrade it; a configured body-read timeout / min-data-rate does.
 
+## Missing client-side timeout on outbound calls (CWE-400 / CWE-1088)
+
+The mirror image of slow-client: when **your** code makes an outbound network call with **no timeout**, a slow or unresponsive *peer* (a hung upstream API, a wedged DB, an attacker-controlled URL via SSRF) blocks the calling thread/worker **forever**. Under load — or with an attacker who can choose/influence the target — every worker ends up parked on a dead socket and the service stops serving (thread/connection-pool exhaustion), without any large payload. The default for most clients is **no timeout** (block indefinitely), so *absence* of an explicit timeout is the finding.
+
+**Sinks (flag a network/IO call with no timeout argument set):**
+- **Python stdlib**: `socket.create_connection(...)` / `sock.connect(...)` without `settimeout`/`timeout=`; `urllib.request.urlopen(url)` (no `timeout=`); `http.client.HTTPConnection(...)`; `ftplib.FTP`/`smtplib.SMTP`/`poplib.POP3`/`imaplib.IMAP4`/`nntplib.NNTP`/`telnetlib.Telnet` constructed without `timeout=`; `ssl.SSLContext.wrap_socket` over a timeout-less socket.
+- **requests/httpx**: `requests.get/post/request(...)` with **no `timeout=`** (requests defaults to *wait forever*); `httpx` client without `timeout=`.
+- **Other langs**: Go `http.Client{}` with no `Timeout` (and no per-request `context` deadline) / `net.Dial` without `DialTimeout`; Java `HttpClient`/`URLConnection` without `connectTimeout`/`readTimeout`; Node `http.request` with no `timeout` + no abort.
+
+**SAFE**: set an explicit, finite `timeout=` (connect **and** read) on every outbound call; in Go use `http.Client{Timeout:…}` or a `context.WithTimeout`; bound the connection pool so a stall fails fast rather than queueing. **Triage**: outbound call on a request-serving path with no timeout → Medium (worker-pool exhaustion); **High** when the target host/URL is attacker-influenced (pairs with `ssrf.md` — a `169.254.169.254`/internal target that *tarpits* the connection). Internal one-shot scripts → Low/Info.
+
 ## Unreleased resource leaks (CWE-404 / CWE-772)
 
 Handles acquired per request but not released on **every** path (especially exception paths) accumulate until the process exhausts file descriptors, connection-pool slots, threads, or native memory — an availability DoS reachable from any handler that opens a resource under attacker-driven volume. This is the managed-language analogue of the Go leak above (Java/Kotlin, C#, Python, JS/Node, Go `io.Closer`).

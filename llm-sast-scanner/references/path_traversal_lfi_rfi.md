@@ -86,6 +86,7 @@ Flag file operations where the path argument is dynamic (variable, not a fully h
 - **Java**: `new File(`, `new FileInputStream(`, `Files.readAllBytes(`, `Paths.get(`, `UrlResource(`, Spring `ClassPathResource(var)` / `ResourceLoader.getResource(var)` / `ResourceUtils.getFile(var)`
 - **Go**: `os.Open(`, `os.ReadFile(`, `filepath.Join(`, `http.ServeFile(`, `http.ServeContent(w, r, var, ...)`
 - **C#**: `File.ReadAllText(`, `File.ReadAllBytes(`, `new FileStream(`, `Path.Combine(`
+- **Perl**: **2-arg `open(FH, $path)`** (the dangerous form — also a command-injection sink: a leading/trailing `\|` in the path makes Perl run it as a command, see `rce.md`), `File::Slurp` `read_file($path)`, `Path::Tiny->new($path)->slurp`. **SAFE**: 3-arg `open(my $fh, '<', $path)` + canonicalize/contain
 - **Path construction joins**: `os.path.join(BASE, var)`, `path.join(__dirname, var)`, `Paths.get(base).resolve(var)`, string concat `` `${base}/${var}` ``
 - **Archive extraction**: `zipfile.ZipFile.extractall`, `tarfile.extractall`, `ZipEntry.getName()` as output path (incl. streaming `ZipInputStream.getNextEntry()` and `net.lingala.zip4j` `ZipFile.extractAll`/`FileHeader.getFileName`), Node `adm-zip`/`node-tar`/`unzipper` extract calls
 - **Java guard nuance**: `Paths.get(base).resolve(var).normalize().startsWith(base)` is only sound when `base` was canonicalized first (`toRealPath()`); comparing against a non-real base lets a symlink or prefix sibling (`/safe-evil`) defeat the `startsWith` check.

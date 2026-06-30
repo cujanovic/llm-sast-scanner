@@ -368,7 +368,7 @@ Flag any XML parse/transform call lacking adjacent hardening (DTD/external-entit
 | **Java** | `DocumentBuilderFactory` → `parse`, `SAXParserFactory` → `parse`, `XMLInputFactory` → `createXMLStreamReader`, `TransformerFactory` → `newTransformer`, `SchemaFactory` → `newSchema`, JAXB `Unmarshaller`; Spring OXM `Jaxb2Marshaller` / `MarshallingHttpMessageConverter` (SOAP/`@RequestBody` XML) when entity expansion is not disabled |
 | **PHP** | `simplexml_load_string/file`, `DOMDocument::loadXML/load`, `xml_parse`, `SimpleXMLElement` constructor |
 | **.NET** | `XmlDocument.Load/LoadXml`, `XmlTextReader`, `XDocument.Load`, `XmlReader.Create` without `DtdProcessing.Prohibit` |
-| **Node.js** | `libxmljs.parseXmlString/parseXml`, `node-expat`, `sax.parser` (check entity expansion) |
+| **Node.js** | `libxmljs.parseXmlString/parseXml` — the `{ noent: true }` / `replaceEntities: true` option is the explicit entity-expansion enabler (same trap as PHP `LIBXML_NOENT`); `node-expat`, `sax.parser` (check entity expansion) |
 | **Ruby** | `Nokogiri::XML` with `config.noent`, `REXML::Document.new`, `LibXML::XML::Document.string` |
 | **Go** | Third-party parsers (e.g., `beevik/etree`); stdlib `encoding/xml` does not resolve external entities |
 

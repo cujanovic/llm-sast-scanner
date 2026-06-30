@@ -1,6 +1,6 @@
 ---
 name: iac_security
-description: Infrastructure-as-Code misconfiguration detection for cloud resource definitions (Terraform, CloudFormation, ARM/Bicep, Pulumi)
+description: Infrastructure-as-Code misconfiguration detection for cloud resource definitions (Terraform, CloudFormation, ARM/Bicep, Pulumi) and Ansible playbooks/roles (become privilege escalation, no_log secret leakage, validate_certs/http, file mode, unpinned packages, allow_unsafe_lookups, Vault)
 ---
 
 # Infrastructure-as-Code Security
@@ -45,6 +45,8 @@ Grep IaC trees for structural misconfig patterns. Recon is attribute/value prese
 | Logging disabled | `enable_flow_log\s*=\s*false`, `enabled\s*=\s*false` near `aws_flow_log`, `logging\s*{[^}]*enable\s*=\s*false`, `enable_logging\s*=\s*false`, `audit_logs\s*=\s*"Off"`, `retention_in_days\s*=\s*0` |
 | State exposure | `backend\s+"s3"`, `encrypt\s*=\s*false`, missing `server_side_encryption_configuration`, `acl\s*=\s*"public-read"`, `pulumi\.StackReference` with secrets in plain outputs |
 | Drift / suppress | `lifecycle\s*{[^}]*ignore_changes\s*=\s*\[[^\]]*(encrypt\|acl\|public\|cidr\|policy)`, `prevent_destroy\s*=\s*true` on security resources without review, duplicate inline + managed policy with `"*"` |
+| IMDSv1 / user-data secrets | `http_tokens\s*=\s*"optional"`, `aws_instance`/`aws_launch_template` blocks with **no** `metadata_options`, `user_data` / `user_data_base64` containing `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`password`/`BEGIN .* PRIVATE KEY` |
+| Ansible intrinsic | `validate_certs:\s*(no\|false)`, `become:\s*true` / `become_user:\s*root`, `state:\s*latest`, `mode:\s*["']?07[0-7]7`, `allow_unsafe_lookups\s*=\s*True`, `url:\s*["']?http://`, `(shell\|command):\s*.*\{\{`, plaintext `password:`/`api_key:` in `vars:`/`group_vars`/`host_vars` (no `no_log:\s*true`) |
 
 **File extensions**: `*.tf`, `*.tfvars`, `*.hcl`, `*.yaml`, `*.yml`, `*.json`, `*.bicep`, `*.bicepparam`, `Pulumi.*`, `__main__.py` (Pulumi), `index.ts`/`index.js` (CDK/Pulumi).
 
@@ -64,6 +66,8 @@ Grep IaC trees for structural misconfig patterns. Recon is attribute/value prese
 - VPC/VNET flow logs, S3 access logs, CloudTrail/equivalent audit logging disabled or retention zero
 - Terraform/Pulumi remote state bucket lacks encryption and public-access block
 - `lifecycle { ignore_changes = [...] }` hides drift on ACL, encryption, CIDR, or policy attributes
+- EC2 instance / launch template allows IMDSv1 (no `metadata_options` block, or `http_tokens = "optional"`) — an app-layer SSRF can then steal the instance-role credentials from `169.254.169.254`
+- Long-lived credentials, passwords, or private keys embedded in EC2 `user_data` / `user_data_base64` — retrievable at runtime via the metadata service (`/latest/user-data`)
 
 ## Safe Patterns
 
@@ -166,6 +170,8 @@ resource "azurerm_key_vault_secret" "db" {
 }
 ```
 
+**Plaintext secret in an env-var / parameter block instead of a secret-manager reference (structural signal, cross-cloud):** a literal credential placed in a compute resource's environment or parameter store — rather than referenced from a secrets manager — is a hardcoded secret *and* a missed-encryption finding. Flag: AWS `aws_lambda_function` `environment { variables = { DB_PASSWORD = "…" } }` or `aws_codebuild_project` env var with `type = "PLAINTEXT"` holding a secret (vs `type = "PARAMETER_STORE"`/`"SECRETS_MANAGER"`), `aws_ssm_parameter` `type = "String"` for a secret (vs `"SecureString"` with a KMS key), ECS `container_definitions` `environment` literal (vs `secrets` `valueFrom`); GCP `google_cloudfunctions*_function` `environment_variables` / Cloud Run `env { value = "…" }` holding a secret (vs `secret_environment_variables` / `value_source.secret_key_ref`); Azure `app_settings` / `azurerm_*function_app` literal connection string (vs `@Microsoft.KeyVault(...)` reference); K8s `env.value` literal (vs `valueFrom.secretKeyRef`). **SAFE**: reference the secret manager / use `SecureString`+KMS / `secret_environment_variables` / `secretKeyRef`; never the inline literal. Cross-ref `hardcoded_secrets.md`.
+
 ### Missing encryption — VULN vs SAFE
 
 **VULN**:
@@ -230,6 +236,42 @@ terraform {
 }
 ```
 
+### Instance Metadata Service (IMDSv2) & user-data secrets — VULN vs SAFE
+
+An EC2 instance that allows **IMDSv1** (token-less metadata access) turns any in-instance request forgery into full cloud-credential theft: a single app-layer SSRF can `GET http://169.254.169.254/latest/meta-data/iam/security-credentials/<role>` and exfiltrate the instance role's keys. IMDSv2 requires a `PUT`-issued session token, which a basic SSRF cannot mint. The Terraform default leaves `http_tokens = "optional"` (IMDSv1 **allowed**) — absence of `metadata_options` is the finding. Same gap on `aws_launch_template` / `aws_launch_configuration`.
+
+**VULN** — IMDSv1 reachable + long-lived secrets baked into user-data (which is itself retrievable at `/latest/user-data`, so the SSRF that steals role creds also reads these):
+```hcl
+resource "aws_instance" "web" {
+  ami           = "ami-005e54dee72cc1d00"
+  instance_type = "t2.micro"
+  # no metadata_options block → IMDSv1 allowed (http_tokens defaults to "optional")
+  user_data = <<EOF
+export AWS_ACCESS_KEY_ID=AKIA...EXAMPLE
+export AWS_SECRET_ACCESS_KEY=wJalr...EXAMPLEKEY
+EOF
+}
+```
+
+**SAFE** — force IMDSv2, cap the hop limit so containers can't reach IMDS through an extra network hop, and pull secrets at boot from a secret manager:
+```hcl
+resource "aws_instance" "web" {
+  ami           = "ami-005e54dee72cc1d00"
+  instance_type = "t2.micro"
+  metadata_options {
+    http_tokens                 = "required"  # IMDSv2 only
+    http_put_response_hop_limit = 1           # blocks container-escape pivots to IMDS
+    http_endpoint               = "enabled"
+  }
+  iam_instance_profile = aws_iam_instance_profile.web.name  # role, not static keys
+  # user_data fetches secrets from SSM Parameter Store / Secrets Manager at runtime
+}
+```
+
+**TRUE POSITIVE**: `aws_instance` / `aws_launch_template` / `aws_launch_configuration` with no `metadata_options` block, or `http_tokens = "optional"`; or `user_data` / `user_data_base64` containing literal `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, passwords, or private keys. Cross-ref `ssrf.md` (the metadata-service target and its IP-encoding bypasses).
+
+**FALSE POSITIVE**: `http_tokens` set on a launch template that the instance/ASG actually references (don't double-flag the instance that inherits it); `user_data` that only fetches secrets at runtime (`aws ssm get-parameter`, `secretsmanager`) rather than embedding them. GCP/Azure differ — the GCP metadata server already requires a `Metadata-Flavor: Google` header (harder to hit via naive SSRF); flag the AWS pattern specifically.
+
 ## Provider-Specific Misconfigurations
 
 Quick VULN→SAFE attribute references per cloud. Flag the VULN attribute; confirm the resource type and that no compensating control exists elsewhere in the stack.
@@ -245,6 +287,7 @@ Quick VULN→SAFE attribute references per cloud. Flag the VULN attribute; confi
 | `aws_kms_key` | `enable_key_rotation = false` | `enable_key_rotation = true` |
 | `aws_cloudtrail` | no `kms_key_id` | `kms_key_id = aws_kms_key.key.arn` |
 | `aws_instance` | `associate_public_ip_address = true` | `associate_public_ip_address = false` |
+| `aws_instance` / `aws_launch_template` | no `metadata_options`, or `http_tokens = "optional"` (IMDSv1 → SSRF steals role creds) | `metadata_options { http_tokens = "required"; http_put_response_hop_limit = 1 }` |
 | `provider "aws"` | `access_key`/`secret_key` inline | `shared_credentials_file` / `profile` / env |
 | `aws_iam_role` | `Principal = {AWS = "*"}` on `sts:AssumeRole` | restricted account/role ARN principal |
 
@@ -261,6 +304,8 @@ Quick VULN→SAFE attribute references per cloud. Flag the VULN attribute; confi
 | `azurerm_kubernetes_cluster` | `private_cluster_enabled = false`, empty `api_server_authorized_ip_ranges` | `private_cluster_enabled = true`, `disk_encryption_set_id` set |
 | `azurerm_*_virtual_machine_scale_set` | `admin_password = "..."`, `encryption_at_host_enabled = false` | `admin_ssh_key`, `disable_password_authentication = true`, `encryption_at_host_enabled = true` |
 | `azurerm_role_definition` | `actions = ["*"]` | explicit scoped `actions` list |
+| `azurerm_function_app` / `azurerm_linux_function_app` / `function.json` | HTTP trigger `authLevel = "anonymous"` (unauthenticated function endpoint — function/admin keys bypassed) | `authLevel = "function"`/`"admin"`, or front with APIM/Easy Auth (`auth_settings_v2`) |
+| `azurerm_*_web_app` / App Service SCM | basic-auth publishing on — `auth_settings_v2` absent **and** `basicPublishingCredentialsPolicy`/`scm_*`/ARM `allowBasicAuthFtp = true` / `ftpsState = "AllAllowed"` | `auth_settings_v2` enabled; `ftps_state = "FtpsOnly"`/`"Disabled"`; disable basic publishing creds |
 
 ### GCP
 
@@ -277,6 +322,27 @@ Quick VULN→SAFE attribute references per cloud. Flag the VULN attribute; confi
 | `google_*_iam_member` (Cloud Run, etc.) | `member = "allUsers"` | specific principal |
 | `google_compute_ssl_policy` | `min_tls_version = "TLS_1_0"` | `"TLS_1_2"`, `profile = "MODERN"` |
 | `google_project_iam_member` | `roles/iam.serviceAccountTokenCreator` to broad SA | least-privilege role to specific user |
+
+### Ansible
+
+Config-management IaC (playbooks/roles are YAML; `ansible.cfg` is INI). Beyond the cloud-resource modules (which mirror the AWS/Azure/GCP rows above), these are the **Ansible-intrinsic** misconfigurations — flag the VULN attribute on a task/play/role/`ansible.cfg`.
+
+| Location | VULN | SAFE |
+|----------|------|------|
+| `ansible.cfg` `[defaults]` | `allow_unsafe_lookups = True` — lookup plugins may return unsafe (un-escaped) data that templates then evaluate → template/code injection (CWE-94) | omit (default `False`); never mark lookup output safe |
+| any task | `become: true` / `become_user: root` applied play-wide or where the action doesn't need root (CWE-250) | scope `become` to the single task that needs it; least-privilege `become_user` |
+| task handling a secret | no `no_log: true` on a task that passes a password/token/key (loops over secrets, `debug:` of a secret var) → value printed to stdout/Ansible logs (CWE-532) | `no_log: true` on every task that touches sensitive values |
+| `uri` / `get_url` / `apt_key` / `yum` / `pip` | `url:`/`repo:`/`key:` using `http://` → cleartext fetch / MITM of fetched payload (CWE-319) | `https://`; verify checksums for downloaded artifacts |
+| `uri` / `get_url` / `*_module` over TLS | `validate_certs: no` (or `false`) → skips certificate verification, MITM (CWE-295; the Ansible analogue of `rejectUnauthorized:false` — see `certificate_validation.md`) | omit (default validates) / `validate_certs: yes` |
+| `file` / `copy` / `template` / `get_url` | `mode: "0777"` / `mode: "0666"` / world-writable, or **missing** `mode` on a sensitive file → unpredictable/over-broad perms (CWE-732) | explicit least-privilege octal `mode` (e.g. `"0600"`/`"0644"`) |
+| `apt` / `yum` / `package` / `pip` / `gem` | `state: latest` or no version pin → non-reproducible build, silent supply-chain drift | pin `version:`/`name: pkg=1.2.3`; `state: present` |
+| vars / playbook | hardcoded `password:`/`api_key:`/private key literal in `vars:`/`group_vars`/`host_vars` (CWE-798) | Ansible Vault (`ansible-vault encrypt`) or an external secret lookup; never commit plaintext |
+| `shell` / `command` / `raw` | unquoted/templated user-or-inventory var interpolated into the command string — `shell: "rm {{ user_path }}"` → command injection (cross-ref `rce.md`) | use the purpose-built module (`file`, `copy`), `command:` with an argument list, or `{{ var | quote }}` |
+| `ansible.builtin.copy`/`unarchive` `src` | relative/`..`-containing path resolved outside the role files dir → path traversal | restrict to role-relative paths; validate/normalize before use |
+| Jinja2 **lookup plugin** (template render time, on the **controller**) | `lookup('pipe', cmd)` / `q('pipe', …)` runs a subprocess → controller RCE; `lookup('url', x)` → SSRF / malicious-payload fetch; `lookup('env', 'AWS_SECRET…')` → pulls controller env secrets into play scope (exfil); `lookup('file', "{{ user_var }}")` → controller path traversal (`~/.ssh/id_rsa`). The arg being a var/inventory/extra-var is the taint — distinct from (and not gated by) `allow_unsafe_lookups`. (Same risk inside a `{% %}` block, a `when:`, or a `set_fact` that stores a value re-rendered next task = second-order SSTI.) | never build a `lookup()` arg from untrusted input; for `pipe`/`url` use a vetted module with validation; treat extra-vars/inventory as untrusted |
+| `ansible.cfg` `[defaults]` / env | `host_key_checking = False` (or `ANSIBLE_HOST_KEY_CHECKING=False`) → SSH host-key verification off, controller→target MITM (CWE-322) | omit (default `True`); pre-populate `known_hosts` |
+| dynamic `include_tasks`/`import_tasks`/`include_role`/`vars_files` | path built from a var/extra-var — `include_tasks: "{{ play }}.yml"` — lets attacker-staged YAML be executed (arbitrary task execution) | allow-list includable files; never template the include path from untrusted input |
+| Ansible Tower / AWX | management host/`inbound` exposed to `0.0.0.0/0` → control-plane exposure | restrict to admin CIDR / private network |
 
 ## Common False Alarms
 

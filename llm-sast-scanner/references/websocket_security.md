@@ -227,6 +227,14 @@ useServer({
 
 **SAFE**: validate `Origin` on the WebSocket upgrade (exact allowlist; reject missing/malformed); do not authenticate WS by ambient cookies alone — require a short-lived token in `connectionParams` validated in `onConnect`; apply the **same authorization** to mutations regardless of transport. Cross-ref `csrf.md`, `graphql_injection.md`.
 
+## ASP.NET Core SignalR Hub Security
+
+SignalR is .NET's real-time framework over WebSocket — and a **`Hub` subclass's public methods are remotely-invokable RPC by default**. There is no route attribute or `[HttpPost]` gate: any client that can reach the hub endpoint can call any public method unless authorization is explicitly applied.
+
+- **VULN — unauthenticated hub RPC**: a `class ChatHub : Hub` (or `Hub<T>`) with public methods and **no `[Authorize]`** on the class or methods, where `MapHub<ChatHub>("/chat")` is reached without auth middleware. Any anonymous client invokes the methods (the SignalR analog of missing function-level authz). Method arguments are **per-call untrusted input** — trace them to sinks exactly like `ws.on('message')` (SQL/command/path/SSRF/`Process.Start` — `ChatHub` calling `Process.Start(...+message)` is the canonical example).
+- **VULN — over-broad / client-targeted broadcast**: `Clients.All.SendAsync(...)` pushing per-user/sensitive data to every connected client (info disclosure); `Clients.Group(clientSuppliedName)` / `Clients.User(clientSuppliedId)` / `Groups.AddToGroupAsync(ctx.ConnectionId, clientSuppliedGroup)` where the target group/user comes from client input → cross-tenant message delivery / channel IDOR (cross-ref `idor.md`).
+- **SAFE**: `[Authorize]` on the hub (and `[Authorize(Policy=...)]`/role checks per sensitive method); derive the caller identity from `Context.User`, never trust a client-supplied user/group id; validate+authorize group membership server-side; treat every hub-method parameter as untrusted and apply the same sink defenses as any HTTP handler. **Grep seeds**: `:\s*Hub\b`, `:\s*Hub<`, `Clients\.All`, `Clients\.(Group|User|Client)\(`, `Groups\.AddToGroupAsync\(`, `MapHub<`, `AddSignalR\(` — then check for `[Authorize]` on the hub and whether targets/args are client-controlled.
+
 ## Missing Max Frame / Message Size (DoS)
 
 WebSocket libraries default to large or unlimited frame buffers. Without **`maxPayload`** (`ws`), **`maxMessageSize`** / **`max_size`** (Python `websockets`), or **`setMaxTextMessageBufferSize`** (Java), a single oversized text/binary frame can exhaust server memory.

@@ -72,6 +72,11 @@ Concrete reachable surfaces worth enumerating by name. The heap/env/config dumps
 - Client env leakage: `NEXT_PUBLIC_`/`VITE_`/`REACT_APP_` variables; embedded secrets
 - `__NEXT_DATA__` and pre-fetched JSON can include internal IDs, flags, or PII
 
+### Developer comments flagging known weaknesses (CWE-546)
+
+- Security-flavored `TODO` / `FIXME` / `HACK` / `XXX` / `BUG` comments are author-confirmed leads, not noise — the developer has *already told you* where a weakness lives: `// FIXME: SQL injection here`, `# TODO: add authz check before launch`, `// HACK: skip cert validation for now`, `<!-- XXX: hardcoded creds, remove before prod -->`. Pivot to the adjacent code and confirm the *real* class (SQLi, missing authz, disabled TLS, hardcoded secret); the comment itself is CWE-546 (Suspicious Comment) but its value is as a signpost. Language-agnostic, cheap, high-signal — run it early in recon. (A comment can also leak internals directly — internal hostnames, ticket IDs, "temporary" backdoors — independent of any TODO marker.)
+- **Grep:** `rg -niE '(TODO\|FIXME\|HACK\|XXX\|BUG)\b.{0,40}(secur\|auth\|sqli?\|inject\|xss\|csrf\|vuln\|password\|secret\|token\|creds?\|bypass\|insecure\|temporar\|disable\|hardcode)'` — then read the surrounding lines, not just the comment.
+
 ### Headers and Response Metadata
 
 - Fingerprinting: Server, X-Powered-By, X-AspNet-Version
@@ -235,6 +240,7 @@ Log exceptions with correlation IDs, user/session identifiers (non-PII where pos
 - **VULN**: `res.json({ error: err.stack })` — stack trace leaked to client
 - **VULN**: `res.send(err.message)` — raw error message returned
 - **VULN**: `app.use((err, req, res, next) => res.json(err))` — entire error object serialized
+- **VULN (ORM serialization-redaction bypass, CWE-200)**: sensitive-field hiding implemented **only in the serialization layer** — a Mongoose `schema.set('toJSON'|'toObject', { transform: (doc, ret) => delete ret.password })`, a getter, or a `toJSON()` method on the model — is **silently bypassed** when a code path returns the raw object instead of the hydrated document. The flagship case is Mongoose **`.lean()`**: `Model.find().lean()` (and `.findOne().lean()`) returns plain POJOs that **skip getters and `toJSON`/`toObject` transforms**, so `res.json(await Model.find().lean())` leaks every field the transform was meant to strip (`password`/`passwordHash`, tokens, `__v`, internal flags). Same leak from raw-driver access (`db.collection('users').find()`), `JSON.stringify(doc.toObject())`, or spreading a Sequelize/TypeORM instance's `.dataValues`/`._` internals. **SAFE**: enforce redaction at the **query/data layer**, not only serialization — `select: false` in the schema *plus* explicit `.select('-password')` on lean/raw reads (lean honors projection but not transforms); or map to an explicit response DTO; never `res.json` a raw ORM result. Cross-ref `privacy_data_protection.md`, `mass_assignment.md` (the write-side mirror).
 
 ### PHP
 - **VULN**: `error_reporting(E_ALL); ini_set('display_errors', 1)` — all errors displayed

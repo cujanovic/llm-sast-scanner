@@ -84,6 +84,10 @@ Grep for provider formats and secret-named assignments, then resolve the client/
 | Anthropic | `sk-ant-[A-Za-z0-9\-_]{90,}` |
 | xAI (Grok) | `xai-[A-Za-z0-9]{80,}` |
 | Azure Storage | `AccountKey=` + ~88-char base64; `DefaultEndpointsProtocol=...;AccountName=...;AccountKey=` |
+| Azure SAS token | a signed-URL query string carrying `sig=<url-encoded base64 HMAC>` alongside `sv=` (api-version) and `sp=`/`ss=`/`srt=`/`se=` (permissions/expiry) — e.g. `...blob.core.windows.net/...?sv=2022-11-02&ss=b&srt=co&sp=rwdlac&se=...&sig=...`. A bare SAS grants whatever `sp` allows until `se`; flag the whole token, not just `sig=` |
+| Azure DevOps / VSTS PAT | 52-char `[A-Za-z0-9]{52}` literal assigned near `pat`/`token`/`AccessToken`, or embedded in a clone URL (`https://anything:<pat>@dev.azure.com/...`) or `AZURE_DEVOPS_EXT_PAT`/`System.AccessToken` written to config |
+| Azure publish profile (`.publishsettings`/`.pubxml`) | `userPWD="<~60-char base64>"` / `<publishProfile ... userPWD=...>` — Web Deploy password (and often an embedded management certificate); the file itself committed is the finding |
+| Ansible Vault blob | a file/value beginning `$ANSIBLE_VAULT;1.1;AES256` — an encrypted-secret blob committed to the repo; recoverable offline if the vault password is weak/also committed (cross-ref `iac_security.md` Ansible) |
 | HashiCorp Vault | `hvs\.`, `hvb\.`, `hvr\.` + `[A-Za-z0-9_\-]{24,}` |
 | DigitalOcean | `dop_v1_`, `doo_v1_`, `dor_v1_` + `[a-f0-9]{64}` |
 | Shopify | `shpat_`, `shpss_`, `shppa_`, `shpca_` + `[a-fA-F0-9]{32}` |
@@ -94,22 +98,28 @@ Grep for provider formats and secret-named assignments, then resolve the client/
 | JWT (already-issued) | `eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+` (a baked-in long-lived token) |
 | Private Key | `-----BEGIN (RSA \|EC \|OPENSSH \|DSA \|PGP )?PRIVATE KEY-----` |
 | DB connection string | `(postgresql\|mysql\|mongodb(\+srv)?\|redis\|amqp)://[^:/@]+:[^@]+@` (user:pass@host) |
+| DB-CLI inline credentials (arg form, not URI) | `sqlplus\s+.*\w+/\w+@`, `mysql\b.*-p\S`, `mongosh?\b.*--password\s+\S`, `redis-cli\b.*-a\s+\S`, `PGPASSWORD=\S`, `psql\b.*-W` with a literal — a password passed as a **command-line argument** to a DB client in a script/`Dockerfile`/CI yaml/Makefile (distinct from the `user:pass@host` URI above, which the connection-string regex catches). Doubly bad: CLI args are also visible in process listings (`ps`)/shell history/CI logs at runtime (cross-ref `information_disclosure.md`). |
 
 **Generic / entropy heuristics** (no provider prefix):
-- Long random literals — **≥32 alphanumeric chars**, or **≥64 hex chars**, or base64 blobs assigned in an auth/crypto context.
+- Long random literals — **≥32 alphanumeric chars**, or **≥64 hex chars**, or base64 blobs assigned in an auth/crypto context. **Entropy is necessary, not sufficient**: long natural-language prose, UUIDs, commit hashes, and base64-of-text are all high-entropy too. Before flagging a prefix-less literal, confirm it does *not* decompose into dictionary words / common subword tokens — a string that tokenizes into few, *rare* tokens (high per-character rarity) is credential-like; one that splits into many common words/tokens is human text or structured data, not a secret. This rarity check is what keeps the generic catch-all from drowning in false positives.
 - UUID used *as an API key* (in an auth header / SDK init).
 - Secret-named assignments: `*api_key*`, `*apikey*`, `*secret*`, `*token*`, `*password*`, `*passwd*`, `*private_key*`, `*signing_key*`, `*client_secret*`, `*access_key*`, `*connection_string*`, `DATABASE_URL` = string literal.
 - Sinks that consume it: SDK init (`new Stripe("...")`, `new S3Client({credentials:{...}})`), `Authorization: Bearer <literal>`, `jwt.sign(payload, "<literal>")`, ORM/DB connect with inline `user:pass@`.
+- **Encoded at rest (decode-then-rescan).** A real secret may be wrapped in one or more reversible encoding layers to dodge naive scanners: base64, hex, URL/percent (`%xx`), or `\uXXXX` / `U+XXXX` unicode escapes. Decode each detected encoded segment **in place and re-scan** the decoded text for provider formats and high-entropy literals, **recursing a bounded depth** for nested chains (base64-of-hex, double-base64, base64-of-gzip — combine the encoding tags). A match found *only* inside a decoded layer is still a finding — record the encoding kind and decode depth so the literal can be located in the raw file. (Distinct from `prompt_injection.md`'s decode family, which decodes *untrusted input* to catch injected keywords; here you decode *source/config at rest* to catch a hidden credential.)
 
 ```bash
 # provider-prefixed literals (highest confidence)
 rg -n "AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[posr]_[0-9A-Za-z]{36}|sk_live_|sk-ant-|xox[bpars]-|glpat-|-----BEGIN [A-Z ]*PRIVATE KEY-----"
 # embedded creds in connection strings
 rg -n "(postgresql|mysql|mongodb(\+srv)?|redis|amqp)://[^:/@\"' ]+:[^@\"' ]+@"
+# Azure / Azure DevOps ecosystem secrets
+rg -n "AccountKey=[A-Za-z0-9+/]{86,}==|[?&]sig=[A-Za-z0-9%]+&?.*[?&]sv=|@dev\.azure\.com|AZURE_DEVOPS_EXT_PAT|userPWD=\"[A-Za-z0-9+/]{50,}\"|\\\$ANSIBLE_VAULT;"
 # secret-named assignment to a literal (then check client/backend routing + entropy)
 rg -ni "(api[_-]?key|secret|token|client[_-]?secret|signing[_-]?key|private[_-]?key|access[_-]?key)['\"]?\s*[:=]\s*['\"][^'\"]{16,}" --glob '!**/*.example' --glob '!**/test*'
 # client-exposure amplifiers
 rg -n "NEXT_PUBLIC_|REACT_APP_|VITE_|VUE_APP_|NG_APP_"
+# encoded-at-rest candidates → decode each hit and re-scan (recurse nested layers): long base64 blobs, percent-runs, \uXXXX runs
+rg -n "[A-Za-z0-9+/]{40,}={0,2}|(%[0-9A-Fa-f]{2}){8,}|(\\\\u[0-9A-Fa-f]{4}){6,}"
 ```
 
 **Skip during recon:** `node_modules/`, `dist/`/`build/` *vendor* output (but DO inspect first-party bundles for client exposure), `.git/` blobs, `process.env.*` / `os.environ` / `System.getenv` (**except** when followed by a `||` / `??` / `or` string-literal fallback — see *Adjacent case* above), obvious placeholders, public keys, `*.lock` hashes.
