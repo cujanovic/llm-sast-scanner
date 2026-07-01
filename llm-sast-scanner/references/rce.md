@@ -726,6 +726,8 @@ Flag any of these when user-controlled data flows into them:
 | `ObjectInputStream.readObject()` on user stream | insecure_deserialization | — |
 | `new InitialContext().lookup(tainted)` | rce + ssrf | JNDI injection |
 | H2 `stmt.execute(tainted)` with DDL allowed | rce | CREATE ALIAS path |
+| Cloud compute-job submit with user-controlled command/image/env | rce | AWS Batch `SubmitJob`+`ContainerOverrides.Command`, ECS `RunTask`/`RegisterTaskDefinition`, k8s Job spec — code runs **as the job/task role** (RCE-as-role even without shell-injection); pair with broad `jobRoleArn`/task role |
+| Analytics/OLAP engine scriptable function reachable from a query | rce | Apache Pinot `GROOVY('{...}', <code>)`, Spark/Trino/Presto UDF, Postgres `CREATE FUNCTION … LANGUAGE plpythonu/plperlu/c` — a code-exec function callable through SQL turns query access into RCE |
 | Log4j2 < 2.15.0 logging user strings | rce | Log4Shell |
 
 **Benchmark tag override**: In benchmark mode, prefer more specific tags per SKILL.md guardrails: `command_injection` for direct shell/process execution sinks, `spel_injection` for SpEL expression evaluation, `jndi_injection` for JNDI lookup sinks. Use `rce` only when no more specific benchmark tag applies.

@@ -87,6 +87,7 @@ rg -n 'registry=http://|ignore-scripts\s*=\s*false' .npmrc **/.npmrc
 - `package.json` version bumps without lockfile update in same changeset; CI does not fail on lockfile mismatch
 - Deploy/build pulls `:latest` images or unpinned base tags with no digest or signature verification step
 - Known CVE affects pinned dependency version and no compensating control or upgrade path documented in repo
+- **Auto-update / firmware / package installer verifies the signature but not the *version* (no anti-rollback)** — an update client that checks only a signature/hash over the artifact, with no monotonic-version enforcement, lets an attacker serve or replay an **older, still-validly-signed** release to force a **downgrade** to a known-vulnerable version. Signals: an updater that records/compares no minimum-or-monotonic version before applying (signature/`SHA-256` check on the file while the version field is unsigned or unchecked); a signature that covers the payload but not the version/metadata; shared signing keys across release channels (a dev/beta-signed build accepted by prod). Fix: sign the version **together with** the artifact and reject any version ≤ the installed one (monotonic/anti-rollback counter); use separate per-channel signing keys
 
 ## Safe Patterns
 

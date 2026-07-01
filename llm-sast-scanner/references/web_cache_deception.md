@@ -269,6 +269,7 @@ rg -n "error_caching_min_ttl|ErrorCachingMinTTL|forwarded_values|forward\s*=\s*\
 
 - `denial_of_service.md` — cache-poisoning DoS as availability impact; prefer `web_cache_deception` when caching misconfiguration is the root cause.
 - `trust_boundary.md` — unkeyed `X-Forwarded-*` / `Host` trusted for URL generation or routing decisions.
+- `idor.md` — WCD on per-object authenticated endpoints (`/api/invoices/{id}`) achieves the same cross-user object disclosure as broken object-level authorization, but unauthenticated; test both when auditing per-object routes.
 
 ---
 

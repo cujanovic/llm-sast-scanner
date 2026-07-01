@@ -411,6 +411,7 @@ Apex defaults to **system context for object/field access**: a SOQL query or DML
 
 **Cache & Gateway**
 - CDN/proxy key confusion: responses cached without the Authorization or tenant header expose stored objects to different users
+- **Web-cache-deception pairing**: the per-object authenticated endpoints you enumerate for IDOR (`/api/invoices/{id}`, `/account`, `/orders/{id}`) are also prime web-cache-deception targets — append a static-looking suffix (`/api/invoices/123.css`, `…/123.js`, `…/123?x.css`) so a shared cache treats the personalized response as a static asset and serves one user's object body to everyone. Confirm with the two-user differential: fetch as User A, then request the identical suffixed URL as User B (only Cookie/Auth changed) — if B receives A's `200` from cache, it is a cross-user leak. This reaches the same cross-object disclosure as classic ID-swap IDOR but **unauthenticated and mass-impact**. See `web_cache_deception.md` for the full technique, extension/suffix variants, and cache-header signals.
 - Manipulate Vary and Accept headers to influence cache behavior
 - Redirect chains and 304/206 partial-content behaviors can leak resources across tenants
 

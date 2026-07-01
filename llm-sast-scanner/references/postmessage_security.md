@@ -24,6 +24,7 @@ The `postMessage` API lets browsing contexts exchange data across origins (ifram
 - Listener body uses `event.data` **before** or **without** `event.origin === '<exact expected>'` (or `ALLOWED_ORIGINS.has(event.origin)`)
 - `postMessage(payload, '*')` — wildcard targetOrigin leaks `payload` to whatever origin owns `targetWindow` at delivery time
 - `postMessage(payload, userSuppliedOrigin)` — attacker chooses the recipient origin
+- **`targetOrigin` from a `try { window.opener.location.href } catch { <request input> }` fallback** (common in OAuth popup flows): reading a *cross-origin* `opener`/parent `location.href` throws a SOP `DOMException`, so for any attacker-controlled opener the `catch` branch **always** runs and the send target becomes request-controlled input (`$('#source_url').val()`, a `source_url`/`redirect`/`origin` query param, `document.referrer`). Looks safe ("uses the opener's real URL") but the unsafe branch is the *guaranteed* path cross-origin → the token/`access_token` in `payload` is delivered to the attacker's origin. Do not treat a targetOrigin sourced from an opener/referrer read as safe when a user-influenced fallback exists; require an allowlist match on the final value.
 - Weak guards: `event.origin.indexOf('legit.com')`, `event.origin.endsWith('.legit.com')`, `event.origin.startsWith('https://legit.com')`, unanchored `RegExp`, regex with unescaped dots in the host
 
 **Data taint sinks (postMessage-specific path → impact)**

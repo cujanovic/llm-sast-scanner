@@ -107,6 +107,15 @@ script-src 'self' https://ajax.googleapis.com/ajax/libs/angularjs/
 
 Grep: `jsonp`, `callback=`, `angular\.js`, `angular.min.js` inside CSP directive strings; `strict-dynamic` without `'nonce-` or `'sha256-`.
 
+### Policy built by string concatenation → directive injection & duplicate-directive bypass
+
+When the CSP string is **assembled by concatenating/interpolating a user- or tenant-controlled value** — a "Trusted Sites"/allowed-origins settings field, a per-tenant `connect-src` list, a reflected origin — an attacker who controls that value can inject CSP syntax (a `;` starts a **new directive**; whitespace separates source expressions) rather than just adding one host. Two distinct outcomes:
+
+- **Directive injection**: input like `https://ok.test; script-src 'unsafe-inline'` (or `... connect-src https://attacker.test`) splices an attacker-chosen directive into the policy — loosening `script-src`, adding an exfil origin to `connect-src`, or overwriting `default-src`.
+- **Duplicate-directive "first-occurrence-wins" bypass**: browsers enforce **only the first** occurrence of a repeated directive and ignore later ones. So logic that *appends* or *relocates* a matched directive (leaving the page with two `connect-src`/`script-src` instances) is exploitable: if the attacker can make the **permissive** copy appear first, its version is the one enforced. Any policy-builder that can emit the same directive name twice is suspect.
+
+**SAST signals**: a `Content-Security-Policy` value (header set OR `<meta http-equiv>` `content`) produced by `+`/template-literal/`join`/`sprintf` from a config field, DB row, or request value with no directive-token validation; code that de-dupes/reorders directives via string ops; user "allowed domains" written straight into a source-list. **SAFE**: build the policy from a **structured object** (one merged value per directive name), never string-concatenate untrusted input; validate injected origins against an exact host allowlist (reject `;`, whitespace, and directive keywords); prefer delivery via the **HTTP header** over a `<meta>` tag; emit each directive at most once.
+
 ### Dangling-markup injection sinks (grep)
 
 CSP that blocks `script-src` does **not** stop **dangling markup**: user input reflected into HTML **without closing the opening tag** lets the browser treat the remainder of the page as attribute value or URL, enabling exfiltration or navigation without executable script.

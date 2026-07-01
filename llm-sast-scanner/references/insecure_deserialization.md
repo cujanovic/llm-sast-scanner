@@ -233,6 +233,7 @@ Use a harmless callback (`curl http://YOUR-COLLABORATOR.oast.fun/deser`) as the 
 ### .NET (supplement)
 - Set `TypeNameHandling = None` (default); bind to explicit DTO types only
 - Avoid `BinaryFormatter`, `LosFormatter`, `NetDataContractSerializer`, `SoapFormatter` on any external stream
+- A **custom `SerializationBinder`/`BindToType` (or `TypeNameHandling` filter) that constrains only *one* dimension** is bypassable: allowlisting the **assembly** but leaving the **type name** attacker-controlled (or matching only a namespace prefix) still lets a gadget type inside an already-allowed assembly deserialize. Bind against an **exact allowlist of fully-qualified `(assemblyName, typeName)` pairs**, not a partial/one-sided match
 
 ### Data-Only Formats and DTO Binding
 - Prefer schema-bound, non-polymorphic formats over native object graphs:
