@@ -17,7 +17,7 @@ Manual memory management in C/C++ enables stack/heap corruption, out-of-bounds a
 - **Out-of-bounds read/write**: index `arr[i]` or pointer arithmetic without `i < len` proof
 - **Use-after-free (UAF)**: dereference after `free`/`delete`; stale pointer in container/callback
 - **Double-free**: second `free`/`delete` on same address; `delete` after ownership transfer
-- **Unbounded string functions**: `gets`, `strcpy`, `strcat`, `sprintf`, `vsprintf`, `scanf("%s")` without width
+- **Unbounded string functions**: `gets`, `strcpy`, `strcat`, `sprintf`, `vsprintf`, `scanf`/`sscanf`/`fscanf` with `%s` **or an unbounded `%[...]` scanset** (`%[^-]`, `%[^\n]`) — no field-width, so `sscanf(in,"%[^-]-%s",a,b)` overflows the fixed `a`/`b` buffers exactly like `%s` (the scanset form is a common miss); fix with an explicit width (`%31[^-]`, `%127s`)
 - **Integer overflow → undersized allocation**: `malloc(n * sizeof(T))` when `n * sizeof(T)` wraps
 - **Off-by-one**: loop `<= n`, `strncpy` without null terminator, fencepost in length checks
 - **Uninitialized memory**: read of stack/local/heap before write; missing `{}` on C++ objects
@@ -93,7 +93,7 @@ Rust's borrow checker prevents these bugs in safe code, so most Rust is out of s
 | `std::equal(`, `std::mismatch(`, `std::is_permutation(` with **3 iterators** | Medium — over-reads 2nd range if shorter (CWE-126) | 4-iterator overload `(...,b.begin(),b.end())` or `std::ranges::` form |
 | `realpath(path, buf)` into fixed/undersized `buf` | High — dest must be ≥ `PATH_MAX`; some libc overflow internally (CWE-120/CWE-785) | `realpath(path, NULL)` (glibc allocates) then `free`, or size `buf` to `PATH_MAX` |
 
-Grep anchors: `\b(gets|strcpy|strcat|sprintf|vsprintf|gets|strtok)\s*\(`, `scanf\s*\(\s*["'][^"']*%s`, `strncat\s*\([^)]*,\s*(sizeof|strlen)\s*\(`, `memcpy\s*\([^,]+,[^,]+,\s*[^)]+\)`, `malloc\s*\(\s*strlen\s*\(`, `malloc\s*\([^)]*\*`, `realloc\s*\(\s*\w+\s*,`, `free\s*\([^)]+\)[^;]*;[^}]*\1`, `delete\s+`, `delete\s*\[\s*\]`, `new\s*\[\s*\]`, `alloca\s*\(`, `sizeof\s*\(\s*\w+\s*\)`, `ntohl\s*\(`, `std::(equal|mismatch|is_permutation)\s*\(`, `\brealpath\s*\(`, `(memset|bzero)\s*\([^;]*(pass|pwd|secret|key|token|cred)` then a nearby `free`/return (secret-scrub dead-store), `use.?after.?free` (comments/tests).
+Grep anchors: `\b(gets|strcpy|strcat|sprintf|vsprintf|gets|strtok)\s*\(`, `f?scanf\s*\(\s*["'][^"']*(%s|%\[)` (unbounded `%s` **or** `%[...]` scanset), `strncat\s*\([^)]*,\s*(sizeof|strlen)\s*\(`, `memcpy\s*\([^,]+,[^,]+,\s*[^)]+\)`, `malloc\s*\(\s*strlen\s*\(`, `malloc\s*\([^)]*\*`, `realloc\s*\(\s*\w+\s*,`, `free\s*\([^)]+\)[^;]*;[^}]*\1`, `delete\s+`, `delete\s*\[\s*\]`, `new\s*\[\s*\]`, `alloca\s*\(`, `sizeof\s*\(\s*\w+\s*\)`, `ntohl\s*\(`, `std::(equal|mismatch|is_permutation)\s*\(`, `\brealpath\s*\(`, `(memset|bzero)\s*\([^;]*(pass|pwd|secret|key|token|cred)` then a nearby `free`/return (secret-scrub dead-store), `use.?after.?free` (comments/tests).
 
 ### Risky structural patterns
 

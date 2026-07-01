@@ -135,6 +135,9 @@ Cross-ref `shared_client_cache_leak.md` (module-global / pooled-connection / los
 ### Database Isolation
 
 - Exploit READ COMMITTED/REPEATABLE READ anomalies: phantoms, non-serializable sequences
+- **Default isolation takes no read locks → the SELECT check is unlocked.** `READ COMMITTED` (the default on Postgres/Oracle/MSSQL; MySQL defaults to `REPEATABLE READ`) locks only on *write* — a `SELECT balance …` used to validate acquires **no** lock, so two concurrent transactions read the same stale value, both pass the app/SQL check, and both `UPDATE` → overdraft / double-spend. The row lock the `UPDATE` takes comes **after** the check, too late.
+- **Isolation-level exploitability is engine-specific — don't assume "REPEATABLE READ = safe":** PostgreSQL RR is *snapshot isolation* and blocks this lost-update/write-skew pattern; **MySQL/MariaDB RR does not** and stays exploitable. Only `SERIALIZABLE` is uniformly safe across engines. So the same code is vulnerable or not depending on the DB engine **and** its configured level.
+- **Static signal — transaction opened without an explicit isolation level** on a check-then-write path: `db.BeginTx(ctx)` with no `TxOptions{IsoLevel: …}` (Go pgx/`database/sql`), raw `BEGIN`/`START TRANSACTION` with no `ISOLATION LEVEL SERIALIZABLE`, an ORM `transaction {}`/`@Transactional` with no isolation attribute — the code silently runs at the exploitable default. Flag it, then check whether the read in the critical section uses `SELECT … FOR UPDATE`/`FOR SHARE` or an optimistic `version`/`WHERE balance >= ?` guard; **SAFE** = SERIALIZABLE, or row-lock **every** read in the window, or a single atomic conditional `UPDATE`/version-CAS.
 - Upsert races: use unique indexes with proper ON CONFLICT/UPSERT or exploit naive existence checks
 - Lock granularity issues: row vs table; application locks held only in-process
 

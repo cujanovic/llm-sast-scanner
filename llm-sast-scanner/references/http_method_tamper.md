@@ -5,9 +5,10 @@ description: Detect HTTP method tampering vulnerabilities where GET requests tri
 
 # HTTP Method Tampering
 
-HTTP method tampering arises in two distinct scenarios:
+HTTP method tampering arises in three distinct scenarios:
 1. **GET requests perform state-changing operations** (write, delete, update) — violates HTTP semantics and bypasses CSRF protections.
 2. **Method override is accepted without restriction** — `_method` form field or `X-HTTP-Method-Override` header allows an attacker to turn a GET/POST into DELETE/PUT.
+3. **Authorization is enforced per-method / per-content-type, not per-resource** — the same resource is reachable through more than one verb (or content-negotiation branch) but the authz filter guards only some of them, so switching method (`GET`→`PATCH`/`PUT`/`HEAD`/`OPTIONS`) or `Accept` (`text/html`→`application/json`) routes to an **unguarded handler** and returns the protected data/action. E.g. `GET /users/{id}` → 403 but `PATCH /users/{id}` + `Accept: application/json` → 200 with the PII. Root cause: a route/filter/annotation that scopes the access check to a specific verb or media type (Spring `@PreAuthorize` only on the `@GetMapping`, an `[Authorize]`/middleware bound to one action, an API gateway rule keyed on method) while another handler for the same path skips it.
 
 ## How to Detect
 

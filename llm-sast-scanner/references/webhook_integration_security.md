@@ -24,6 +24,7 @@ Webhook integrations combine **outbound** server-side HTTP (delivery, health che
 - `requests.post(user_url)`, `fetch(callbackUrl)`, `axios.post(webhookUrl)`, `HttpClient.PostAsync(url)`, `RestTemplate.postForObject(url, …)`
 - Handlers: `testWebhook`, `pingWebhook`, `verifyUrl`, `sendTest`, `validateWebhook`, `checkEndpoint`
 - Redirect-following enabled on delivery client (`allow_redirects=True`, `maxRedirects > 0`, default fetch follow)
+- **Cloud-managed push/subscription destinations** — the delivery request is made by the *cloud service or an SDK call*, not a visible `fetch`, so a grep for HTTP clients misses it: AWS **SNS** HTTP/S subscription `sns.subscribe(Protocol='https', Endpoint=…)`, **EventBridge API destination** `createApiDestination(InvocationEndpoint=…)`, **GCP Pub/Sub** push subscription `pushConfig.pushEndpoint`, **Azure Event Grid** `webhook_endpoint.url`, or a **webhook-as-a-service** (Svix/Hookdeck) endpoint. A user/attacker-influenced destination is still an SSRF sink; SNS additionally POSTs a `SubscriptionConfirmation` to the endpoint **immediately on subscribe**
 
 **Sources (inbound receiver)**
 - Raw HTTP body, headers (`X-Hub-Signature`, `X-Signature`, provider-specific signature headers)
@@ -60,6 +61,9 @@ rg -n 'requests\.(get|post|put|request)\(|fetch\(|axios\.(get|post|request)|Http
 # Redirect following on delivery clients
 rg -ni 'allow_redirects\s*=\s*True|follow_redirects\s*=\s*True|maxRedirects|redirect:\s*["'"'"']follow["'"'"']' .
 
+# Cloud-managed push/subscription destinations (delivery made by the cloud service / SDK, not a fetch)
+rg -ni 'sns\.subscribe|SubscribeCommand|create_?api_?destination|createApiDestination|InvocationEndpoint|pushEndpoint|push_endpoint|webhook_endpoint|aws_sns_topic_subscription|aws_cloudwatch_event_api_destination|google_pubsub_subscription|azurerm_eventgrid_event_subscription|svix|hookdeck' .
+
 # Webhook CRUD without obvious owner scope
 rg -ni 'webhook|WebHook|WebhookSubscription' --glob '*.{py,js,ts,java,go,rb,php,cs}' | rg -i 'create|update|delete|destroy|remove'
 rg -ni 'findById|find_by_id|getWebhook|Webhook\.find|webhooks\.get' .
@@ -89,6 +93,7 @@ For each outbound hit: confirm allowlist validation and internal-IP/metadata blo
 7. **Replay**: same signed payload accepted indefinitely; no `timestamp` skew window (e.g. ±5 minutes) or event-id idempotency store.
 8. **Secret disclosure**: create-webhook response includes `signing_secret`; secret written to application logs on delivery failure.
 9. **Signature verified over the wrong bytes**: HMAC computed over a *re-serialized* parsed body (`createHmac(...).update(JSON.stringify(await req.json()))`, `hmac(json.dumps(parsed))`) instead of the **exact raw request bytes** the sender signed. `JSON.stringify`/`json.dumps` of the parsed object differs from the original payload in key order, whitespace, and number/unicode escaping, so the digest can never match a legitimate signature — and frameworks that auto-parse the body (Next.js `req.json()`, Express default `json()` middleware, FastAPI model binding) make this the *default* mistake, pushing developers to weaken or skip the check to make it "work." **Capture and HMAC the raw bytes before any parse.** SAST signal: an HMAC `update(...)` whose argument is a parsed/stringified body rather than a raw buffer/`req.rawBody`/`await req.text()`.
+10. **Cloud eventing push destination set from user input**: an HTTP(S) delivery endpoint registered through a cloud eventing **SDK or IaC** — SNS subscription `Endpoint` (`sns.subscribe`/`SubscribeCommand`), EventBridge API-destination `InvocationEndpoint` (`createApiDestination`), GCP Pub/Sub `push_endpoint`, Azure Event Grid `webhook_endpoint.url` (Terraform `aws_sns_topic_subscription` / `aws_cloudwatch_event_api_destination` / `google_pubsub_subscription` / `azurerm_eventgrid_event_subscription`) — is user/attacker-influenced and not constrained to an **HTTPS host allowlist**. The request to the endpoint is issued by the cloud service (or the SDK call), so a `fetch`/`requests` grep misses it, yet an internal/RFC1918/metadata endpoint is still reached — and SNS confirms a subscription by POSTing to the endpoint at subscribe time. Enforce the same allowlist + internal-IP/metadata block + HTTPS-only **at registration**, and prefer provider signature/`ConnectionArn`-scoped auth on delivery. Cross-ref `iac_security.md`, `ssrf.md`.
 
 ## Vulnerable vs Safe Code Examples
 

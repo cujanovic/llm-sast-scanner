@@ -97,7 +97,7 @@ Concrete reachable surfaces worth enumerating by name. The heap/env/config dumps
 
 ### Cross-Origin Signals
 
-- Referrer leakage: missing/weak referrer policy leading to path/query/token leaks to third parties
+- Referrer leakage: missing/weak referrer policy leading to path/query/token leaks to third parties. **Elevate to account-takeover (not mere disclosure) when the leaked value is a *single-use auth secret* placed in the URL** — a password-reset/email-verification/magic-link/invite token in the path or query, or an OAuth `code`/`state`. Any third-party subresource the page loads (analytics, CDN JS, fonts, images) or any followed outbound link ships that full URL in the `Referer`, so anyone with access to the third party's logs can consume the token → ATO. **Detection**: a token-shaped path/query segment on an auth/reset/verify/invite route where the response references external origins (script/img/link/style `src`/`href`) and there is **no** `Referrer-Policy: no-referrer`/`same-origin` on that route and the secret is **not** moved to a POST body. Fix: keep the secret out of the URL (POST body / short-lived cookie), and set `Referrer-Policy: no-referrer` (or a blank same-origin landing page) on token-bearing pages
 - CORS: overly permissive Access-Control-Allow-Origin/Expose-Headers revealing data cross-origin; preflight error shapes
 
 ### File Metadata

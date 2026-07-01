@@ -63,7 +63,7 @@ Use as a domain-scoping checklist; not all categories apply to every application
 | 9 | Auction/bidding | Retract winning bid; shill bidding; reserve price bypass; concurrent bid manipulation |
 | 10 | Inventory/stock | Buy out-of-stock; over-reserve via concurrency; negative inventory; phantom availability |
 | 11 | Time/date | Expired offers (client-side expiry); backdated transactions; grace-period abuse; client timestamps |
-| 12 | Transfer/balance | Negative amount; self-transfer fee/bonus abuse; overdraft; rounding across micro-transactions |
+| 12 | Transfer/balance | Negative amount; signed/unsigned integer **overflow/underflow wrapping a balance from debit to credit** (withdraw/transfer an amount that wraps a fixed-width signed counter positive — `balance - (-N)` or a value past `SHRT_MAX`/`INT_MAX` → funds created from nothing); self-transfer fee/bonus abuse; overdraft; rounding across micro-transactions |
 
 ## Reconnaissance
 

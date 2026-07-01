@@ -1,6 +1,6 @@
 ---
 name: shared_client_cache_leak
-description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, shared cookie jars, pooled-connection or thread-local reuse, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers JS/TS (urql, Apollo, DataLoader, TanStack/React Query, SWR, axios), Python (requests, aiohttp, httpx, SQLAlchemy, Django/Flask caches), Go (singleflight, gorm, go-redis, go-resty), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient, OkHttp, Ktor, Hibernate L2, gRPC), Ruby (Rails.cache, Faraday), PHP (Guzzle, Octane/Swoole), C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest), Elixir/Phoenix (:persistent_term, ETS), Scala, Clojure, and reused headless-browser / SSR render workers (Puppeteer/Playwright "headless context bleed") (CWE-488 / CWE-524 / CWE-567 / CWE-362)
+description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, shared cookie jars, pooled-connection or thread-local reuse, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers JS/TS (urql, Apollo, Apollo RESTDataSource, DataLoader, TanStack/React Query, SWR, axios, ofetch/$fetch, openapi-fetch, request), Python (requests, aiohttp, httpx, SQLAlchemy, Django/Flask caches), Go (singleflight, gorm, go-redis, go-resty, imroc/req), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient/RestClient, OkHttp, Ktor, Unirest, Vert.x WebClientSession, Hibernate L2, gRPC), Ruby (Rails.cache, Faraday), PHP (Guzzle, Octane/Swoole), OpenAPI-generated clients, C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest), Elixir/Phoenix (:persistent_term, ETS), Scala, Clojure, and reused headless-browser / SSR render workers (Puppeteer/Playwright "headless context bleed") (CWE-488 / CWE-524 / CWE-567 / CWE-362)
 ---
 
 # Shared-Client Cache / Dedup Cross-User Leak
@@ -504,11 +504,11 @@ Quick lookup of widely-used HTTP/GraphQL/SDK clients and the **exact shared-stat
 | requests (Python) | `Session.headers`, `Session.cookies` | per-call `headers=`; session per user |
 | httpx / aiohttp (Python) | shared client/session cookie jar + pool | `DummyCookieJar` / session per user |
 | requests-oauthlib (Python) | `OAuth2Session` holds the token | session per user |
-| net/http + cookiejar, go-resty (Go) | `DefaultClient`+jar; `client.SetAuthToken/SetHeader/SetCookieJar` | per-request header; `client.R().SetAuthToken()` |
+| net/http + cookiejar, go-resty, req (Go) | `DefaultClient`+jar; go-resty `client.SetAuthToken/SetHeader/SetCookieJar`; imroc/req `client.SetCommonHeader/SetCommonBearerAuthToken/SetCommonCookies` (all mutate the shared client) | per-request header; go-resty `client.R().SetAuthToken()`; req `client.R().SetBearerAuthToken(token)` |
 | OkHttp / Retrofit (JVM) | client `cookieJar` / `Authenticator` | per-request `.header()` |
 | Apache HttpClient (JVM) | `setDefaultCookieStore`; connection-bound NTLM/Kerberos | per-request `HttpClientContext` cookie store |
 | Ktor (Kotlin) | `install(HttpCookies)` (shared storage) / `install(Auth)` (cached token) | per-call `bearerAuth(token)` |
-| Spring RestTemplate / WebClient (JVM) | mutated default headers / interceptor field | per-request headers |
+| Spring RestTemplate / WebClient / RestClient (JVM) | mutated default headers / interceptor field (`RestClient.builder().defaultHeader(...)` shares the same way) | per-request headers |
 | OpenFeign (JVM) | interceptor reading a mutable/ThreadLocal token | request-scoped identity |
 | gRPC stub/channel (JVM/Go/…) | channel-level / shared-stub `CallCredentials` | per-call `CallCredentials` |
 | Guzzle / Symfony HttpClient (PHP) | `['cookies' => true]`; default `headers`/`auth_bearer` | fresh jar + auth per request |
@@ -517,6 +517,13 @@ Quick lookup of widely-used HTTP/GraphQL/SDK clients and the **exact shared-stat
 | RestSharp / Flurl (.NET) | client `Authenticator` / `.WithOAuthBearerToken` on cached client | per-`RestRequest` / per-`Request()` header |
 | reqwest / awc (Rust) | default auth header; `cookie_store(true)` | `.bearer_auth(token)` per request |
 | Puppeteer / Playwright (Node) | reused `Browser`/persistent context — Service Worker, HTTP+DNS cache, sockets survive cookie/storage clears | fresh `createBrowserContext()`/incognito per job + `ctx.close()`; or process-per-tenant |
+| Apollo `RESTDataSource` (JS) | a **shared/singleton** data source: `willSendRequest` sets auth on `this.headers`, **and** built-in **GET request memoization/dedup** caches one caller's authenticated response for others | instantiate the data source **per request** (Apollo Server `context`), never as a module singleton |
+| ofetch / `$fetch` (Nuxt/unjs) | `ofetch.create({ headers })` bakes default headers onto a shared instance; a Nuxt `onRequest` interceptor mutating shared options | per-call `headers`; don't bake auth into a shared `create()`/interceptor |
+| openapi-fetch (JS) | `createClient({ headers })` default headers + shared middleware on one client | per-request `headers`/`params`; per-user client when auth differs |
+| `request` / `request-promise` (Node, legacy) | `request.defaults({ headers, jar })` — a shared cookie `jar` persists one user's cookies and a baked-in `Authorization` rides every call | per-call `headers` + a fresh `request.jar()` per user |
+| Unirest (Java/Kotlin) | `Unirest.config().setDefaultHeader(...)` / global cookie handling — the config is a **process-static singleton**, so a default `Authorization` is shared by every caller | per-request `Unirest.get(url).header("Authorization", ...)`; avoid global default auth |
+| Vert.x WebClient / `WebClientSession` (Java) | `WebClientSession` keeps a **shared `CookieStore`** across requests; a default header on the shared `WebClient` | per-request `bearerTokenAuthentication`/headers; a `WebClientSession` per user, or a plain `WebClient` with no shared cookie store |
+| OpenAPI-generated clients (all langs) | a global/shared `Configuration`/`ApiClient` with `accessToken`/`apiKey`/`setBearerToken` set once and reused across users | build the `Configuration`/client per user, or pass creds per call |
 
 **Connection-bound auth caveat:** for NTLM/Kerberos/Negotiate and mTLS the identity rides the *connection*, so even per-request headers don't help — isolate the connection/handler pool per identity (see the rule below).
 

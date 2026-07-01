@@ -1,6 +1,6 @@
 ---
 name: electron_desktop_security
-description: Electron / desktop web-runtime hardening detection — BrowserWindow/BrowserView webPreferences misconfiguration (nodeIntegration / contextIsolation / sandbox / webSecurity / enableBlinkFeatures), unsafe preload contextBridge & ipcMain handlers, unrestricted navigation / window-open / will-attach-webview, shell.openExternal with untrusted input, permissive setPermissionRequestHandler, certificate-error / setCertificateVerifyProc TLS opt-out, dangerous Chromium/Node command-line switches, and custom protocol handlers (CWE-1188/CWE-829/CWE-94/CWE-79/CWE-295)
+description: Electron / desktop web-runtime hardening detection — BrowserWindow/BrowserView webPreferences misconfiguration (nodeIntegration / contextIsolation / sandbox / webSecurity / enableBlinkFeatures), unsafe preload contextBridge & ipcMain handlers, unrestricted navigation / window-open / will-attach-webview, shell.openExternal with untrusted input, missing/permissive permission handler (Electron auto-approves camera/mic/clipboard/geolocation by default with no setPermissionRequestHandler/setPermissionCheckHandler/setDevicePermissionHandler), certificate-error / setCertificateVerifyProc TLS opt-out, dangerous Chromium/Node command-line switches, custom protocol handlers, and insecure auto-update (cleartext/attacker feed URL, missing publisher-signature verification, downgrade/rollback, verify-vs-install TOCTOU) (CWE-1188/CWE-829/CWE-94/CWE-79/CWE-295/CWE-494)
 ---
 
 # Electron / Desktop App Security
@@ -59,6 +59,9 @@ new BrowserWindow({ webPreferences: { webSecurity: false, allowRunningInsecureCo
 ```
 
 Flag any of these in `webPreferences`: `nodeIntegration: true`, `nodeIntegrationInWorker: true`, `nodeIntegrationInSubFrames: true`, `contextIsolation: false`, `sandbox: false`, `webSecurity: false`, `allowRunningInsecureContent: true`, `experimentalFeatures: true`, `enableBlinkFeatures`/`blinkFeatures` (turns on off-by-default Blink features that widen attack surface), or `enableRemoteModule: true` (legacy `@electron/remote`). The same options apply to `BrowserView` and (deprecated) `webview`. Severity escalates to RCE when the same window can load or navigate to non-bundled content.
+
+**`affinity` — shared renderer process across windows (isolation collapse).** `new BrowserWindow({ webPreferences: { affinity: 'x' } })` (and `BrowserView`) makes every window/view with the **same `affinity` string share one renderer process**. Two consequences: (1) a **higher-privileged** window's `webPreferences` (e.g. `nodeIntegration`/`sandbox`) can be inherited by the shared process, so a **lower-trust** page sharing that affinity is effectively upgraded; (2) a compromise (XSS) in *any* window on that affinity gains the same-process context of the others (shared JS realm/globals). It's **version-dependent** — the process-model semantics differ pre- vs post-Electron-v14 (`affinity` was deprecated/removed as the process model changed), so the same code is safe or unsafe by version (determine the `electron` version before judging). **Flag**: an `affinity` shared by windows that load content of *differing trust levels*, or any `affinity` combined with a permissive `webPreferences`.
+- **`ELECTRON_DISABLE_SECURITY_WARNINGS` set (`= true`/`"1"` in `process.env`, `.env`, or a `Dockerfile`/CI env)** suppresses Electron's built-in DevTools console warnings (insecure CSP, `nodeIntegration` with remote content, insecure resources, etc.) — low severity itself, but it **hides the very misconfigurations above** from developers; treat its presence as a signal to scrutinize the webPreferences/CSP more closely.
 
 ### 2. Unsafe preload bridge (contextBridge / exposeInMainWorld)
 Even with `contextIsolation: true`, a preload that hands the page a powerful primitive re-opens the boundary.
@@ -139,8 +142,13 @@ app.on('web-contents-created', (_e, contents) => {
 //        webPreferences.nodeIntegration = false; and verify params.src is allowlisted
 ```
 
-### 5. shell.openExternal / openPath with untrusted input
+### 5. shell.openExternal / openPath / showItemInFolder + other main-process APIs exposed to the renderer
 `shell.openExternal` hands the string to the OS, so non-`http(s)` schemes (e.g. `file:`, custom protocol handlers, on Windows `.url`/`.lnk`/SMB paths) can launch programs or fetch internal resources.
+
+Other main-process APIs are just as dangerous when reachable from renderer input (directly, via `contextBridge`, or via an IPC handler that forwards the arg):
+- **`shell.showItemInFolder(path)`** — reveals a file in the OS file manager, but the underlying handler can *execute*: on Linux it shells out via `xdg-open <dir>` (TOCTOU — swap the dir for an executable between check and launch), and on Windows the `SHOpenFolderAndSelectItems` fallback is `ShellExecute(..., "open", dir, ...)` which launches the associated app/executable. Treat a user-controlled `showItemInFolder` path like `openPath`.
+- **`remote.app.*` (or IPC that reaches `app`) → RCE / persistence** — `app.relaunch({ execPath, args })` + `app.exit()` runs an **arbitrary executable**; `app.setLoginItemSettings({ path, args })` and `app.setAsDefaultProtocolClient(scheme, execPath, args)` and (Windows) `app.setJumpList`/`setUserTasks`, (macOS) `app.moveToApplicationsFolder` establish **persistence/hijack**. If the deprecated `remote` module (or a preload that re-exposes `app`) is reachable from a compromised renderer, these are direct RCE/persistence sinks — not just "info leak."
+- **`systemPreferences.getUserDefault(key,type)` / `subscribeNotification()` (macOS)** exposed to the renderer leaks host data — `getUserDefault("NSNavRecentPlaces",...)` (recent file paths), geographic/timezone keys; `subscribeNotification`/`subscribeWorkspaceNotification` (esp. with a `nil`/broad name) sniffs system-wide events (screen lock, device attach, app launches). Cross-ref `information_disclosure.md`. **SAFE**: never bridge these to the renderer; expose only a fixed, argument-validated IPC verb for the exact narrow action needed.
 
 ```js
 // VULN — untrusted URL/scheme passed straight to the OS handler
@@ -156,11 +164,13 @@ function openSafe(raw) {
 }
 ```
 
-### 6. Permissive permission request handler
-By default a renderer cannot grant itself camera, microphone, geolocation, notifications, etc. A `setPermissionRequestHandler` that calls back `true` unconditionally (or has no origin/permission check) lets any loaded page — including attacker content after a navigation — silently obtain those capabilities. Absence of any handler on a window that loads remote content is also worth flagging as missing-defense.
+### 6. Permissive / missing permission handler (Electron auto-approves by default)
+**Unlike a browser, Electron's *default* is to auto-approve every Chromium permission request** — with **no handler registered at all**, any loaded page silently gets `media` (camera/microphone), `geolocation`, `notifications`, `clipboard-read`, `idle-detection`, `local-fonts`, `midi`, `display-capture`, etc. So the **absence** of `setPermissionRequestHandler` is not merely "missing defense in depth" — it is the affirmative vulnerable state: a compromised/hijacked renderer (XSS, unsafe navigation, remote/`<webview>` content, a sub-frame) obtains those capabilities with no prompt. A `setPermissionRequestHandler` that calls back `true` unconditionally (or lacks an origin+permission check) is the same bug written explicitly. Two sibling handlers are also off by default: **`setPermissionCheckHandler`** governs synchronous checks (`navigator.permissions.query`, `getUserMedia` capability probes), and **`setDevicePermissionHandler`** governs device selection for **WebUSB / Web Serial / WebHID / Web Bluetooth** — a window loading untrusted content without all three that it needs is exposed.
 
 ```js
-// VULN — every permission auto-granted regardless of origin or type
+// VULN — NO handler at all: Electron auto-approves every permission request by default
+const win = new BrowserWindow(); win.loadURL(remoteOrUntrustedUrl);   // camera/mic/clipboard/geo all grantable
+// VULN — explicit form: every permission auto-granted regardless of origin or type
 session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => cb(true));
 ```
 
@@ -217,19 +227,30 @@ protocol.registerFileProtocol('app', (request, cb) => {
 // cross-ref path_traversal_lfi_rfi.md
 ```
 
+### 10. Auto-update: insecure feed, unverified signature, downgrade
+
+The updater downloads and executes a new binary with the app's privileges, so a compromised update = RCE on every client. Distinct failure modes to flag on `autoUpdater`/`electron-updater`/Squirrel:
+
+- **Update feed over cleartext / attacker-influenced URL** — `autoUpdater.setFeedURL({url})` (or electron-updater `provider`/generic `url`, `publishConfig`) using `http://`, or a feed URL built from config/env/user input. Cleartext lets a MITM swap `latest.yml`/the package (cross-ref `cleartext_transmission.md`).
+- **Signature verification absent or platform-partial** — `autoUpdater` code-signature validation is **macOS-only**; on **Windows there is no OS-level check**, so a Windows updater that trusts only the `sha512` in `latest.yml` (an *integrity* checksum an attacker who controls the feed can recompute) without verifying a **publisher signature** installs an attacker package. electron-updater before the 2020 fix accepted a crafted `latest.yml` → RCE. Require a real cryptographic **signature over `hash + version`** with a pinned publisher public key, not just a hash.
+- **Downgrade / rollback** — nothing binds the served version to be **newer** than installed, so an attacker serving an old (vulnerable) signed release forces a downgrade; and dev/beta builds signed with the **same key** as prod can be pushed to prod users. Bind the signature to the version (`sign(sha(file) + version)`) and reject non-monotonic versions; separate dev/prod signing keys.
+- **Verify-then-install not atomic (TOCTOU)** — the package is verified, then read again for install from a world-writable temp dir, so a local attacker swaps the file between check and use. Verify and install from the **same** owner-only file/descriptor.
+
+**Grep**: `autoUpdater`, `setFeedURL`, `electron-updater`, `autoInstallOnAppQuit`, `latest\.yml`, `provider:\s*['\"]generic`, `http://` in an update/feed URL, a `sha512`/hash check with **no** signature verify, `allowDowngrade`. **SAFE**: HTTPS + pinned CA, publisher-signature verify over `hash+version` before install, monotonic-version enforcement, install from the verified descriptor.
+
 ---
 
 ## Recon greps
 
 ```bash
 # Window/runtime misconfig
-rg -n "nodeIntegration\s*:\s*true|contextIsolation\s*:\s*false|sandbox\s*:\s*false|webSecurity\s*:\s*false|allowRunningInsecureContent\s*:\s*true|nodeIntegrationInSubFrames|enableBlinkFeatures|enableRemoteModule\s*:\s*true|@electron/remote" --glob '*.{js,mjs,cjs,ts,jsx,tsx}'
+rg -n "nodeIntegration\s*:\s*true|contextIsolation\s*:\s*false|sandbox\s*:\s*false|webSecurity\s*:\s*false|allowRunningInsecureContent\s*:\s*true|nodeIntegrationInSubFrames|enableBlinkFeatures|experimentalFeatures\s*:\s*true|enableRemoteModule\s*:\s*true|@electron/remote|affinity\s*:|ELECTRON_DISABLE_SECURITY_WARNINGS" --glob '*.{js,mjs,cjs,ts,jsx,tsx}'
 # Preload bridge surface
 rg -n "exposeInMainWorld|contextBridge|ipcRenderer" --glob '*preload*'
 # IPC handlers (inspect each body for fs/child_process/shell sinks on the renderer arg)
 rg -n "ipcMain\.(handle|on)\(" --glob '*.{js,mjs,cjs,ts,jsx,tsx}'
 # Dangerous OS sinks & navigation
-rg -n "shell\.openExternal|shell\.openPath|webContents\.executeJavaScript|insertCSS|loadURL\(|<webview|setWindowOpenHandler|will-navigate|will-attach-webview" --glob '*.{js,mjs,cjs,ts,jsx,tsx,html}'
+rg -n "shell\.openExternal|shell\.openPath|shell\.showItemInFolder|webContents\.executeJavaScript|insertCSS|loadURL\(|<webview|setWindowOpenHandler|will-navigate|will-attach-webview|app\.relaunch|setLoginItemSettings|systemPreferences\.(getUserDefault|subscribeNotification)" --glob '*.{js,mjs,cjs,ts,jsx,tsx,html}'
 # Permission handler, TLS opt-out, custom schemes
 rg -n "setPermissionRequestHandler|certificate-error|setCertificateVerifyProc|registerFileProtocol|registerStringProtocol|registerBufferProtocol|registerStreamProtocol|setAsDefaultProtocolClient" --glob '*.{js,mjs,cjs,ts,jsx,tsx}'
 # Dangerous Chromium/Node switches (main process + package.json launch command)

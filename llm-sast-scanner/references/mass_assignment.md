@@ -63,8 +63,11 @@ Flag model columns and request keys that must never be client-writable:
 | Ownership / identity | `id`, `user_id`, `owner_id`, `account_id`, `organization_id`, `tenant_id` |
 | Financial / quota | `balance`, `credit`, `price`, `discount`, `plan_tier` |
 | Auth / lifecycle | `password_digest`, `reset_token`, `email_verified_at`, `locked_at` |
+| One-time verification secret | `key`, `otp`, `otp_key`, `code`, `verification_key`/`token`, `magic_link_key`, `signin_key`, `nonce`, `activation_token` |
 
 Any create/update path that bulk-binds request data while the model defines these columns is a candidate sink.
+
+**Binding the server-generated verification secret at generation time → pre-auth account takeover.** The usual mass-assignment finding is an *authenticated* user escalating on an update (`role`/`owner_id`). A higher-impact variant binds the **one-time secret the server is supposed to generate itself** — the OTP/magic-link/verification `key` — on the **sign-in / code-request** endpoint: the struct/model bound from the request body includes the verification-key field, so an **unauthenticated** attacker submits `{email: victim, key: "attacker-known"}`, the server stores *their* value as the expected secret, and they then "verify" with the value they chose → account takeover with no code to brute-force. **SAST signal**: a sign-in/OTP-request/passwordless handler that binds the whole request body (`c.Bind(&signInModel)`, `json.NewDecoder(r.Body).Decode(&m)`, `req.body`→ORM create) into a struct/model that *also* carries the verification key/token/OTP field, with no allowlist excluding it — the key must be set **server-side only** (CSPRNG), never accepted from input.
 
 ## Detection Indicators (Grep)
 

