@@ -1,5 +1,5 @@
 ---
-name: weak-crypto-hash
+name: weak_crypto_hash
 description: Weak cryptography, weak hashing, and insecure randomness detection (CWE-327/328/330)
 ---
 

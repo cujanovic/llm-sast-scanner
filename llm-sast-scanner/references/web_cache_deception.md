@@ -1,5 +1,5 @@
 ---
-name: web-cache-deception
+name: web_cache_deception
 description: Web Cache Deception and Cache Poisoning detection — caching of personalized/authenticated responses and cache-key confusion (CWE-525 / CWE-444-adjacent)
 ---
 

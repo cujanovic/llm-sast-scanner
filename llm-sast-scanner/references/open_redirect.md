@@ -1,5 +1,5 @@
 ---
-name: open-redirect
+name: open_redirect
 description: Open redirect and unvalidated forward detection (CWE-601), including allowlist/parser-confusion bypasses — protocol-relative, multiple slashes, backslash, userinfo @, encoded host, IDN/Unicode homoglyph, and bidi code-point evasions
 ---
 

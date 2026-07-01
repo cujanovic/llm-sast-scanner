@@ -1,5 +1,5 @@
 ---
-name: file-permissions
+name: file_permissions
 description: Incorrect permission assignment for critical resources — world-writable files, missing mode args, weak DACLs (CWE-732)
 ---
 

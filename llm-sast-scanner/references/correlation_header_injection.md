@@ -1,5 +1,5 @@
 ---
-name: correlation-header-injection
+name: correlation_header_injection
 description: Correlation and request-tracing header injection — X-Request-ID, X-Correlation-ID, X-Trace-ID, or Request-Id taken from inbound requests and passed unsanitized into loggers, filesystem paths, shell commands, SQL, JSON bodies, downstream propagation, or HTTP responses (CWE-117 / CWE-93 / CWE-74)
 ---
 

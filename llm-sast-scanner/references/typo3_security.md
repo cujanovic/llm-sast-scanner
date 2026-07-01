@@ -1,5 +1,5 @@
 ---
-name: typo3-security
+name: typo3_security
 description: TYPO3 CMS security — Fluid template-engine escape-bypass XSS and template injection (f:format.raw/html/htmlentitiesDecode, $escapeOutput=false, f:render partial/section, f:cObject typoscriptObjectPath), TypoScript config-as-code RCE and injection (userFunc/preUserFunc/postUserFunc, stdWrap.insertData, data = GP:, typolink), TYPO3 superglobal taint sources (GeneralUtility::_GP/_GET/_POST), Doctrine-DBAL QueryBuilder->quote() SQLi, Extbase property-mapping mass assignment (allowAllProperties / __trustedProperties bypass / #[IgnoreValidation]), and FAL/FILE_DENY_PATTERN upload bypass (CWE-79/89/94/434/915). Load when a TYPO3 project is present (composer typo3/cms-core, ext_emconf.php, *.typoscript / setup.typoscript / constants.typoscript, Configuration/TCA/, Resources/Private/Templates/*.html with `xmlns:f`).
 ---
 

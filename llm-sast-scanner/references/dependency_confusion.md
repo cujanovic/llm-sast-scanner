@@ -1,5 +1,5 @@
 ---
-name: dependency-confusion
+name: dependency_confusion
 description: Dependency confusion / substitution attack — flag CANDIDATE internal packages that a public registry could shadow, across npm, PyPI, RubyGems, Maven/Gradle, NuGet, Go, Composer, and Cargo (CWE-1357 / supply chain)
 ---
 

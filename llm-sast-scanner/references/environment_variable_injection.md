@@ -1,5 +1,5 @@
 ---
-name: environment-variable-injection
+name: environment_variable_injection
 description: Detect user-controlled data flowing into process environment-variable assignment (name and/or value) — os.environ/os.putenv, process.env, setenv/putenv, ENV[]=, Environment.SetEnvironmentVariable, ProcessBuilder.environment().put — where attacker control of a variable name or a security-relevant variable's value enables loader/runtime hijack (LD_PRELOAD, NODE_OPTIONS, PYTHONPATH, PATH) or override of app secrets/flags (JWT_SECRET, DEBUG, DATABASE_URL). Covers CWE-99 / CWE-454 across all languages.
 ---
 

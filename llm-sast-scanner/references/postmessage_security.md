@@ -1,5 +1,5 @@
 ---
-name: postmessage-security
+name: postmessage_security
 description: postMessage origin validation failures — receivers that trust event.data without checking event.origin, wildcard targetOrigin ('*'), and weak substring/regex origin checks that allow cross-origin message injection (CWE-345, CWE-346)
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: insecure-cookie
+name: insecure_cookie
 description: Insecure cookie flags detection (CWE-614 Secure flag, CWE-1004 HttpOnly flag)
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: batch-etl-pipeline-security
+name: batch_etl_pipeline_security
 description: Security flaws in batch / ETL / mainframe-migrated data pipelines — file-in → transform → file-out jobs driven by scheduler params, upstream records, or shared landing dirs (CWE-22, CWE-78, CWE-367, CWE-119/125, CWE-1236, CWE-707)
 ---
 

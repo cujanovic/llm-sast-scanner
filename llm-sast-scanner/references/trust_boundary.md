@@ -1,5 +1,5 @@
 ---
-name: trust-boundary
+name: trust_boundary
 description: Trust boundary violation detection (CWE-501), header-based identity/origin spoofing, network-origin / IP-range trust bypass via shared multi-tenant cloud, CI/CD, and serverless egress (CWE-290/291), and mutable internal-state exposure — returning/storing live references to mutable objects and mutable public-static fields (CWE-374/375/582/607)
 ---
 

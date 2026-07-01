@@ -1,5 +1,5 @@
 ---
-name: csv-injection
+name: csv_injection
 description: CSV / formula injection when exporting user-controlled data to spreadsheets (CWE-1236)
 ---
 

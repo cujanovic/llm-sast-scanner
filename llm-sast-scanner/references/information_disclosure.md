@@ -1,5 +1,5 @@
 ---
-name: information-disclosure
+name: information_disclosure
 description: Information disclosure testing covering error messages, debug endpoints, metadata leakage, and source exposure
 ---
 

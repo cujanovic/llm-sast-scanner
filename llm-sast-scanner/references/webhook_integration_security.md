@@ -1,5 +1,5 @@
 ---
-name: webhook-integration-security
+name: webhook_integration_security
 description: Webhook and third-party integration security — outbound SSRF via test/ping/verify URL features, webhook CRUD IDOR/BFLA, unallowlisted delivery with redirect follow, OAuth redirect_uri from query without allowlist, inbound webhook receivers missing HMAC signature verification or replay protection, and signing-secret disclosure (CWE-918 / CWE-639 / CWE-352)
 ---
 

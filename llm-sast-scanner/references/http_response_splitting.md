@@ -1,5 +1,5 @@
 ---
-name: http-response-splitting
+name: http_response_splitting
 description: HTTP response splitting, CRLF injection, and header/cookie injection detection — including encoding-based sanitizer bypasses (double-encoding, %u, overlong UTF-8, %5c escapes, obs-fold) (CWE-113)
 ---
 

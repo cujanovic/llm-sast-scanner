@@ -1,5 +1,5 @@
 ---
-name: authentication-jwt
+name: authentication_jwt
 description: JWT and OIDC security testing covering token forgery, algorithm confusion, kid/jku/x5u/jwk/x5c header injection and JKU allowlist bypass, JWE encryption-layer attacks (RSA1_5/CBC padding oracle, ECDH-ES invalid curve, PBES2 p2c DoS, GCM nonce reuse, zip decompression bomb, nested alg:none JWE→JWS confusion), ECDSA psychic signatures, OAuth/OIDC token-validation gaps (at+jwt typ confusion, ALBeast shared-signer binding, DPoP downgrade/ath), and claim manipulation
 ---
 

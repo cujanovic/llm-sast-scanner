@@ -1,5 +1,5 @@
 ---
-name: hardcoded-code-backdoor
+name: hardcoded_code_backdoor
 description: Embedded malicious code and supply-chain backdoor patterns (CWE-506)
 ---
 

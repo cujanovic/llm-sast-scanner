@@ -1,5 +1,5 @@
 ---
-name: xssi-jsonp
+name: xssi_jsonp
 description: Cross-Site Script Inclusion (XSSI), JSONP, and Reflected File Download (RFD) — server endpoints that wrap sensitive JSON in executable JavaScript (callback/jsonp parameters, application/javascript responses) enabling cross-origin data theft via script tags, and reflected-input/download responses lacking a fixed Content-Disposition filename enabling attacker-named executable downloads (CWE-345, CWE-200, CWE-494)
 ---
 

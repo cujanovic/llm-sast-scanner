@@ -1,5 +1,5 @@
 ---
-name: regex-injection-redos
+name: regex_injection_redos
 description: Regular expression injection, ReDoS, incomplete regex validation, and incomplete sanitization patterns
 ---
 

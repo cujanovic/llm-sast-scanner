@@ -1,5 +1,5 @@
 ---
-name: business-logic
+name: business_logic
 description: Business logic testing for workflow bypass, state manipulation, and domain invariant violations
 ---
 

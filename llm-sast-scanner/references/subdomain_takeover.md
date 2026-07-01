@@ -1,5 +1,5 @@
 ---
-name: subdomain-takeover
+name: subdomain_takeover
 description: Subdomain takeover — flag CANDIDATE dangling DNS records in Infrastructure-as-Code (Route53/Azure DNS/Cloud DNS/CNAME to SaaS) that point at takeover-prone external services with no co-declared backing resource (CWE-350 / dangling DNS). Use when reviewing *.tf, CloudFormation/ARM/Bicep/Pulumi, zone files, or DNS config for dangling CNAME/ALIAS to deprovisionable cloud/SaaS endpoints.
 ---
 

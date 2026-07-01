@@ -1,5 +1,5 @@
 ---
-name: certificate-validation
+name: certificate_validation
 description: TLS certificate, hostname, pinning, and revocation validation failures (CWE-295/297/299/322)
 ---
 

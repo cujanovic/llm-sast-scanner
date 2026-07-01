@@ -1,5 +1,5 @@
 ---
-name: oauth-oidc-misconfiguration
+name: oauth_oidc_misconfiguration
 description: OAuth 2.0 / OpenID Connect flow misconfiguration — weak redirect_uri validation, missing state/PKCE, authorization-code reuse, token-exchange and refresh-token rotation race conditions, incomplete revocation (persistent access after revoke, silent re-approval), cross-client token acceptance, unverified email linking, multi-tenant / enterprise SSO with customer-controlled IdP (missing verified-domain binding, global vs tenant-scoped identity, blind JIT provisioning → cross-tenant account takeover), scope manipulation (dropping email scope → absent/undefined email claim → ORM match-all wrong-user login), implicit/ROPC grants, dynamic registration SSRF, and client-secret exposure (CWE-287 / CWE-346 / CWE-362 / CWE-601 / CWE-613)
 ---
 

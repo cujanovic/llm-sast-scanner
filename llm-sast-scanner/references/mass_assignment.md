@@ -1,5 +1,5 @@
 ---
-name: mass-assignment
+name: mass_assignment
 description: Mass assignment / object injection allowing privilege fields to be set from user input (CWE-915)
 ---
 

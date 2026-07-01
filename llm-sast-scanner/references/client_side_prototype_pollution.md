@@ -1,5 +1,5 @@
 ---
-name: client-side-prototype-pollution
+name: client_side_prototype_pollution
 description: Client-Side Prototype Pollution (CSPP) — pollution sources (URL query, hash, JSON, postMessage), browser-resident pollution sinks (URL/hash parsers, jQuery `$.extend`, hand-rolled merges), and the script-gadget catalog (sanitizer bypasses, browser-API gadgets) that escalates pollution to DOM XSS / open redirect / cookie injection in the user's browser
 ---
 

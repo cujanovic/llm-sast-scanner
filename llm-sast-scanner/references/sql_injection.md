@@ -1,5 +1,5 @@
 ---
-name: sql-injection
+name: sql_injection
 description: SQL injection testing covering union, blind, error-based, ORM bypass, and database-side dynamic SQL (PostgreSQL PL/pgSQL EXECUTE/format unquoted-identifier injection, dollar-quote denylist bypass, SECURITY DEFINER search_path) techniques
 ---
 
@@ -603,7 +603,7 @@ ps.executeQuery();  // SAFE
 ## Related Injection Classes
 
 For LDAP injection (CWE-90) patterns, see `references/ldap_injection.md`.
-For XPath injection (CWE-643) patterns, see SKILL.md xpath_injection gap coverage rules.
+For XPath injection (CWE-643) patterns, see `references/xpath_injection.md`.
 
 **Benchmark edge cases**:
 - In benchmark mode outside `xben/` and `BenchmarkJava`, normalize confirmed SQL injection to `sql_injection`, not `sqli`.

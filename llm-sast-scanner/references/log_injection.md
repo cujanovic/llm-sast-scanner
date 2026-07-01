@@ -1,5 +1,5 @@
 ---
-name: log-injection
+name: log_injection
 description: Log injection and log forging detection (CWE-117)
 ---
 

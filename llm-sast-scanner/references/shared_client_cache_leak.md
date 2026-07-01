@@ -1,5 +1,5 @@
 ---
-name: shared-client-cache-leak
+name: shared_client_cache_leak
 description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, shared cookie jars, pooled-connection or thread-local reuse, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers JS/TS (urql, Apollo, DataLoader, TanStack/React Query, SWR, axios), Python (requests, aiohttp, httpx, SQLAlchemy, Django/Flask caches), Go (singleflight, gorm, go-redis, go-resty), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient, OkHttp, Ktor, Hibernate L2, gRPC), Ruby (Rails.cache, Faraday), PHP (Guzzle, Octane/Swoole), C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest), Elixir/Phoenix (:persistent_term, ETS), Scala, Clojure, and reused headless-browser / SSR render workers (Puppeteer/Playwright "headless context bleed") (CWE-488 / CWE-524 / CWE-567 / CWE-362)
 ---
 

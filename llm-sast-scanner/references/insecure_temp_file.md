@@ -1,5 +1,5 @@
 ---
-name: insecure-temp-file
+name: insecure_temp_file
 description: Insecure temporary file creation — predictable names, race windows, world-readable paths (CWE-377)
 ---
 

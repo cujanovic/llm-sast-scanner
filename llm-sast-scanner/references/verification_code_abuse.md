@@ -1,5 +1,5 @@
 ---
-name: verification-code-abuse
+name: verification_code_abuse
 description: Detect OTP, captcha, and verification-code flaws such as predictable generation, disclosure, brute force, weak TOTP config (short digits, wide acceptance/grace window), replay, and shared state.
 ---
 

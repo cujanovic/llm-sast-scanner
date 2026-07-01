@@ -1,5 +1,5 @@
 ---
-name: client-side-path-traversal
+name: client_side_path_traversal
 description: Client Side Path Traversal (CSPT) and secondary-context path traversal across frontend frameworks (React Router, Next.js, Vue Router, Angular, SvelteKit, Nuxt, Ember, SolidStart), including second-order/native deep-link CSPT and WAF/encoding-level (depth) bypass analysis
 ---
 

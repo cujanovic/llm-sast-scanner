@@ -1,5 +1,5 @@
 ---
-name: email-parser-differential
+name: email_parser_differential
 description: Email validation-vs-parsing differential — app validates with regex or split('@') but the mail-sending library parses encoded-words, comments, quoted strings, multiple @, Punycode/IDN, or UUCP paths differently, so stored domain differs from delivery target; plus identity-key collisions from missing canonicalization (CWE-20 / CWE-697)
 ---
 

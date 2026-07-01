@@ -1,5 +1,5 @@
 ---
-name: race-conditions
+name: race_conditions
 description: Race condition testing for TOCTOU bugs, double-spend, and concurrent state manipulation — invariant divergence between check and commit across multiple actors, transports, or a request racing a background/async worker; includes identity/context confusion where per-request identity (current_user/current_tenant/role/session) held in shared mutable state is overwritten by a concurrent request between the auth check and the action (blended identity)
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: aspnet-security-misconfig
+name: aspnet_security_misconfig
 description: ASP.NET security misconfiguration detection (CWE-011, CWE-016, related hardening)
 ---
 

@@ -1,5 +1,5 @@
 ---
-name: xpath-injection
+name: xpath_injection
 description: XPath injection (CWE-643), XQuery injection (CWE-652), and XML injection (CWE-091) via untrusted expression or markup construction
 ---
 

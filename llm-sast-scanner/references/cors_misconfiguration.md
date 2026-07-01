@@ -1,5 +1,5 @@
 ---
-name: cors-misconfiguration
+name: cors_misconfiguration
 description: CORS misconfiguration detection (CWE-346, CWE-942)
 ---
 

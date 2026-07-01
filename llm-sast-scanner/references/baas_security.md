@@ -1,5 +1,5 @@
 ---
-name: baas-security
+name: baas_security
 description: Backend-as-a-Service (BaaS) client-side authorization misconfig — Supabase/Postgres RLS disabled or permissive policies, Firebase/Firestore/RTDB/Storage Security Rules allowing public read/write, admin/RLS-bypassing keys (service_role, Hasura admin secret, Amplify/AppSync API keys) shipped in client/browser/mobile code, anon-key writes to sensitive tables, over-broad realtime subscriptions (CWE-862/863/732/798/200)
 ---
 

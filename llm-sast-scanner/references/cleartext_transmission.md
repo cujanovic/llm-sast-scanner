@@ -1,5 +1,5 @@
 ---
-name: cleartext-transmission
+name: cleartext_transmission
 description: Cleartext transmission and missing TLS for sensitive web/API traffic (CWE-319, CWE-311)
 ---
 

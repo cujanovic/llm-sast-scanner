@@ -1,5 +1,5 @@
 ---
-name: host-header-poisoning
+name: host_header_poisoning
 description: Host header poisoning and email injection detection (CWE-640)
 ---
 

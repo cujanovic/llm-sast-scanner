@@ -1,5 +1,5 @@
 ---
-name: format-string-injection
+name: format_string_injection
 description: Externally-controlled format strings in printf-style APIs (CWE-134)
 ---
 

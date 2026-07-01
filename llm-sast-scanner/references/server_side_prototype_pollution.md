@@ -1,5 +1,5 @@
 ---
-name: server-side-prototype-pollution
+name: server_side_prototype_pollution
 description: Server-Side Prototype Pollution (SSPP) — pollution sinks (merge / clone / set / qs nested-bracket parsers) and the Node.js / Deno / NPM gadget catalog that escalates pollution to RCE, ACI, SSRF, path traversal, privilege escalation, and DoS
 ---
 

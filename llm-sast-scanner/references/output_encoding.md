@@ -1,5 +1,5 @@
 ---
-name: output-encoding
+name: output_encoding
 description: Inappropriate encoding for output context detection (CWE-838)
 ---
 

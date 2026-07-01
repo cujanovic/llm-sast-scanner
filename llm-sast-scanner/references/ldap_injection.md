@@ -1,5 +1,5 @@
 ---
-name: ldap-injection
+name: ldap_injection
 description: LDAP injection (CWE-090) where untrusted input alters directory search filters or distinguished names
 ---
 

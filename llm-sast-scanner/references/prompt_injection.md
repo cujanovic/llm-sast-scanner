@@ -1,5 +1,5 @@
 ---
-name: prompt-injection
+name: prompt_injection
 description: LLM prompt injection detection — untrusted user content in AI model prompts (CWE-1427)
 ---
 
