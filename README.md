@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **106 vulnerability classes** — covering web, API, authentication, cloud/IaC, nginx config, mobile, smart-contract, BaaS (Supabase/Firebase) authorization, and the OWASP LLM Top 10 for AI/agent apps.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **103 vulnerability classes** — covering web, API, authentication, cloud/IaC, nginx config, mobile, smart-contract, BaaS (Supabase/Firebase) authorization, and the OWASP LLM Top 10 for AI/agent apps.
 
 Instead of pattern-matching with hardcoded rules, it gives an agent a disciplined, evidence-based methodology: identify untrusted input, trace it through the code, and confirm whether it reaches a dangerous sink without a sanitizer in between — then verify every candidate through an adversarial "Judge" stage to cut false positives.
 
@@ -16,7 +16,7 @@ Traditional SAST tools rely on fixed rule sets and tend to drown teams in false 
 
 | Component | What it is |
 |-----------|-----------|
-| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 106 vulnerability reference knowledge bases. |
+| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 103 vulnerability reference knowledge bases. |
 | **`llm-sast-scanner-full-scan-loop/`** | A wrapper skill for an exhaustive, convergence-driven, line-by-line audit of an entire repository, guaranteeing 100% line coverage. |
 | **`AGENTS.md` / `CLAUDE.md`** | The repo-level orchestrator playbook that drives parallel multi-agent scanning and report consolidation. `CLAUDE.md` is a symlink to `AGENTS.md`. |
 | **`.claude/skills/`, `.agents/skills/`** | Per-runtime skill discovery directories — both symlink to the single canonical skill source, so the two runtimes can never drift apart. |
@@ -45,9 +45,7 @@ A few principles keep results trustworthy:
 
 ## Cross-scan memory
 
-Each scan writes its working artifacts to a `.llm-sast-scanner-cache/` folder in the target repo. Run at most **one active orchestration per target directory and cache** at a time — concurrent whole scans against the same target/cache are unsupported (serialize externally; no safe shared cleanup). Before threat modeling or any cache skip decision, the orchestrator prepares an **immutable source snapshot** (`source-fingerprint-v2`) via `scripts/scan-cache-contract.sh` — all agents read source only from that snapshot and cite original target-relative paths. Cached lens results and reports are reused only when strict shell artifact validation confirms the expected lens and current fingerprint; any live-tree change invalidates stale artifacts. After a successful final report, the snapshot is cleaned up; interrupted runs retain it for safe resume.
-
-Alongside the architecture/threat-model brief, the orchestrator maintains a **`project-memory.md`** — a per-repository knowledge file that persists and grows across scans, recording confirmed findings, confirmed false-positive patterns (with rationale), project-specific security primitives (sanitizers/validators/auth wrappers), and hotspots. Repeat scans reuse it to prioritize effort and avoid re-deriving the same context.
+Each scan writes its working artifacts to a `.llm-sast-scanner-cache/` folder in the target repo. Alongside the architecture/threat-model brief, the orchestrator maintains a **`project-memory.md`** — a per-repository knowledge file that persists and grows across scans, recording confirmed findings, confirmed false-positive patterns (with rationale), project-specific security primitives (sanitizers/validators/auth wrappers), and hotspots. Repeat scans reuse it to prioritize effort and avoid re-deriving the same context.
 
 It is deliberately treated as **hints, never authority**, with guardrails that keep it from degrading detection:
 
@@ -62,7 +60,7 @@ It is deliberately treated as **hints, never authority**, with guardrails that k
 ## Languages & ecosystems
 
 - **Application languages:** Java, Python, JavaScript / TypeScript, PHP, C# / .NET, Go, Ruby, C / C++, Kotlin, Swift, Objective-C, Rust
-- **Smart contracts:** Solidity / EVM, Solana / Anchor (Rust), Move (Aptos / Sui), TRON / TVM, Substrate / Polkadot FRAME & XCM (Rust)
+- **Smart contracts:** Solidity / EVM
 - **Infrastructure, config & markup:** Terraform / HCL, Kubernetes & CI/CD YAML, Dockerfile, nginx config, XML, SQL, HTML
 
 Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated rule sets; the rest are covered with vulnerable-vs-secure detection patterns across the relevant classes.
@@ -71,7 +69,7 @@ Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated
 
 ## Vulnerability coverage
 
-106 reference knowledge bases, organized into categories:
+103 reference knowledge bases, organized into categories:
 
 | Category | Focus |
 |----------|-------|
@@ -85,7 +83,7 @@ Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated
 | **AI / LLM Application Security** | OWASP LLM Top 10 — prompt injection, insecure output handling, excessive agency, system-prompt leakage, RAG/vector weaknesses, ML supply-chain poisoning, agent config poisoning |
 | **Output & Hardening** | output encoding, format strings, ASP.NET misconfiguration, embedded malicious code, improper input validation (semantic-type mismatch) |
 | **Supply Chain** | dependency confusion, unpinned/unverified dependencies, malicious lifecycle scripts |
-| **Language / Platform** | PHP (incl. TYPO3 CMS — Fluid / TypoScript / Extbase), Android security, iOS security, Electron/desktop app security, C/C++ memory safety, Solidity smart contracts, Solana/Anchor programs (Rust), Move modules (Aptos/Sui), TRON/TVM contracts, Substrate/Polkadot FRAME & XCM pallets, batch/ETL/mainframe pipelines |
+| **Language / Platform** | PHP, Android security, iOS security, Electron/desktop app security, C/C++ memory safety, Solidity smart contracts, Solana/Anchor programs (Rust), batch/ETL/mainframe pipelines |
 
 The full per-class list (with files and CWE mappings) lives in `llm-sast-scanner/references/`.
 
@@ -98,7 +96,7 @@ The full per-class list (with files and CWE mappings) lives in `llm-sast-scanner
 | **Critical** | Direct RCE, authentication bypass, unauthenticated data exposure |
 | **High** | SQLi, SSRF, IDOR with sensitive data, stored XSS, privilege escalation |
 | **Medium** | Reflected XSS, CSRF, path traversal, insecure deserialization |
-| **Low** | Information disclosure, open redirect, weak crypto, insecure cookie, improper input validation (semantic-type mismatch) |
+| **Low** | Information disclosure, open redirect, weak crypto, insecure cookie |
 | **Info** | Missing security headers, verbose errors, defense-in-depth gaps |
 
 Exploitation that requires authentication, non-default config, chaining, or admin/internal-only access is downgraded one level from the class default.
@@ -137,17 +135,15 @@ llm-sast-scanner [adv=critical,high,medium]
 
 Without arguments it runs the detection + Judge workflow. The optional `adv=` flag selects which severities also go through the adversarial impact pass.
 
-**Exhaustive whole-repository audit** — run the mandatory five-pass convergence loop to saturation, with guaranteed 100% line coverage:
+**Exhaustive whole-repository audit** — run the convergence loop until no new bugs are found, with guaranteed 100% line coverage:
 
 ```
 llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,medium]
 ```
 
-Every deep-scan lens runs five purpose-specific passes before convergence can be declared; productive pass-5+ scans continue until a zero-new pass or the pass-10 hard cap. Cached deep results are reused only when their artifact passes strict shell validation against the current immutable snapshot fingerprint (`source-fingerprint-v2`).
-
 `mode=parallel` (default) dispatches one subagent per vulnerability lens and consolidates the results; `mode=single` runs everything in one context for the strongest convergence guarantee. Output is a timestamped `sast_report-<timestamp>.md`.
 
-**Parallel multi-agent orchestration** — point your agent at `AGENTS.md` / `CLAUDE.md` to run a full assessment (codebase analysis → parallel detection across six vulnerability lenses → consolidated report) written to a `.llm-sast-scanner-cache/` folder. It is re-runnable: steps whose output already exists **and passes strict shell artifact validation for the expected lens and current v2 fingerprint, plus current snapshot verification/report rules, with all six lens artifacts current when reusing `final-report.md`** may be skipped — a completion marker alone never suffices (a crashed/partial/stale output is re-run, not trusted), and the run updates `project-memory.md` (see [Cross-scan memory](#cross-scan-memory)) so later scans build on earlier ones. Add `.llm-sast-scanner-cache/` to the scanned repo's `.gitignore`.
+**Parallel multi-agent orchestration** — point your agent at `AGENTS.md` / `CLAUDE.md` to run a full assessment (codebase analysis → parallel detection across six vulnerability lenses → consolidated report) written to a `.llm-sast-scanner-cache/` folder. It is re-runnable: steps whose output already exists **and is marked complete** are skipped (a crashed/partial output is re-run, not trusted), and the run updates `project-memory.md` (see [Cross-scan memory](#cross-scan-memory)) so later scans build on earlier ones. Add `.llm-sast-scanner-cache/` to the scanned repo's `.gitignore`.
 
 ---
 
@@ -158,11 +154,9 @@ llm-sast-scanner/                      ← repo root
 ├── README.md
 ├── AGENTS.md                          # parallel orchestrator playbook
 ├── CLAUDE.md                          # → symlink to AGENTS.md
-├── scripts/
-│   └── scan-cache-contract.sh         # immutable snapshot + artifact/policy shell contract
 ├── llm-sast-scanner/                  # core skill (canonical source)
 │   ├── SKILL.md                       # 7-step workflow + Judge + adversarial + project-memory protocol
-│   └── references/                    # 106 vulnerability knowledge bases
+│   └── references/                    # 103 vulnerability knowledge bases
 ├── llm-sast-scanner-full-scan-loop/   # exhaustive convergence-audit skill
 │   └── SKILL.md
 ├── .claude/skills/                    # → symlinks to the two skill dirs above

@@ -22,3 +22,8 @@ sast_report-*.md
 # Working plans and scan notes: these reference the target codebase under
 # audit by name, path, and finding. Local working state, never published.
 docs/superpowers/
+
+# External context files describe out-of-repo systems by name and internal
+# architecture. Keep them on disk for scans; never publish them.
+llm-sast-scanner/context/*.md
+!llm-sast-scanner/context/.gitkeep
