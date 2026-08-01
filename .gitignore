@@ -18,3 +18,7 @@ desktop.ini
 # Scanner working artifacts (when this repo is itself a scan target)
 .llm-sast-scanner-cache/
 sast_report-*.md
+
+# Working plans and scan notes: these reference the target codebase under
+# audit by name, path, and finding. Local working state, never published.
+docs/superpowers/
