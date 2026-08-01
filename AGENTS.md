@@ -61,7 +61,16 @@ Run **in-session** (not as a subagent, since later steps read its output) the `l
    it: markers inside comments or docstrings, which are not operations and are correctly absent; and
    declaration shapes the command mishandles — multi-line decorators, a comment or blank line between the
    decorator and the signature, wrapped registrations, inherited routes — which are operations and must be
-   recovered. Fix the command and re-run until every row of the difference is explained. An under-built W1
+   recovered. Fix the command and re-run until every row of the difference is explained.
+
+   **Validate the columns too.** The guard cell holds a declaration chain and nothing else. Reject the
+   enumeration when any cell carries function-body tokens (braces, semicolons, `return`, assignment keywords)
+   or runs past a couple of hundred characters — the extractor ran past the declaration. Then open three rows
+   at random and confirm each cell against the source at its cited `file:line`. A bled guard column makes an
+   unguarded operation read as guarded, defeating the sort. Record paths **target-relative** — absolute paths
+   embed the operator's username and machine layout.
+
+   An under-built W1
    silently shrinks every surface-bound class's denominator, which is the failure this whole design exists to
    prevent.
 4. **`.llm-sast-scanner-cache/assets.tsv` (W3)** — per asset-bound class, the glob and its matching files.
@@ -135,9 +144,15 @@ results path):
 > Judge re-verification (Step 5), and (only if `adv=` was provided) Adversarial Impact Validation (Step 6).
 >
 > **Produce a Disposition Ledger per class** in the base skill's format: binding, denominator, pasted
-> enumeration output, one row per item with evidence transcribed verbatim, and `Dispositioned: N/N`. Sort your
-> rows by the evidence column before dispositioning — operations that share a purpose but not a guard chain
-> land next to each other, and that adjacency is what surfaces the outlier.
+> enumeration output, one row per item with evidence transcribed verbatim, a `read` range, a cited
+> disposition, and `Dispositioned: N/N`. Sort your rows by the evidence column before dispositioning —
+> operations that share a purpose but not a guard chain land next to each other, and that adjacency is what
+> surfaces the outlier.
+>
+> **Open each item's body and record the range you read.** The declaration chain says what was declared; only
+> the body says what the operation does. Every disposition cites — `SAFE-because <guard>@file:line`,
+> `NOT-REACHABLE — <what is absent>, per file.ext:START-END`, or `FINDING VULN-nnn`. No two rows may share a
+> disposition string; each body sits at its own line range, so real per-row work produces distinct ones.
 >
 > Report CONFIRMED / LIKELY findings using the skill's finding format. Do **not** write to
 > `project-memory.md` (the report step is the single writer). **As the FINAL line of the results file — only
@@ -165,6 +180,11 @@ Launch a single subagent:
 > every row of `surface.tsv` exactly once — no gaps, no overlaps. Re-run any shard whose range diverges.
 > **Any class with D < T is INCOMPLETE**: re-run it, or name it as incomplete in the report. Never present a
 > partial class as cleared.
+>
+> Also count, across all results files, (a) dispositions carrying no `file:line`, (b) rows with an empty or
+> single-line `read` cell, and (c) duplicate disposition strings. Each is a row that was filled rather than
+> worked — one judgement copied across many rows. Re-run any agent whose ledger contains them, and state all
+> three counts in the report's Coverage Ledger.
 >
 > Read all `.llm-sast-scanner-cache/*-results.md` files and `architecture-threat-model.md`, then apply the
 > `llm-sast-scanner` skill's **Step 7 (Report Findings)** — severity model, severity-downgrade rule, finding

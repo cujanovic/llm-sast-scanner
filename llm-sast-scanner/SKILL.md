@@ -4,7 +4,7 @@ description: >
   Use when reviewing source code for vulnerabilities, auditing a repository or component, tracing a specific
   vulnerability class, performing a SAST scan, or producing a security assessment for any language or framework.
 metadata:
-  version: "2.0.0"
+  version: "2.1.0"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -170,9 +170,24 @@ resolvers), RPC/gRPC methods, CLI subcommands, scheduled jobs, queue/topic consu
 exported library entry points. Guards = the full decorator / middleware / filter chain as written in source,
 copied character-for-character.
 
-If your enumeration finds zero operations in a repo that plainly serves traffic, the command is wrong — fix it
-before continuing. If it finds fewer than a `grep -c` of the framework's operation marker, it is skipping
-declaration shapes (multi-line decorators, wrapped registrations); fix it and re-run.
+**Validate the enumeration on two axes — row count and column shape.** A worklist with the right number of
+rows and a corrupt column is worse than no worklist: it looks complete and it sorts wrong.
+
+*Rows.* If your enumeration finds zero operations in a repo that plainly serves traffic, the command is wrong.
+Compare the row count against a raw count of the framework's operation marker and account for every row of the
+difference by name — markers inside comments are not operations; declaration shapes the command mishandles
+(multi-line decorators, a comment or blank line between decorator and signature, wrapped registrations,
+inherited routes) are operations and must be recovered.
+
+*Columns.* The guard cell holds a declaration chain and nothing else. Reject the enumeration when any cell
+carries function-body tokens (braces, semicolons, `return`, assignment keywords) or runs past a couple of
+hundred characters — both mean the extractor ran past the declaration and swallowed neighbouring code. Then
+open three rows at random, read the cited `file:line` in the source, and confirm each cell matches what is
+written there. A guard column that has absorbed an adjacent handler makes an unguarded operation read as a
+guarded one, which is the exact error the sort exists to prevent.
+
+Paths are **target-relative** (`src/…`, never `/home/…` or `/Users/…`). Absolute paths embed the operator's
+username and machine layout into an artifact that gets read, quoted into findings, and often committed.
 
 **W2 — Sink sweep ledger** (`.llm-sast-scanner-cache/sweeps.tsv`). Per class, the structural-shape sweep command
 and every hit: `class <TAB> command <TAB> file:line`. Sweeps match the sink's *shape*, not a library name.
@@ -411,18 +426,36 @@ Binding: surface | sink | asset
 Denominator: <N items> — from <W1 | the sweep command, verbatim | the asset glob, verbatim>
 Enumeration output: <paste the raw command output, or reference the shared W1 file + row range>
 
-| # | item (file:line + name) | evidence (verbatim guard / sink expression) | disposition |
-|---|---|---|---|
-| 1 | ... | ... | FINDING VULN-nnn / SAFE-because <guard>@file:line / NOT-REACHABLE because <reason> |
+| # | item (file:line + name) | evidence (verbatim guard / sink expression) | read | disposition |
+|---|---|---|---|---|
+| 1 | ... | ... | file.ext:START-END | FINDING VULN-nnn / SAFE-because <guard>@file:line / NOT-REACHABLE — <what is absent>, per file.ext:START-END |
 ...
 Dispositioned: N/N
 ```
 
-Three disposition values, and only these three:
+**The `read` column is required and holds a line range you actually opened** — this item's own body, as
+`file.ext:START-END`, plus the range of any callee you followed. A row whose `read` cell is empty, holds a
+single line, or just repeats the item's declaration line is not dispositioned; it is a guess with a table cell
+around it.
+
+Three disposition values, and only these three. **Every one carries a citation:**
+
 - **FINDING** — cite the `VULN-nnn` id.
 - **SAFE-because** — a named, effective guard **you read**, cited as `<guard>@file:line`. The guard must be on
   *this* item's path, not a peer's.
-- **NOT-REACHABLE** — the value provably has no source→sink path; state why.
+- **NOT-REACHABLE** — name what is absent **and cite the range you read to establish the absence**, as
+  `NOT-REACHABLE — no <behavior> in body or callees, per file.ext:START-END`. Absence is a claim about code,
+  so it cites the code. An uncited absence is not a disposition.
+
+**Each row's citation is its own.** Every item's body occupies a different line range, so no two rows can share
+a disposition string. If you are about to paste the same reason into a second row, you have stopped reading and
+started asserting — open that item's body and write what is actually in it.
+
+**The evidence column is not a substitute for the read column.** A declaration chain tells you what guards were
+*declared*; it cannot tell you what the handler *does*. Dispositioning a behavioral class — whether this
+operation touches credentials, verification codes, other users' records, or shared state — requires the body.
+Reasoning from the guard chain alone is how an operation that performs the exact behavior gets cleared as not
+performing it.
 
 **Evidence is transcribed, not summarized.** The evidence column holds the actual guard chain or sink
 expression copied character-for-character from source. A one-guard chain and a three-guard chain are different
@@ -442,6 +475,10 @@ need the asset/surface check that would reveal a bespoke implementation.
 | "The guarded ones are representative, the rest follow the same pattern" | Then writing their rows costs you nothing. The outlier is *why* you enumerate — it is invisible until every sibling is on one page. |
 | "I sampled the sensitive ones" | Sampling selects for what you already suspect. The denominator is every item, not the ones that looked interesting. |
 | "N rows is too many to write out" | A denominator too large to disposition is a shard boundary, not a license to summarize. Split the work; keep the rows. |
+| "This class obviously doesn't apply to most of these operations" | Then each row costs seconds and cites a short range. "Obviously" is the feeling that precedes an uncited row, not evidence. |
+| "The same reason genuinely is true for 100 operations" | Each of those 100 has its own body at its own line range, so each row cites its own range. Identical reason strings mean one judgement was made and copied 100 times. |
+| "The guard chain already tells me this operation is safe" | A declaration chain says what was declared, never what the body does. Behavioral classes are dispositioned from the body or not at all. |
+| "Writing `NOT-REACHABLE` with no reason is fine when nothing is there" | Then the range you read to establish that is one cell away. A bare verdict is indistinguishable from a skipped row, so it is scored as one. |
 
 **Why the table and not a paragraph:** a prose clearance can describe three items and imply the rest. A table
 cannot — its row count is checkable arithmetic. Every historical miss of this system's has the same shape: a
@@ -925,6 +962,9 @@ Analyzer: llm-sast-scanner v<version>
 
 **Surface coverage:** <D>/<T> operations in W1 dispositioned for every surface-bound class.
 **Undispositioned rows:** <list them, or "none">
+**Uncited dispositions:** <count of dispositions carrying no file:line — must be 0>
+**Empty or single-line `read` cells:** <count — must be 0>
+**Duplicate disposition strings:** <count, plus the most-repeated string and its multiplicity>
 
 <Any class whose Dispositioned < Denominator is INCOMPLETE — say so here by name. A report that
 lists an incomplete class without flagging it presents a partial audit as a finished one.>
