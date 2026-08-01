@@ -10,7 +10,7 @@ description: >
   With mode=single it runs the same procedure in one context.
 disable-model-invocation: true
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -30,8 +30,9 @@ then requiring a disposition for every enumerated item.
 - Every class verdict is a table with one row per denominator item. A class verdict is never a sentence.
 - Every row carries evidence transcribed verbatim, the `read` line range actually opened, and a cited
   disposition: FINDING `VULN-nnn` / SAFE-because `<guard>@file:line` / NOT-REACHABLE `— <absent>, per file:START-END`.
-- Behavioral classes are dispositioned from the body, never from the declaration chain. No two rows share a
-  disposition string.
+- The `read` range runs to the **decision point** — the code that implements the behavior or establishes its
+  absence — following calls out of a delegating handler. A row that stops at the routing layer is unfinished.
+- No two rows share a disposition string. A callee's name is never a clearance.
 - The run is done when every row of every applicable denominator is dispositioned and the challenge pass over
   `SAFE` rows on mixed-guard surfaces has run.
 - A denominator too large for one context is a shard boundary. It is never a licence to summarize.
@@ -196,6 +197,12 @@ does, because W1 is sorted and sliced, and its slice arrives as rows, not as pro
 (surface-bound classes belong to the shards). Results go to
 `.llm-sast-scanner-cache/deep-<lens>-results.md`.
 
+**Write to exactly these six filenames, one file per lens, each containing full Disposition Ledger tables.** Do
+not merge two lenses into a combined file, do not invent a filename outside this set, and do not move a ledger
+into a side artifact and leave a summary in its place. An area-level or focus-area verdict table is not a
+ledger — it is the class-level clearance this whole contract exists to replace. Consolidation reads these files
+by name, so a ledger that lives anywhere else is a ledger that does not get merged.
+
 | Lens | Sink-bound / asset-bound classes it owns |
 |------|------------------------------------------|
 | injection | SQLi, XSS, client-side prototype pollution, SSTI, SSI, ESI, NoSQLi, GraphQL injection, XXE/XSLT, RCE/command injection, environment variable injection, expression-language injection, LDAP, XPath/XQuery, CSV/formula injection, log injection, prompt injection, insecure output handling, DOM clobbering |
@@ -317,11 +324,16 @@ Every class you own produces a **Disposition Ledger** in the base skill's format
 enumeration output, one row per item carrying evidence, a `read` range, and a cited disposition, then
 `Dispositioned: N/N`. Beyond that format:
 
-- **Open the body before you disposition it.** The `read` cell holds the line range you actually opened for
-  that item. Behavioral classes — whether an operation touches credentials, verification codes, other users'
-  records, or shared state — are answered by the handler and its callees, never by the declaration chain. An
-  operation whose decorators look routine and whose body performs the behavior is the single most common miss,
-  and it is only visible from the body.
+- **Read to the decision point.** The `read` cell holds every range you opened to reach the code that
+  implements the behavior or establishes its absence. A handler that forwards to a service has answered
+  nothing: open the callee, append its range, and keep going until you reach real logic. A `read` cell holding
+  one short range for an operation that calls into project code is an unfinished row.
+- **Never clear a row from a callee's name.** `verify*`, `check*`, `validate*`, `safe*` are hypotheses. Citing
+  the call as the reason the row is safe is the highest-yield way to miss a finding — the vulnerable path is
+  often the one whose name promises safety.
+- **Name the literal arguments at the call site.** A flag, mode string, or options literal passed into a callee
+  frequently selects the vulnerable branch. When the read range shows one, say in the disposition which branch
+  it selects. An unexamined flag is an open row.
 - **Every disposition cites.** `SAFE-because <guard>@file:line`; `NOT-REACHABLE — <what is absent>, per
   file.ext:START-END`; `FINDING VULN-nnn`. A bare verdict, or an absence with no range behind it, is a skipped
   row with a table cell around it.
@@ -369,6 +381,10 @@ Run when your rows are dispositioned.
 - **Citation check.** Count rows whose disposition carries no `file:line`, and rows whose `read` cell is empty
   or holds a single line. Both are undispositioned rows wearing a verdict. State the count and close them
   before finalizing; a bare `NOT-REACHABLE` is indistinguishable from a skipped row and is scored as one.
+- **Delegation check.** Count rows whose `read` cell holds a single range that contains a call into project
+  code. Each is a row that stopped at a signpost. For surface-bound classes on a codebase of thin handlers this
+  count should be near zero; a high count means the shard dispositioned the routing layer and never reached the
+  logic. State the count, and re-do those rows before finalizing.
 - **Repetition check.** Sort your disposition strings and count duplicates. Identical dispositions on different
   rows mean one judgement was copied rather than N judgements made — every row cites its own read range, so
   genuine per-row work produces distinct strings. Redo every duplicated row by opening its body. Report the

@@ -4,7 +4,7 @@ description: >
   Use when reviewing source code for vulnerabilities, auditing a repository or component, tracing a specific
   vulnerability class, performing a SAST scan, or producing a security assessment for any language or framework.
 metadata:
-  version: "2.1.0"
+  version: "2.2.0"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -433,10 +433,33 @@ Enumeration output: <paste the raw command output, or reference the shared W1 fi
 Dispositioned: N/N
 ```
 
-**The `read` column is required and holds a line range you actually opened** — this item's own body, as
-`file.ext:START-END`, plus the range of any callee you followed. A row whose `read` cell is empty, holds a
+**The `read` column is required and holds every line range you opened to reach the decision** — as
+`file.ext:START-END`, comma-separated when the trail crosses files. A row whose `read` cell is empty, holds a
 single line, or just repeats the item's declaration line is not dispositioned; it is a guess with a table cell
 around it.
+
+**Read to the decision point, not to the end of the body.** The decision point is the code that actually
+implements the behavior you are dispositioning, or that actually establishes its absence. For a class like
+"does this operation accept a verification code it did not receive from the user", the decision point is
+wherever that check is performed or skipped — which is usually *not* the handler.
+
+**A handler that delegates has not answered anything.** When the range you read contains a call into project
+code, you have found a signpost, not a decision: the behavior lives at the other end of that call. Open the
+callee, add its range to the `read` cell, and continue until you reach code that implements or refuses the
+behavior. Thin handlers that validate nothing and forward everything to a service are the normal shape of most
+web, RPC, and GraphQL codebases — in those, *every* disposition that stops at the handler is uninformed.
+
+**Never infer a callee's behavior from its name.** `verifySomething`, `checkAccess`, `safeParse`, and
+`validateInput` are hypotheses about what code does. Names are chosen by the same developer who wrote the bug.
+Citing a call as the reason a row is safe — "SAFE-because it calls the verify method" — is the single
+highest-yield way to miss a real finding, because the vulnerable path is very often the one whose name says it
+is fine.
+
+**Arguments at the call site are evidence and belong in the disposition.** A literal passed into the callee —
+a boolean flag, a mode string, an options object — frequently *is* the vulnerability, because it selects which
+branch of the callee runs. When the read range shows a call with literal arguments, name them in the
+disposition and say which branch they select. "The handler passes a flag whose meaning I did not check" is an
+open row, not a clearance.
 
 Three disposition values, and only these three. **Every one carries a citation:**
 
@@ -479,6 +502,10 @@ need the asset/surface check that would reveal a bespoke implementation.
 | "The same reason genuinely is true for 100 operations" | Each of those 100 has its own body at its own line range, so each row cites its own range. Identical reason strings mean one judgement was made and copied 100 times. |
 | "The guard chain already tells me this operation is safe" | A declaration chain says what was declared, never what the body does. Behavioral classes are dispositioned from the body or not at all. |
 | "Writing `NOT-REACHABLE` with no reason is fine when nothing is there" | Then the range you read to establish that is one cell away. A bare verdict is indistinguishable from a skipped row, so it is scored as one. |
+| "No such behavior in the handler body" | A handler that forwards to a service contains no behavior at all. That sentence is true of every thin resolver and clears nothing. Follow the call. |
+| "It calls the verify/validate/check method, so it is handled" | That is a name, not a behavior. Open it. The vulnerable path is disproportionately the one whose name promises it is safe. |
+| "The callee is shared and used everywhere, so it must be correct" | Shared callees take arguments. This caller may select a branch no other caller selects — that is precisely how one operation differs from its siblings. |
+| "Following every call would never terminate" | You are not following every call. You are following the calls that could implement the class you are dispositioning, until you reach the code that implements or refuses it. Then you stop. |
 
 **Why the table and not a paragraph:** a prose clearance can describe three items and imply the rest. A table
 cannot — its row count is checkable arithmetic. Every historical miss of this system's has the same shape: a
