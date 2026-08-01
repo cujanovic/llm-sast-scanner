@@ -149,10 +149,20 @@ results path):
 > operations that share a purpose but not a guard chain land next to each other, and that adjacency is what
 > surfaces the outlier.
 >
-> **Open each item's body and record the range you read.** The declaration chain says what was declared; only
-> the body says what the operation does. Every disposition cites — `SAFE-because <guard>@file:line`,
-> `NOT-REACHABLE — <what is absent>, per file.ext:START-END`, or `FINDING VULN-nnn`. No two rows may share a
-> disposition string; each body sits at its own line range, so real per-row work produces distinct ones.
+> **Read to the decision point and record every range you opened.** The declaration chain says what was
+> declared; the handler says what was routed; only the code at the end of the call chain says what the
+> operation does. When the range you read contains a call into project code, open the callee, append its range
+> to the `read` cell, and continue until you reach the code that implements or refuses the behavior. Never
+> clear a row from a callee's name — `verify*`/`check*`/`validate*` are hypotheses, and the vulnerable path is
+> often the one whose name promises safety. Name any literal argument at a call site and say which branch it
+> selects.
+>
+> Every disposition cites — `SAFE-because <guard>@file:line`, `NOT-REACHABLE — <what is absent>, per
+> file.ext:START-END`, or `FINDING VULN-nnn`. No two rows may share a disposition string.
+>
+> **Write your ledger to the exact results path you were given** — full Disposition Ledger tables, in that
+> file. Do not emit an area-level or focus-area summary in place of rows, do not move the ledger into a side
+> file and leave a pointer, and do not write to a filename outside the set you were given.
 >
 > Report CONFIRMED / LIKELY findings using the skill's finding format. Do **not** write to
 > `project-memory.md` (the report step is the single writer). **As the FINAL line of the results file — only
@@ -185,6 +195,10 @@ Launch a single subagent:
 > single-line `read` cell, and (c) duplicate disposition strings. Each is a row that was filled rather than
 > worked — one judgement copied across many rows. Re-run any agent whose ledger contains them, and state all
 > three counts in the report's Coverage Ledger.
+>
+> Also count rows whose `read` cell holds a single range containing a call into project code — rows that
+> stopped at the routing layer rather than following the call to the logic. Re-run any agent with a high count,
+> and state it in the Coverage Ledger.
 >
 > Read all `.llm-sast-scanner-cache/*-results.md` files and `architecture-threat-model.md`, then apply the
 > `llm-sast-scanner` skill's **Step 7 (Report Findings)** — severity model, severity-downgrade rule, finding
