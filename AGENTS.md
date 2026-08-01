@@ -5,9 +5,10 @@ orchestrating the `llm-sast-scanner` skill across parallel subagents, each ownin
 
 All output is written to a `.llm-sast-scanner-cache/` folder in the project root.
 
-**The rule that makes this work: enumerate before you examine, and give every enumerated item a verdict.**
-Coverage is `rows dispositioned / rows enumerated` — two integers a reader can subtract. It is never a claim
-an agent asserts about itself.
+**The rule that makes this work: enumerate everything, group by control, go deep on what stands out.**
+Coverage is `items triaged / items enumerated` and `dossiers written / items flagged` — integers a reader can
+subtract, never a claim an agent asserts about itself. Enumeration is what makes nothing unseen; triage is what
+keeps depth affordable where it matters.
 
 **Concurrency:** run at most **one active orchestration per target directory and `.llm-sast-scanner-cache/`**
 at a time. Serialize concurrent scans externally.
@@ -70,9 +71,8 @@ Run **in-session** (not as a subagent, since later steps read its output) the `l
    unguarded operation read as guarded, defeating the sort. Record paths **target-relative** — absolute paths
    embed the operator's username and machine layout.
 
-   An under-built W1
-   silently shrinks every surface-bound class's denominator, which is the failure this whole design exists to
-   prevent.
+   An under-built W1 silently shrinks the denominator every surface-bound class triages against, which is the
+   failure this whole design exists to prevent.
 4. **`.llm-sast-scanner-cache/assets.tsv` (W3)** — per asset-bound class, the glob and its matching files.
 5. **`.llm-sast-scanner-cache/architecture-threat-model.md`** — languages & frameworks, entry points, trust
    boundaries, authN/authZ model, data stores, outbound calls, detected stack, the applicable-class set derived
@@ -101,13 +101,14 @@ Split `W1` into contiguous slices of **20–30 operations** (fewer if handlers a
 read each operation's handler and its transitive callees. One subagent per slice, writing to
 `.llm-sast-scanner-cache/surface-shard-<id>-results.md`.
 
-Each shard evaluates **every surface-bound class against every row in its slice**: missing auth (BFLA), IDOR,
-privilege escalation, CSRF, brute force, verification code abuse, mass assignment, HTTP method tampering,
-business logic, improper input validation, session fixation/puzzling, reverse-proxy access bypass, email parser
-differential, excessive agency, API/REST/web-service security, webhook/integration security.
+Each shard triages its slice against the surface-bound classes — missing auth (BFLA), IDOR, privilege
+escalation, CSRF, brute force, verification code abuse, mass assignment, HTTP method tampering, business logic,
+improper input validation, session fixation/puzzling, reverse-proxy access bypass, email parser differential,
+excessive agency, API/REST/web-service security, webhook/integration security — then writes a dossier for each
+flagged operation covering every class that its capability implicates.
 
 These classes are sharded by *operation* rather than by *class* because they fail by comparison: an operation
-is vulnerable relative to its siblings. An agent can only see that if the siblings are in front of it as rows.
+is vulnerable relative to its siblings. That is visible only when the siblings are grouped in front of you.
 
 ### 2b. Class groups — sink-bound and asset-bound classes
 
@@ -143,11 +144,15 @@ results path):
 > Follow the skill's workflow — Source→Sink taint tracking (Step 3), business-logic/auth analysis (Step 4),
 > Judge re-verification (Step 5), and (only if `adv=` was provided) Adversarial Impact Validation (Step 6).
 >
-> **Produce a Disposition Ledger per class** in the base skill's format: binding, denominator, pasted
-> enumeration output, one row per item with evidence transcribed verbatim, a `read` range, a cited
-> disposition, and `Dispositioned: N/N`. Sort your rows by the evidence column before dispositioning —
-> operations that share a purpose but not a guard chain land next to each other, and that adjacency is what
-> surfaces the outlier.
+> **Produce a triage table and a dossier per flagged item**, in the base skill's format. Group your denominator
+> by **verbatim control signature** — the exact guard chain, not what you take it to mean. Give each
+> homogeneous group one disposition citing the shared control. Then flag for a dossier every item whose group
+> has fewer than three members, whose signature is a strict subset of a comparable group's, whose name or
+> arguments indicate a sensitive capability (credentials, tokens, verification codes, payment, export,
+> impersonation, administration, another user's identifier), or which has no signature at all.
+>
+> Do **not** emit a verdict for every item against every class. That cross-product is thousands of cells and
+> filling it produces thousands of uninformed verdicts. Depth belongs in the dossiers.
 >
 > **Read to the decision point and record every range you opened.** The declaration chain says what was
 > declared; the handler says what was routed; only the code at the end of the call chain says what the
@@ -160,8 +165,7 @@ results path):
 > Every disposition cites — `SAFE-because <guard>@file:line`, `NOT-REACHABLE — <what is absent>, per
 > file.ext:START-END`, or `FINDING VULN-nnn`. No two rows may share a disposition string.
 >
-> **Write your ledger to the exact results path you were given** — full Disposition Ledger tables, in that
-> file. Do not emit an area-level or focus-area summary in place of rows, do not move the ledger into a side
+> **Write to the exact results path you were given** — the triage table and every dossier, in that file. Do not emit an area-level or focus-area summary in place of rows, do not move the ledger into a side
 > file and leave a pointer, and do not write to a filename outside the set you were given.
 >
 > Report CONFIRMED / LIKELY findings using the skill's finding format. Do **not** write to

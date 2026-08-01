@@ -10,7 +10,7 @@ description: >
   With mode=single it runs the same procedure in one context.
 disable-model-invocation: true
 metadata:
-  version: "2.2.0"
+  version: "3.0.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -21,20 +21,22 @@ metadata:
 
 A driver command around the [`llm-sast-scanner`](../llm-sast-scanner/SKILL.md) skill. It performs an
 exhaustive security audit of an entire repository by **enumerating what must be examined before examining it**,
-then requiring a disposition for every enumerated item.
+then triaging by control signature and spending depth on what stands out.
 
 <!-- WORKLIST-CONTRACT:START -->
 **WORKLIST COVERAGE CONTRACT (`contract=worklist-v1`)**
-- Coverage is `rows dispositioned / rows enumerated` — two integers from a pasted command output, never a claim.
+- Coverage is `items triaged / items enumerated` plus `dossiers written / items flagged` — integers from a
+  pasted command output, never a claim.
 - Three denominators, built before analysis: `W1` attack surface, `W2` sink sweep hits, `W3` asset files.
-- Every class verdict is a table with one row per denominator item. A class verdict is never a sentence.
-- Every row carries evidence transcribed verbatim, the `read` line range actually opened, and a cited
-  disposition: FINDING `VULN-nnn` / SAFE-because `<guard>@file:line` / NOT-REACHABLE `— <absent>, per file:START-END`.
-- The `read` range runs to the **decision point** — the code that implements the behavior or establishes its
-  absence — following calls out of a delegating handler. A row that stops at the routing layer is unfinished.
-- No two rows share a disposition string. A callee's name is never a clearance.
-- The run is done when every row of every applicable denominator is dispositioned and the challenge pass over
-  `SAFE` rows on mixed-guard surfaces has run.
+- Each denominator produces a **triage table** (every item, grouped by verbatim control signature) and a
+  **dossier** for each flagged item. Depth goes to the flagged set, not spread evenly across a cross-product.
+- Flag on observable properties: group of fewer than three members; signature a strict subset of a comparable
+  group's; sensitive capability in the name or arguments; no signature at all.
+- A dossier carries the `Read:` trail to the **decision point** — through callees, out of a delegating handler
+  — plus what the item does, what an attacker controls, and a cited verdict with severity rationale.
+- A callee's name is never a clearance. Generating dispositions with a script is not analysis.
+- The run is done when every enumerated item sits in a group, every flagged item has a dossier, and the
+  challenge pass over group dispositions on mixed-control surfaces has run.
 - A denominator too large for one context is a shard boundary. It is never a licence to summarize.
 <!-- WORKLIST-CONTRACT:END -->
 
@@ -86,7 +88,7 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 ## Prerequisite
 
 Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-scanner/SKILL.md). Its
-**Disposition Ledger** section defines the output format this skill's contract is built on; its Step 1 defines
+**Triage, then Depth** section defines the output format this skill's contract is built on; its Step 1 defines
 how the worklists are built. Load reference files from `references/` on demand. All step numbers (Step 1–7),
 the Judge protocol, the false-positive guardrails, the severity model, and the report structure are defined
 there and MUST be used.
@@ -197,7 +199,7 @@ does, because W1 is sorted and sliced, and its slice arrives as rows, not as pro
 (surface-bound classes belong to the shards). Results go to
 `.llm-sast-scanner-cache/deep-<lens>-results.md`.
 
-**Write to exactly these six filenames, one file per lens, each containing full Disposition Ledger tables.** Do
+**Write to exactly these six filenames, one file per lens, each containing its triage table and dossiers.** Do
 not merge two lenses into a combined file, do not invent a filename outside this set, and do not move a ledger
 into a side artifact and leave a summary in its place. An area-level or focus-area verdict table is not a
 ledger — it is the class-level clearance this whole contract exists to replace. Consolidation reads these files
@@ -234,9 +236,9 @@ Launch one subagent:
 > is incomplete — re-run that agent and overwrite before consolidating, otherwise partial results merge as if
 > the agent were exhaustive.
 >
-> Then **reconcile coverage against the worklists**: sum each agent's Dispositioned/Denominator pairs and
+> Then **reconcile coverage against the worklists**: sum each agent's triaged/enumerated and dossier/flagged pairs and
 > confirm the surface shards collectively cover every row of `W1` exactly once, with no gaps and no overlaps.
-> Re-run any shard whose row range diverges. **Any class where Dispositioned < Denominator is INCOMPLETE** —
+> Re-run any shard whose item range diverges. **Any class with untriaged items or missing dossiers is INCOMPLETE** —
 > either re-run it or name it in the report as incomplete. Never present a partial class as cleared.
 >
 > Read all results files and `architecture-threat-model.md`. Merge and de-duplicate findings (same **entry
@@ -256,7 +258,7 @@ Launch one subagent:
 > `date +%Y-%m-%d_%H-%M-%S`) using the base skill's report structure, including its **Coverage Ledger**
 > section. Append `<!-- LLM-SAST-COMPLETE base-sha=<sha> -->` as the final nonblank line.
 >
-> **Incomplete-coverage escalation:** if any class ended with Dispositioned < Denominator, the report's
+> **Incomplete-coverage escalation:** if any class ended with untriaged items or missing dossiers, the report's
 > **Executive Summary MUST open with a prominent warning** naming those classes and their shortfall, noting
 > that the audit is INCOMPLETE for them and recommending manual review or a re-scan. Do not present a partial
 > scan as exhaustive.
@@ -273,7 +275,7 @@ Launch one subagent:
 
 This is the body. It runs in ONE context — either the whole `mode=single` run, or a single parallel-mode
 subagent. When run as a parallel-mode subagent, STOP after COVERAGE RECONCILIATION, write your findings +
-Disposition Ledgers + coverage arithmetic to your results file, append the completion sentinel
+triage table + dossiers + coverage arithmetic to your results file, append the completion sentinel
 `<!-- LLM-SAST-COMPLETE agent=<id> contract=worklist-v1 base-sha=<sha> dispositioned=<D>/<T> -->` as the last
 line, and SKIP the adversarial pass and report (D3 owns those).
 
@@ -320,14 +322,20 @@ Load references for your assigned classes, gated on the stack actually present. 
 
 ### DISPOSITION DISCIPLINE
 
-Every class you own produces a **Disposition Ledger** in the base skill's format: binding, denominator,
-enumeration output, one row per item carrying evidence, a `read` range, and a cited disposition, then
-`Dispositioned: N/N`. Beyond that format:
+Every class you own produces a **triage table** and a **dossier per flagged item** in the base skill's
+**Triage, then Depth** format. Beyond that format:
 
-- **Read to the decision point.** The `read` cell holds every range you opened to reach the code that
+- **Triage first, then go deep.** Group your denominator by verbatim control signature, disposition the
+  homogeneous groups once each, and write a dossier for every flagged item. Do not produce a verdict for every
+  item against every class — that cross-product is thousands of cells, and filling it yields thousands of
+  uninformed verdicts. If you reach for a script to emit them, that is the signal you are filling a form
+  instead of doing the analysis.
+- **Read to the decision point.** A dossier's `Read:` trail holds every range you opened to reach the code that
   implements the behavior or establishes its absence. A handler that forwards to a service has answered
-  nothing: open the callee, append its range, and keep going until you reach real logic. A `read` cell holding
-  one short range for an operation that calls into project code is an unfinished row.
+  nothing: open the callee, append its range, and keep going until you reach real logic. One short range for an
+  item that calls into project code is an unfinished dossier.
+- **Assign severity from the class criterion and say why.** Authentication bypass and account takeover are
+  Critical. A results file whose findings all carry the same severity has defaulted rather than assessed.
 - **Never clear a row from a callee's name.** `verify*`, `check*`, `validate*`, `safe*` are hypotheses. Citing
   the call as the reason the row is safe is the highest-yield way to miss a finding — the vulnerable path is
   often the one whose name promises safety.
@@ -374,30 +382,23 @@ languages. These are shapes to look for, not patterns to paste:
 
 ### COVERAGE RECONCILIATION
 
-Run when your rows are dispositioned.
-
-- **Count.** For each class you own: `Dispositioned / Denominator`. Both integers come from the pasted
-  enumeration output. State them.
-- **Citation check.** Count rows whose disposition carries no `file:line`, and rows whose `read` cell is empty
-  or holds a single line. Both are undispositioned rows wearing a verdict. State the count and close them
-  before finalizing; a bare `NOT-REACHABLE` is indistinguishable from a skipped row and is scored as one.
-- **Delegation check.** Count rows whose `read` cell holds a single range that contains a call into project
-  code. Each is a row that stopped at a signpost. For surface-bound classes on a codebase of thin handlers this
-  count should be near zero; a high count means the shard dispositioned the routing layer and never reached the
-  logic. State the count, and re-do those rows before finalizing.
-- **Repetition check.** Sort your disposition strings and count duplicates. Identical dispositions on different
-  rows mean one judgement was copied rather than N judgements made — every row cites its own read range, so
-  genuine per-row work produces distinct strings. Redo every duplicated row by opening its body. Report the
-  duplicate count in your results file even when it is zero; it is the cheapest signal that a ledger was filled
-  rather than worked.
-- **Challenge pass.** Re-open every `SAFE-because` row on a surface whose peers have **mixed** evidence
-  (some operations guarded, some not; some branches escaped, some raw). Mixed evidence is where the bug lives.
-  Confirm each cited guard is on that row's own path, in current code. Any row you cannot re-confirm becomes a
-  finding or NOT-YET-EVALUATED — never a silent carry-forward.
-- **Gap closure.** Any row without a disposition, and any class without a denominator, is an open gap. Close it
-  before finalizing. A gap-closing pass adds any new finding to the ledger.
-- **State the result explicitly**: `Dispositioned D/T rows across C classes; G gaps remaining` — and if `G > 0`,
-  say which. A results file claiming full coverage with open gaps is worse than one that admits them.
+Run when your triage table and dossiers are complete.
+- **Triage integrity.** State: items enumerated, groups formed, items flagged, dossiers written. Flagged must
+  equal dossiers. Every enumerated item belongs to exactly one group — no item unassigned, none in two.
+- **Flag-trigger audit.** Re-walk the four flag triggers against your groups mechanically. A group of one or
+  two that you did not flag is a miss, and it is the single most likely place a real finding is sitting.
+- **Citation check.** Count dossier verdicts carrying no `file:line`, and `Read:` trails that are empty or a
+  single line. Both are unfinished dossiers wearing a verdict.
+- **Severity spread.** Report the count per severity. All findings in one bucket means severity was defaulted,
+  not derived — re-derive each from its class criterion before finalizing.
+- **Challenge pass.** Re-open every group disposition on a surface whose members have **mixed** controls (some
+  operations guarded, some not; some branches escaped, some raw). Mixed controls are where the bug lives.
+  Confirm the cited guard actually covers every member of that group. Any member it does not cover leaves the
+  group and gets a dossier — never a silent carry-forward.
+- **Gap closure.** Any item not in a group, any flagged item without a dossier, and any class without a
+  denominator is an open gap. Close it before finalizing; a gap-closing pass adds any new finding.
+- **State the result explicitly**: `T items enumerated, G groups, F flagged, F dossiers, X gaps` — and if
+  `X > 0`, say which. A results file claiming completeness with open gaps is worse than one that admits them.
 
 **Coverage is not depth.** Every row dispositioned means every enumerated item got a verdict once. It does not
 mean the analysis saturated. When the challenge pass keeps converting `SAFE` rows into findings, say so in your
@@ -415,7 +416,7 @@ Be deliberately adversarial toward your own citations here.
 Write `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) to the current directory using
 the base skill's report structure, including the **Coverage Ledger**. Record `base-sha`. Append
 `<!-- LLM-SAST-COMPLETE base-sha=<sha> -->` as the final nonblank line. If any class ended with
-Dispositioned < Denominator, the Executive Summary must open with the incomplete-coverage warning.
+any class has untriaged items or missing dossiers, the Executive Summary must open with the incomplete-coverage warning.
 
 Then update `project-memory.md` per the base skill's Project Memory Protocol.
 
