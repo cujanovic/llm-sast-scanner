@@ -5,16 +5,13 @@ description: >
   Invoke explicitly as "llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
   By DEFAULT (mode=parallel) it dispatches one subagent per vulnerability lens — each runs the convergence loop
-  (Steps 1-5) constrained to its lens through the mandatory five-pass floor until convergence-eligible at pass 5+
-  with 100% line coverage — then a consolidation subagent
+  (Steps 1-5) constrained to its lens until convergence with 100% line coverage — then a consolidation subagent
   merges results, runs Adversarial Impact Validation (Step 6) once, independently verifies every finding's
   citations against the source, and writes a timestamped consolidated report.
-  With mode=single it runs the mandatory five-pass floor in one context — each role pass spans all on-allowlist
-  lens groups, batching references one lens group at a time within the role when context requires it
-  (strongest convergence/coverage guarantee).
+  With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.19.1"
+  version: "1.16.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -25,93 +22,9 @@ metadata:
 
 A driver command around the [`llm-sast-scanner`](../llm-sast-scanner/SKILL.md) skill. It performs an
 exhaustive, convergence-driven, line-by-line security audit of an entire repository passed as an argument.
-**By default it parallelizes the audit across subagents — one per vulnerability lens** — each executing the
-mandatory five-pass role sequence within its assigned lens, then consolidates
-their results with a single final adversarial pass. **Single-context mode** runs the same five mandatory role
-passes across all on-allowlist lens groups in one session.
-
-<!-- FIVE-PASS-CONTRACT:START -->
-**MANDATORY FIVE-PASS CONTRACT (`contract=five-pass-v1`)**
-- Passes 1–5 are mandatory for every deep-scan lens. A zero-new pass before pass 5 does not satisfy convergence.
-- Pass 1 — Surface inventory: entry points, input inventory, behavioral sink families, candidate ledger.
-- Pass 2 — Class sweep: every on-allowlist class, intra-file source→sink traces, preliminary dispositions.
-- Pass 3 — Differential analysis: peer controls, state machines, trust boundaries, inconsistent guards.
-- Pass 4 — Cross-file analysis: callers/callees through helpers, services, clients, middleware, and downstream transitions.
-- Pass 5 — Negative-verdict challenge: rerun structural sweeps, challenge every clearance, close inventory gaps, and run variants.
-- At pass 5 or later, +0 new means converged; +N new requires another pass, up to pass 10.
-<!-- FIVE-PASS-CONTRACT:END -->
-
-<!-- SOURCE-SNAPSHOT-CONTRACT:START -->
-**IMMUTABLE SOURCE SNAPSHOT CONTRACT (`source-fingerprint-v2`)**
-- Prepare or verify one stable, owner-only immutable snapshot before threat modeling or any skip decision.
-- Ordinary and deep agents read source only from that snapshot and report original target-relative paths.
-- Every lens artifact and final report records the snapshot's 64-hex source fingerprint.
-- Reuse requires strict shell artifact validation for the expected lens and current fingerprint.
-- Immediately before a completion sentinel, verify the live tree against the snapshot; mismatch invalidates and restarts the run.
-- Cleanup occurs only after a successful final report; interrupted runs retain the snapshot for safe resume.
-<!-- SOURCE-SNAPSHOT-CONTRACT:END -->
-
-## Ordinary orchestration parity (`AGENTS.md`)
-
-Strict shell artifact validation for the expected lens and current v2 fingerprint — **completion marker alone never authorizes skip**. Run at most **one active orchestration per target directory and `.llm-sast-scanner-cache/`** at a time; concurrent whole scans against the same target/cache are unsupported — serialize externally. This implementation does not provide safe shared cleanup under concurrency. Initialize `ORDINARY_LENS_RERAN=0` before Step 2 lenses; **`new-scan` sets `ORDINARY_LENS_RERAN=1` and re-runs every lens.**
-
-The parallel orchestrator in `AGENTS.md` uses the same immutable snapshot contract for ordinary Steps 1–3:
-
-```bash
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot prepare \
-  --target "<dir>" --cache "<dir>/.llm-sast-scanner-cache"
-CURRENT_SNAPSHOT="$(cat "<dir>/.llm-sast-scanner-cache/snapshot-current")"
-SNAPSHOT_ROOT="${CURRENT_SNAPSHOT}/tree"
-CURRENT_FP="$(cat "${CURRENT_SNAPSHOT}/source-fingerprint.txt")"
-```
-
-Step 2 skips a lens only after:
-
-```bash
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact shallow \
-  --file "<dir>/.llm-sast-scanner-cache/<lens>-results.md" \
-  --expected-lens "<lens>" \
-  --expected-fingerprint "$CURRENT_FP"
-```
-
-Step 3 skip requires **`ORDINARY_LENS_RERAN=0`**, all six `artifact shallow` passes, `artifact report`, and `snapshot verify` (all exit 0):
-
-```bash
-if [ "$ORDINARY_LENS_RERAN" -ne 0 ]; then exit 1; fi
-for lens in injection access-auth crypto-data server-side protocol-infra hardening-platform; do
-  bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact shallow \
-    --file "<dir>/.llm-sast-scanner-cache/${lens}-results.md" \
-    --expected-lens "$lens" \
-    --expected-fingerprint "$CURRENT_FP" || exit 1
-done
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact report \
-  --file "<dir>/.llm-sast-scanner-cache/final-report.md" \
-  --expected-fingerprint "$CURRENT_FP"
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot verify \
-  --target "<dir>" --cache "<dir>/.llm-sast-scanner-cache"
-```
-
-If any lens reran in this invocation (`ORDINARY_LENS_RERAN=1`, including `new-scan`), regenerate the report — do not skip Step 3.
-
-Step 3 generate writes the report body first, then runs snapshot verify immediately before the completion sentinel, appends the sentinel, validates with `artifact report`, updates project memory, and runs snapshot cleanup:
-
-```bash
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot verify \
-  --target "<dir>" --cache "<dir>/.llm-sast-scanner-cache"
-```
-
-```bash
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact report \
-  --file "<dir>/.llm-sast-scanner-cache/final-report.md" \
-  --expected-fingerprint "$CURRENT_FP"
-```
-
-```bash
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot cleanup \
-  --cache "<dir>/.llm-sast-scanner-cache"
-```
-
-Never update project memory or run cleanup before successful snapshot verify and report sentinel validation.
+**By default it parallelizes the audit across subagents — one per vulnerability lens** — and consolidates
+their results with a single final adversarial pass. A single-context mode is available for the strongest
+convergence guarantee.
 
 ## Arguments
 
@@ -122,9 +35,7 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 - `<dir>` — the path to the repository/directory to audit. Use this value wherever the prompt below
   references the target directory. If no `<dir>` is provided, default to the current working directory
   (`.`) and audit it.
-- `mode` — `parallel` (default) dispatches one subagent per lens, each running passes 1–5 within its assigned
-  lens; `single` runs the mandatory five-pass floor in one context, executing each role across all on-allowlist
-  lens groups.
+- `mode` — `parallel` (default) dispatches one subagent per lens; `single` runs the whole loop in one context.
 - `adv` — severities for the final Adversarial Impact Validation pass (default `critical,high,medium`).
 - `lens` — **internal**: restrict the Convergence Loop Procedure to a single lens. Set automatically by
   parallel-mode subagents; you normally do not pass this by hand.
@@ -132,14 +43,15 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
   (still 100% line-by-line — never a delta). It (1) ignores the skip-if-results-exist short-circuit and
   re-runs every lens, (2) consumes `project-memory.md` as an **active plan** to re-verify prior findings,
   quiet re-confirmed false-positives, and **deep-dive hotspots**, and (3) refreshes `scan-plan.md`. Omit
-  `new-scan` for the default **resume** behavior (skip lenses whose deep results already pass `artifact deep` for the expected lens and `$CURRENT_FP`; **`new-scan` always re-runs every lens**). See **Iterative Improvement Across Runs**.
+  `new-scan` for the default **resume** behavior (skip lenses whose results already exist **and are marked
+  complete** — see the completion-sentinel rule in Step D2). See **Iterative Improvement Across Runs**.
 
 ## Execution Modes
 
 | Mode | Behavior | When |
 |------|----------|------|
-| **parallel** (default) | Run **Parallel Orchestration** below: D1 analysis → one subagent per lens runs the **Convergence Loop Procedure** fixed to its assigned lens through all five mandatory role passes → consolidation subagent merges, runs the single adversarial pass, writes the report. | Default. Faster wall-clock; each lens completes its five-pass floor in its own isolated context. |
-| **single** | Skip the orchestration; run the **Convergence Loop Procedure** once in this session — each mandatory role pass spans all on-allowlist lens groups (batch references one lens group at a time within the role when context requires it; never substitute lens rotation for a required role) — then the final adversarial pass + report inline. | `mode=single`, or when subagents are unavailable, or when you want one context to own the ledger + coverage map end-to-end. |
+| **parallel** (default) | Run **Parallel Orchestration** below: D1 analysis → one subagent per lens runs the **Convergence Loop Procedure** constrained to its lens → consolidation subagent merges, runs the single adversarial pass, writes the report. | Default. Faster wall-clock; each lens converges in its own isolated context. |
+| **single** | Skip the orchestration; run the **Convergence Loop Procedure** once in this session across ALL lenses (rotating the lens each pass), then the final adversarial pass + report inline. | `mode=single`, or when subagents are unavailable, or when you want one context to own the ledger + coverage map end-to-end. |
 
 > **No recursion:** parallel-mode subagents run the **Convergence Loop Procedure** directly (as if `mode=single
 > lens=<their lens>`). They MUST NOT re-invoke this `llm-sast-scanner-full-scan-loop` wrapper, or it would
@@ -153,7 +65,10 @@ run's memory as a plan — not by scanning less. The mechanics:
 
 1. **Fresh, not resumed.** `new-scan` ignores the "skip lens whose results file exists" rule (that rule is
    only for *resuming* an interrupted run). Re-run every lens; overwrite the previous `deep-*-results.md`.
-2. **`architecture-threat-model.md` reuse is fingerprint-gated.** Reuse it only when its recorded `source-fingerprint:` line matches `CURRENT_FP` (from the published snapshot). Pre-fingerprint or mismatched threat models are stale — **regenerate** by running Step 1 over `SNAPSHOT_ROOT` — the code changed, so entry points / detected stack / the stack-gated allowlist may have too. Continue recording `git rev-parse HEAD` for history, but do not use SHA as the freshness authority.
+2. **`architecture-threat-model.md` reuse is SHA-gated.** Reuse it only when `project-memory.md`'s `last-scanned-sha`
+   equals `git rev-parse HEAD` (stack provably unchanged). If the SHA differs (or is `unknown`, or the file
+   is missing), **regenerate** it — the code changed, so entry points / detected stack / the stack-gated
+   allowlist may have too. A stale `architecture-threat-model.md` silently drops newly-applicable lenses.
 3. **Memory drives DEPTH and ORDER, never COVERAGE.** Per the base skill's Project Memory Protocol
    (*hints, never authority*), `new-scan` uses memory to:
    - **re-verify** every `open` confirmed finding (fixed? still open? regressed?) and flip its status;
@@ -205,22 +120,21 @@ recorded SHA no longer resolves (history rewritten / force-push / shallow clone)
 the deep-dive and the `scan-plan.md` fall back to `## Hotspots` + prior confirmed-finding files only.
 **100% line-by-line coverage is unaffected** (the full sweep never depended on git); only the *prioritization*
 narrows. In this state, treat **all** memory entries as stale and re-verify them (per the base Project Memory
-Protocol's `unknown`-SHA rule). Threat-model reuse remains **fingerprint-gated** via `CURRENT_FP`; do not regenerate solely because SHA is unknown when the fingerprint still matches.
+Protocol's `unknown`-SHA rule), and regenerate `architecture-threat-model.md` every run (staleness can't be proven).
 
-**Mode note:** the file artifacts above (fingerprint-gated `architecture-threat-model.md` reuse, `scan-plan.md`) are produced in
-**D1**, which only runs in parallel mode. Under `mode=single` (D1 is skipped), call snapshot prepare **inline at the start of the loop, before pass 1**, and apply snapshot verify inline in **FINAL ADVERSARIAL PASS** immediately before Step 6/report (restart from snapshot prepare on mismatch). The memory-driven depth
+**Mode note:** the file artifacts above (SHA-gated `architecture-threat-model.md` reuse, `scan-plan.md`) are produced in
+**D1**, which only runs in parallel mode. Under `mode=single` (D1 is skipped), do the same SHA-gate +
+`scan-plan.md` refresh **inline at the start of the loop, before pass 1**. The memory-driven depth
 (re-verify open findings, re-confirm-then-quiet false-positives, hotspot deep-dive) applies in **both** modes.
 
 ## Prerequisite
 
 Load the base skill first: read [`../llm-sast-scanner/SKILL.md`](../llm-sast-scanner/SKILL.md). Load
-reference files from its `references/` directory ON DEMAND, per pass role — only the subset relevant to the
-current pass role and scope (see LOOP CONTROL), rather than all 106 at once. **Parallel mode (`lens=<lens>`):**
-stay fixed to your assigned lens for all five mandatory role passes; load that lens's on-allowlist references.
-**Single mode:** each mandatory role pass spans all on-allowlist lens groups — batch references one lens group
-at a time within the role when context requires it; never substitute lens rotation for a required role. Following
-the base skill's read-once discipline, keep the current role's references loaded while you read each file so all
-classes in scope for that pass are evaluated in a single read. All step numbers (Step 1-6), the Judge
+reference files from its `references/` directory ON DEMAND, per pass — only the subset relevant to the
+current pass's analysis lens (see LOOP CONTROL), rather than all 103 at once. As the lens rotates across
+passes, every vulnerability class gets covered, without holding all references in context simultaneously.
+Following the base skill's read-once discipline, keep the current pass's lens references loaded while you read
+each file so all of that pass's classes are evaluated in a single read. All step numbers (Step 1-6), the Judge
 protocol, the false-positive guardrails, the severity model, and the report structure are defined there and
 MUST be used.
 
@@ -237,29 +151,29 @@ This "stable prefix, dynamic at the tail" discipline complements the base skill'
 
 ## Parallel Orchestration (default — `mode=parallel`)
 
-**Concurrency:** run at most one active orchestration per target directory and `.llm-sast-scanner-cache/` at a time. Concurrent whole scans against the same target/cache are unsupported — serialize them externally. This implementation does not provide safe shared cleanup under concurrency.
-
 Skip this whole section if `mode=single` was requested; go straight to the **Convergence Loop Procedure**.
 
 ### Step D1 — Analysis
 
-Ensure `.llm-sast-scanner-cache/` is in the target `.gitignore` **before** snapshot prepare. Resolve `<scanner-repo>` as the parent directory of this installed wrapper skill (the repository root that contains `scripts/scan-cache-contract.sh`, not the target being scanned). Call snapshot prepare before any cache reuse decision (pre-fingerprint artifacts are stale):
-
-```bash
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot prepare \
-  --target "<dir>" --cache "<dir>/.llm-sast-scanner-cache"
-CURRENT_SNAPSHOT="$(cat "<dir>/.llm-sast-scanner-cache/snapshot-current")"
-SNAPSHOT_ROOT="${CURRENT_SNAPSHOT}/tree"
-CURRENT_FP="$(cat "${CURRENT_SNAPSHOT}/source-fingerprint.txt")"
-```
-
-The shared coverage denominator is `${CURRENT_SNAPSHOT}/scope-manifest.b64.tsv` — the ONE shared denominator every lens subagent reads and every lens's COVERAGE VERIFICATION + D3 reconcile against.
-
-1. **Reuse** `.llm-sast-scanner-cache/architecture-threat-model.md` only when its recorded `source-fingerprint:` line exactly matches `CURRENT_FP`. Otherwise — pre-fingerprint, mismatched, or missing — **(re)generate** it: run the base skill's **Step 1 (Understand Scope)** over `SNAPSHOT_ROOT` **in this session** and write a short architecture/threat-model brief (languages & frameworks, entry points, trust boundaries, authN/authZ, data stores, outbound calls, detected stack). Record both `git rev-parse HEAD` (history only) and the current `source-fingerprint:` in the threat model. From the manifest, record the **per-lens stack-gated reference allowlist** (see REFERENCE LOADING) so each lens subagent loads its minimal set and all lenses share ONE definition of "applicable classes".
-
-2. Ensure `.llm-sast-scanner-cache/project-memory.md` exists — if absent, initialize it from the base skill's **Project Memory Protocol** template (cross-scan hints consumed by every lens as *hints, never authority*).
-
-3. Write/refresh `.llm-sast-scanner-cache/scan-plan.md` (see **Iterative Improvement Across Runs**): record `base-sha`, `source-fingerprint:` (`CURRENT_FP`), in-scope vs dropped lenses, the deep-dive file list (**the canonical set from mechanic 3**:
+If `.llm-sast-scanner-cache/architecture-threat-model.md` already exists **and** `project-memory.md`'s `last-scanned-sha`
+equals `git rev-parse HEAD` (stack provably unchanged), reuse it — **even under `new-scan`** (a same-SHA
+re-scan reuses the unchanged stack analysis; only the audit itself re-runs). Otherwise — a changed/`unknown`
+SHA, or a missing file — **(re)generate** it: run the base skill's **Step 1 (Understand
+Scope)** over `<dir>` **in this session** and write a short architecture/threat-model brief to
+`.llm-sast-scanner-cache/architecture-threat-model.md` (languages & frameworks, entry points, trust boundaries, authN/authZ, data stores,
+outbound calls, detected stack). Also run the SCOPE MANIFEST enumeration here and **persist the manifest itself
+(the in-scope file list + line counts) to `.llm-sast-scanner-cache/scope-manifest.txt`** — this is the ONE shared
+coverage denominator every lens subagent reads and every lens's COVERAGE VERIFICATION + D3 reconcile against, so
+all six provably use the identical file set + line counts (SHA-gated exactly like the threat model: regenerate it
+whenever the SHA changes or the file is missing). From that same manifest, record in
+`.llm-sast-scanner-cache/architecture-threat-model.md` the **per-lens stack-gated reference allowlist** derived from it (see REFERENCE
+LOADING) — the gateable platform/language/infra references whose signals are present, plus the always-loaded
+language-agnostic classes — so each lens subagent loads its minimal set and all lenses share ONE definition
+of "applicable classes". Also ensure `.llm-sast-scanner-cache/project-memory.md` exists — if absent, initialize it from
+the base skill's **Project Memory Protocol** template (cross-scan hints consumed by every lens as *hints,
+never authority*); add `.llm-sast-scanner-cache/` to the target repo's `.gitignore` if not already ignored. Then
+write/refresh `.llm-sast-scanner-cache/scan-plan.md` (see **Iterative Improvement Across Runs**): record
+`base-sha`, in-scope vs dropped lenses, the deep-dive file list (**the canonical set from mechanic 3**:
 `## Hotspots` + files churned since `last-scanned-sha` + prior confirmed-finding files + the prior run's thin
 areas from `## Coverage / depth notes`), prior findings to re-verify, and an
 "improve this run" list. On `new-scan`, hand each lens subagent its slice of this plan as part of its tail
@@ -267,48 +181,25 @@ block. Wait for this to finish.
 
 ### Step D2 — Parallel convergence loops (one subagent per lens)
 
-Start **one subagent per lens**, all **in parallel**. Use `CURRENT_FP` from D1's published snapshot. Skip a lens only when its deep results file already exists **AND passes full five-pass artifact validation against `CURRENT_FP`** (see **Five-pass artifact validation** below) — **resume**
-behavior — **unless `new-scan` was passed**, in which case re-run every lens fresh and overwrite prior results
-(see **Iterative Improvement Across Runs**). Before skipping, validate:
-
-```bash
-bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact deep \
-  --file "<dir>/.llm-sast-scanner-cache/deep-<lens>-results.md" \
-  --expected-lens "<lens>" \
-  --expected-fingerprint "$CURRENT_FP"
-```
-
-A results file that exists **but fails any validation check**, lacks `source-fingerprint=`, or carries a mismatched fingerprint is a
-crashed / partial / pre-contract / stale run: do NOT skip it and do NOT trust its contents — RE-RUN that lens and
-overwrite the partial file. Existence alone is never proof of completion.
-
-**Five-pass artifact validation** (reject and re-run the lens if ANY check fails — same rules D3 applies):
-- Terminal sentinel present: `<!-- LLM-SAST-COMPLETE lens=<lens> contract=five-pass-v1 source-fingerprint=<hex> passes=<N> coverage=100% convergence=<status> -->`
-- Pass log has at least five entries; pass numbers are consecutive, ascending, with no gaps or duplicates
-- Passes 1–5 use the required roles in contract order: 1 Surface inventory, 2 Class sweep, 3 Differential analysis, 4 Cross-file analysis, 5 Negative-verdict challenge
-- Sentinel `passes=<N>` equals the pass-log entry count (and equals the highest pass number)
-- Final pass +0 at pass 5 or later → sentinel and body `## CONVERGENCE STATUS` (when present) must both claim `converged`
-- Final pass +N new at pass 5–9 → artifact is **incomplete** (another pass was mandatory; re-run the lens)
-- Final pass +N new at pass 10 → sentinel and body must both claim `NOT CONVERGED (hit pass-10 hard cap; last pass +N new)`
-- Final pass +N new must not claim `converged`
-- Body `## CONVERGENCE STATUS` and sentinel `convergence=` must agree when both are present
-- **Peer-generalization clearance gate (all lenses):** `artifact deep` rejects any class Clearance Record whose
-  `SAFE-because` disposition generalizes a peer control across "sensitive flows", "similar endpoints", or
-  equivalent plural middleware language without per-hit `file:line` dispositions or an explicit cited finding for
-  each outlier (see **PEER-DIFFERENTIAL CLEARANCE GATE** under LOOP CONTROL)
+Start **one subagent per lens**, all **in parallel**. Skip any lens whose deep results file already exists
+**AND ends with the `<!-- LLM-SAST-COMPLETE ... -->` completion sentinel** (**resume** behavior) — **unless
+`new-scan` was passed**, in which case re-run every lens fresh and overwrite prior results (see **Iterative
+Improvement Across Runs**). A results file that exists **but lacks the terminal sentinel is a crashed / partial
+run** (the lens died before COVERAGE VERIFICATION): do NOT skip it and do NOT trust its contents — RE-RUN that
+lens and overwrite the partial file. Existence alone is never proof of completion.
 Give each subagent the instruction below as a **byte-identical static preamble**, then append the per-lens
 variables (lens, class list, results file from the table — **plus, on `new-scan`, the lens's `scan-plan.md`
 slice**: its deep-dive/hotspot files and the prior findings to re-verify) as a short **tail block** — do not
 splice those variables into the middle of the shared text (see **Context & cache efficiency**), so all lens
 subagents share one cacheable prefix:
 
-> Read `.llm-sast-scanner-cache/architecture-threat-model.md` for context, `${CURRENT_SNAPSHOT}/scope-manifest.b64.tsv`
-> as your coverage denominator (the shared in-scope manifest D1 published — use it as-is; do NOT
-> rebuild your own list, so every lens reconciles against ONE identical denominator), `CURRENT_FP` as the run's authoritative
-> fingerprint (record its value in your terminal sentinel), and `.llm-sast-scanner-cache/project-memory.md` as **hints,
+> Read `.llm-sast-scanner-cache/architecture-threat-model.md` for context, `.llm-sast-scanner-cache/scope-manifest.txt`
+> as your coverage denominator (the shared in-scope file list + line counts D1 persisted — use it as-is; do NOT
+> rebuild your own list, so every lens reconciles against ONE identical denominator; only re-enumerate per the
+> GROUND RULES if that file is missing or stale), and `.llm-sast-scanner-cache/project-memory.md` as **hints,
 > never authority** (base skill's **Project Memory Protocol**: never skip a line or auto-dismiss a class; a
 > false-positive entry suppresses a re-report only after you re-confirm its rationale in the current code).
-> Scan source only from `SNAPSHOT_ROOT` and cite **original target-relative paths** in every finding. Do **not** write to `project-memory.md` — Step D3 is the single writer. **If your tail block includes a
+> Do **not** write to `project-memory.md` — Step D3 is the single writer. **If your tail block includes a
 > `scan-plan.md` slice (this is a `new-scan`):** additionally re-verify each prior finding it lists — report
 > each as fixed / still-open / regressed — and give its hotspot/deep-dive files an extra-scrutiny pass
 > (second-order flows, multi-finding attack paths), **in addition to, never instead of,** your lens's 100%
@@ -318,13 +209,11 @@ subagents share one cacheable prefix:
 > `.llm-sast-scanner-cache/architecture-threat-model.md` — or derive it from the SCOPE MANIFEST per REFERENCE LOADING if a reused
 > architecture-threat-model.md lacks it (always-load the language-agnostic classes, skip only stacks whose files are
 > absent, and load when unsure). Execute the loop's
-> convergence phase: multi-pass Steps 1–5 (taint tracking, business-logic/auth, Judge) with the mandatory
-> five-pass floor (passes 1–5 unconditional; convergence eligible only at pass 5+ with +0 new),
+> convergence phase: multi-pass Steps 1–5 (taint tracking, business-logic/auth, Judge) until convergence,
 > applying the ledger + 100% line-coverage discipline to your lens. **Do NOT run the final Adversarial Impact
 > Validation pass, do NOT write a timestamped report, and do NOT re-invoke the full-scan-loop wrapper.** Write
-> Judge-passed CONFIRMED / LIKELY findings, plus your final coverage result, **Pass log** (one entry per pass,
-> all five mandatory roles for passes 1–5), and **CONVERGENCE STATUS** section (`converged` or `NOT CONVERGED`)
-> to the results file below. In the "Classes applied" section, **every class that did not produce a finding MUST be recorded as a
+> Judge-passed CONFIRMED / LIKELY findings, plus your final coverage result and pass log, to the results file
+> below. In the "Classes applied" section, **every class that did not produce a finding MUST be recorded as a
 > base-skill Clearance Record** (Surface + the structural-shape sweep(s) run from the KEYWORD-ANCHORING GUARD
 > table with hit counts + each hit's `file:line` taint disposition) — a one-line `SAFE (no <library>)` /
 > `excluded (no <keyword>)` is INVALID and is treated as a NOT-YET-EVALUATED class-coverage gap (see the EVIDENCE
@@ -335,13 +224,9 @@ subagents share one cacheable prefix:
 > Patterns sections. The only non-report dispositions are FALSE POSITIVE (cite the positive guard) or NEEDS
 > CONTEXT (report under Unverifiable).
 > **COMPLETION SENTINEL (required — the LAST line of your results file):** only after COVERAGE VERIFICATION
-> passes, append the terminal marker
-> `<!-- LLM-SAST-COMPLETE lens=<lens> contract=five-pass-v1 source-fingerprint=<hex> passes=<N> coverage=100% convergence=<converged | NOT CONVERGED (...)> -->`
-> where `<hex>` is `CURRENT_FP` and `<N>` is the total pass count and must match the pass log. Record each pass in a **Pass log** section
-> using `- **Pass N — <role> (+M new):** …` with the five mandatory roles (Surface inventory, Class sweep,
-> Differential analysis, Cross-file analysis, Negative-verdict challenge) for passes 1–5. This sentinel is the
-> ONLY thing that tells D2-resume and D3 a lens finished vs. crashed mid-write, so write it ONLY when the file
-> is truly complete; if you stop early / run out of budget, leave it off so the lens is re-run.
+> passes, append the terminal marker `<!-- LLM-SAST-COMPLETE lens=<lens> coverage=100% convergence=<converged | NOT CONVERGED (...)> -->`.
+> This sentinel is the ONLY thing that tells D2-resume and D3 a lens finished vs. crashed mid-write, so write it
+> ONLY when the file is truly complete; if you stop early / run out of budget, leave it off so the lens is re-run.
 
 | Lens | Deep results file | Vulnerability classes (reference lenses) |
 |------|-------------------|------------------------------------------|
@@ -350,7 +235,7 @@ subagents share one cacheable prefix:
 | crypto-data | `.llm-sast-scanner-cache/deep-crypto-data-results.md` | weak crypto/hash, information disclosure (incl. LLM02 sensitive disclosure), insecure cookie, trust boundary, client-IP / network-origin trust (XFF spoofing), shared-client cache/dedup cross-user leak, cleartext transmission, certificate/TLS validation, system prompt leakage (LLM07), privacy / data protection (PII) |
 | server-side | `.llm-sast-scanner-cache/deep-server-side-results.md` | SSRF, path traversal/LFI/RFI, client-side path traversal, server-side prototype pollution, insecure deserialization, arbitrary file upload, JNDI injection, race conditions, insecure temp file, file permissions, batch/ETL/mainframe data-pipeline security |
 | protocol-infra | `.llm-sast-scanner-cache/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, correlation/tracing header injection, CORS misconfiguration, WebSocket security (CSWSH), postMessage security, XSSI / JSONP / Reflected File Download (RFD), clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), GraphQL denial of service, regex injection/ReDoS, CVE patterns, Content Security Policy (CSP) weaknesses, XS-Leaks |
-| hardening-platform | `.llm-sast-scanner-cache/deep-hardening-platform-results.md` | output encoding, format string injection, improper input validation (semantic-type mismatch / missing format validation), ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security (incl. TYPO3 CMS — Fluid / TypoScript / Extbase; loads `php_security.md` on PHP signals and `typo3_security.md` on TYPO3 signals, per REFERENCE LOADING), Android security, iOS security, Electron / desktop app security, C/C++ memory safety, smart contract security (Solidity/EVM and/or Solana/Anchor and/or Move/Aptos/Sui and/or TRON and/or Substrate/XCM — loads `smart_contract_security.md`, `solana_smart_contract_security.md`, `move_aptos_security.md`, `tron_smart_contract_security.md`, and/or `substrate_pallet_security.md` per REFERENCE LOADING), IaC security (Terraform/CloudFormation/ARM/Bicep/Pulumi), subdomain takeover (dangling-DNS candidate flagging in IaC/zone files), Kubernetes / cloud orchestration, CI/CD & container security, nginx / web-server configuration, supply chain security (SRI / provenance / lifecycle scripts) |
+| hardening-platform | `.llm-sast-scanner-cache/deep-hardening-platform-results.md` | output encoding, format string injection, improper input validation (semantic-type mismatch / missing format validation), ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security (incl. TYPO3 CMS — Fluid / TypoScript / Extbase; loads `php_security.md` on PHP signals and `typo3_security.md` on TYPO3 signals, per REFERENCE LOADING), Android security, iOS security, Electron / desktop app security, C/C++ memory safety, smart contract security (Solidity/EVM and/or Solana/Anchor — loads `smart_contract_security.md` on EVM signals (*.sol/*.vy) and `solana_smart_contract_security.md` on Solana/Anchor signals, per REFERENCE LOADING), IaC security (Terraform/CloudFormation/ARM/Bicep/Pulumi), subdomain takeover (dangling-DNS candidate flagging in IaC/zone files), Kubernetes / cloud orchestration, CI/CD & container security, nginx / web-server configuration, supply chain security (SRI / provenance / lifecycle scripts) |
 
 Each lens subagent independently reads every in-scope line for its own coverage proof, so total read cost
 scales with the number of lenses — this is the cost of per-lens parallelism. **Wait for all subagents to
@@ -358,35 +243,19 @@ finish before proceeding.**
 
 ### Step D3 — Consolidation + single adversarial pass
 
-Launch one subagent. Its prompt MUST include the **KEYWORD-ANCHORING GUARD** structural-shape sweep table from
-LOOP CONTROL below, verbatim — the NEGATIVE-VERDICT AUDIT tells this agent to run those sweeps itself, and the
-table lives only in this file (the base skill's equivalent is its *Behavior, not keyword* / **Clearance Record**
-rule, which carries no sweep table). Without it the audit has nothing to run:
+Launch one subagent:
 
 > First confirm all SIX `.llm-sast-scanner-cache/deep-*-results.md` files exist (injection, access-auth, crypto-data,
-> server-side, protocol-infra, hardening-platform) **AND that each passes full five-pass artifact validation against `CURRENT_FP`**
-> (same rules as D2 resume — reject if ANY check fails; **refuse mixed-fingerprint result sets** — every lens sentinel must carry the same `source-fingerprint=` as `CURRENT_FP`):
-> ```bash
-> bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact deep \
->   --file "<dir>/.llm-sast-scanner-cache/deep-<lens>-results.md" \
->   --expected-lens "<lens>" \
->   --expected-fingerprint "$CURRENT_FP"
-> ```
-> - Terminal sentinel: `contract=five-pass-v1`, `source-fingerprint=<hex>`, `coverage=100%`, `passes=<N>`, `convergence=<status>`
-> - Pass log: ≥5 entries; consecutive ascending pass numbers; passes 1–5 bound in order to Surface inventory, Class sweep, Differential analysis, Cross-file analysis, Negative-verdict challenge
-> - Sentinel `passes=<N>` equals pass-log entry count
-> - Final pass +0 at pass 5+ → `converged` (body `## CONVERGENCE STATUS` must agree when present)
-> - Final pass +N at pass 5–9 → **incomplete** (re-run the lens)
-> - Final pass +N at pass 10 → `NOT CONVERGED (hit pass-10 hard cap; last pass +N new)` (body must agree)
-> - Final pass +N must not claim `converged`
-> If any lens is **missing OR fails validation** — crashed / partial / pre-contract — re-run it and overwrite
-> before consolidating, otherwise partial findings would be merged as if the lens were exhaustive and class
-> coverage would be <100%.
+> server-side, protocol-infra, hardening-platform) **AND that each ends with the `<!-- LLM-SAST-COMPLETE ... -->`
+> completion sentinel**. If any is **missing OR lacks the sentinel** — a crashed / partial lens whose file may hold
+> only some passes — that lens is incomplete: re-run it and overwrite the partial file before consolidating,
+> otherwise partial findings would be merged as if the lens were exhaustive and class coverage would be <100%.
 > Then **reconcile every lens against the one shared denominator**: confirm each lens's coverage checklist covers
-> the SAME file set + line counts as `${CURRENT_SNAPSHOT}/scope-manifest.b64.tsv` (the denominator D1 published);
+> the SAME file set + line counts as `.llm-sast-scanner-cache/scope-manifest.txt` (the denominator D1 persisted);
 > re-run any lens whose file set or line counts diverge from that manifest (it was run against a different tree).
 > Then read all `.llm-sast-scanner-cache/deep-*-results.md` files and `.llm-sast-scanner-cache/architecture-threat-model.md`. Merge and de-duplicate findings across
-> lenses (same **entry point** + `file:line` + vuln class = one finding; **independent entry points that share a sink line stay separate** — per the base skill's *(entry point → sink)* finding-identity rule, so many routes funneling through one shared helper/DAO/render sink yield one finding **per route**, not one collapsed finding). **Exception (Platform Auth Gap):** keep a single all-NONE-auth surface rollup that lists every affected `METHOD /route` — do not expand it back into N duplicate missing-auth rows; still keep separate findings for distinct secondary bugs on those routes. Run the base `llm-sast-scanner` skill's **Step 6 (Adversarial Impact Validation)** ONCE over the full consolidated set **against `SNAPSHOT_ROOT` source only** with the `adv` value (default
+> lenses (same **entry point** + `file:line` + vuln class = one finding; **independent entry points that share a sink line stay separate** — per the base skill's *(entry point → sink)* finding-identity rule, so many routes funneling through one shared helper/DAO/render sink yield one finding **per route**, not one collapsed finding). Run the base `llm-sast-scanner` skill's **Step 6
+> (Adversarial Impact Validation)** ONCE over the full consolidated set with the `adv` value (default
 > `adv=critical,high,medium`), apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts. Then, as an
 > **independent gate** (you did NOT author these per-lens findings), run the base skill's **Citation & Evidence
 > Verification** over every surviving finding: re-open each cited `file:line` and confirm the path exists, the
@@ -397,9 +266,7 @@ rule, which carries no sweep table). Without it the audit has nothing to run:
 > `excluded (no <keyword>)` that lacks a valid Clearance Record (Surface + structural-shape sweep(s) with hit
 > counts + per-hit `file:line` disposition) — such a class is NOT-YET-EVALUATED, so send it back to its lens for
 > a real read+trace pass (or, if re-running the lens is not possible, run the class's KEYWORD-ANCHORING GUARD
-> structural sweep(s) yourself, open every hit, and record findings). Also reject **peer-generalization**
-> clearances: any `SAFE-because … on sensitive flows/endpoints/mutations` without per-hit `file:line` proof or a
-> cited outlier finding fails `artifact deep` (see **PEER-DIFFERENTIAL CLEARANCE GATE**). Independently re-derive at least one
+> structural sweep(s) yourself, open every hit, and record findings). Independently re-derive at least one
 > Clearance Record per lens from the source to confirm the sweep hits and dispositions are real. Also enforce
 > the **cross-lens shared-primitive rule**: a sink family owned by more than one class/lens (e.g. dynamic-key
 > write = SSPP + mass_assignment; query-from-input = SQLi + NoSQLi + ES) must be read + traced by at least one
@@ -413,28 +280,12 @@ rule, which carries no sweep table). Without it the audit has nothing to run:
 > floor (a Hardening Note is valid ONLY for a gap behind an already-effective layer). A "no gadget / no impact"
 > demotion is accepted only if the lens proved the negative process-globally (framework/stdlib option reads + app
 > `if (obj.<flag>)` reads + attacker-controlled key AND value all ruled out); object-local reasoning ("the object
-> is just serialized downstream") is INVALID — send those back to the lens or promote to floor. Write the report body from `SNAPSHOT_ROOT` findings with **original target-relative paths**, then **immediately before the report completion sentinel** verify the live tree still matches the snapshot:
-> ```bash
-> bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot verify \
->   --target "<dir>" --cache "<dir>/.llm-sast-scanner-cache"
-> ```
-> On verify mismatch, **discard the current run's artifacts and report**, refresh D1 (snapshot prepare + threat model as needed), and **re-run all six lenses**. When verify succeeds, write a
+> is just serialized downstream") is INVALID — send those back to the lens or promote to floor. Then write a
 > single timestamped report `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) using the
 > base skill's report structure (Executive Summary; Critical/High/Medium/Low/Informational; Unverifiable;
-> Hardening Notes; Positive Patterns; Remediation Priority), append `<!-- LLM-SAST-COMPLETE source-fingerprint=<hex> -->` as the final nonblank line (where `<hex>` is `CURRENT_FP`), then confirm the report passes:
-> ```bash
-> bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact report \
->   --file "<dir>/sast_report-<timestamp>.md" \
->   --expected-fingerprint "$CURRENT_FP"
-> ```
-> Only after successful verify and report sentinel validation, update project memory and run:
-> ```bash
-> bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot cleanup \
->   --cache "<dir>/.llm-sast-scanner-cache"
-> ```
-> Never update memory or cleanup before successful verify and sentinel validation. **Non-convergence escalation:** read each lens's
-> CONVERGENCE STATUS from its `deep-<lens>-results.md`; if ANY lens reports `NOT CONVERGED` (hit the pass-10
-> hard cap while the final pass was still surfacing new bugs), the **Executive Summary MUST open with a prominent warning** that the audit did not saturate and is
+> Hardening Notes; Positive Patterns; Remediation Priority). **Non-convergence escalation:** read each lens's
+> CONVERGENCE STATUS from its `deep-<lens>-results.md`; if ANY lens reports `NOT CONVERGED` (stopped at the
+> pass-5 ceiling or the pass-10 hard cap), the **Executive Summary MUST open with a prominent warning** that the audit did not saturate and is
 > likely INCOMPLETE for those lens(es) — name them and their last-pass new-bug counts, note that 100% coverage
 > is not convergence, and recommend manual deep review or a re-scan of the still-productive areas. Do not
 > present a partially non-converged scan as exhaustive. Also print a combined coverage summary and a per-lens pass log (include each lens's convergence status). Finally, as the
@@ -456,16 +307,13 @@ mode you are done here — do NOT also run the single-context procedure below.**
 
 ## Convergence Loop Procedure (single context)
 
-This is the loop body. It runs in ONE context — either the whole `mode=single` run (each mandatory role pass
-spans all on-allowlist lens groups; batch one lens group at a time within the role when context requires it;
-never substitute lens rotation for a required role), or a single parallel-mode lens subagent (when invoked with
-`lens=<lens>`, stay fixed to that lens's classes for all five mandatory role passes; treat "convergence" as
-"pass 5 or later surfaced no new bug **in that lens**"). When run as a
-parallel-mode lens subagent, STOP after COVERAGE VERIFICATION, write findings + coverage result + **Pass log** +
-**CONVERGENCE STATUS** section to the lens's `.llm-sast-scanner-cache/deep-<lens>-results.md`, **append the
-`<!-- LLM-SAST-COMPLETE lens=<lens> contract=five-pass-v1 source-fingerprint=<hex> passes=<N> coverage=100% convergence=<status> -->`
+This is the loop body. It runs in ONE context — either the whole `mode=single` run (all lenses, rotating per
+pass), or a single parallel-mode lens subagent (when invoked with `lens=<lens>`, restrict every pass to that
+lens's classes and treat "convergence" as "a pass surfaced no new bug **in that lens**"). When run as a
+parallel-mode lens subagent, STOP after COVERAGE VERIFICATION, write findings + coverage result + CONVERGENCE
+STATUS to the lens's `.llm-sast-scanner-cache/deep-<lens>-results.md`, **append the `<!-- LLM-SAST-COMPLETE ... -->`
 completion sentinel as the file's last line (only after COVERAGE VERIFICATION passes — it is what marks the file
-  finished vs. crashed; `<hex>` must match `CURRENT_FP`)**, and SKIP the FINAL ADVERSARIAL PASS + OUTPUT (Step D3 owns those).
+finished vs. crashed)**, and SKIP the FINAL ADVERSARIAL PASS + OUTPUT (Step D3 owns those).
 
 Execute the following prompt against the target `<dir>`. Treat `"dir as argument"` as the `<dir>` value
 provided to this command.
@@ -493,19 +341,31 @@ GROUND RULES
   dependency trees (node_modules/, vendor/, third_party/); build/generated output (dist/, build/, out/,
   *.min.js, *.bundle.js, source maps); lock files (package-lock.json, yarn.lock, pnpm-lock.yaml,
   poetry.lock, Gemfile.lock, etc.); and **the scanner's OWN outputs — the `.llm-sast-scanner-cache/` directory
-  (architecture-threat-model.md, project-memory.md, `*-results.md`, final-report.md) and any
+  (architecture-threat-model.md, project-memory.md, scope-manifest.txt, `*-results.md`, final-report.md) and any
   `sast_report-*.md` reports it wrote** (they are tool artifacts, not code under review). If a specific dependency
   must be reviewed, do it deliberately — not as part of the line-by-line repo sweep.
-- SCOPE MANIFEST (immutable snapshot — before pass 1): the coverage denominator is `${CURRENT_SNAPSHOT}/scope-manifest.b64.tsv` from the published snapshot. **In parallel mode, D1 calls snapshot prepare — read that manifest as-is from the published snapshot directory.** **In single mode, call snapshot prepare unconditionally here before pass 1** (ensure `.llm-sast-scanner-cache/` is in `.gitignore` first). Resolve `<scanner-repo>` as the parent directory of this installed wrapper skill (the repository root that contains `scripts/scan-cache-contract.sh`, not the target being scanned):
+- SCOPE MANIFEST (build ONCE, before pass 1): the enumerated in-scope file list + line counts is the coverage
+  denominator. **Reuse the shared manifest when it exists:** if `.llm-sast-scanner-cache/scope-manifest.txt`
+  is present (D1 writes it) and current for this SHA, READ it as the denominator instead of re-enumerating — so
+  every lens shares ONE reconcilable denominator. Otherwise enumerate it deterministically with the shell and
+  **persist it** to `.llm-sast-scanner-cache/scope-manifest.txt` so later lenses/consolidation reuse the same list:
   ```bash
-  bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot prepare \
-    --target "<dir>" --cache "<dir>/.llm-sast-scanner-cache"
-  CURRENT_SNAPSHOT="$(cat "<dir>/.llm-sast-scanner-cache/snapshot-current")"
-  SNAPSHOT_ROOT="${CURRENT_SNAPSHOT}/tree"
-  CURRENT_FP="$(cat "${CURRENT_SNAPSHOT}/source-fingerprint.txt")"
+  cd "dir as argument"
+  mkdir -p .llm-sast-scanner-cache
+  { git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f; } \
+    | grep -ivE '(^|/)(node_modules|vendor|third_party|dist|build|out|\.git|\.llm-sast-scanner-cache|coverage)/' \
+    | grep -ivE '\.(min\.js|bundle\.js|map|png|jpe?g|gif|webp|ico|pdf|zip|gz|jar|woff2?|ttf|mp4|so|dylib|dll|exe|wasm)$' \
+    | grep -ivE '(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Gemfile\.lock|go\.sum|Cargo\.lock|sast_report-.*\.md)$' \
+    | tr '\n' '\0' | xargs -0 grep -Il '' 2>/dev/null \
+    | tr '\n' '\0' | xargs -0 wc -l 2>/dev/null | sort -n \
+    | tee .llm-sast-scanner-cache/scope-manifest.txt
   ```
-  Read source only from `SNAPSHOT_ROOT`; cite **original target-relative paths** in findings. Only after snapshot prepare, **reuse** a fingerprint-gated `architecture-threat-model.md` when its `source-fingerprint:` line matches `CURRENT_FP`; otherwise regenerate it over `SNAPSHOT_ROOT`.
-  The snapshot excludes `.llm-sast-scanner-cache/` and `sast_report-*.md` from scope — **critical on a non-git target**, where without those exclusions the tool would read its own memory/results/reports back in as "source" and inflate the denominator. Seed the LOOP CONTROL coverage map from `${CURRENT_SNAPSHOT}/scope-manifest.b64.tsv` and tick each file off as its lines are read.
+  The `.llm-sast-scanner-cache` dir-exclude and the `sast_report-*.md` name-exclude keep the scanner's OWN
+  artifacts out of scope — **critical on a non-git target**, where the `find .` fallback honors no `.gitignore`,
+  so without them the tool would read its own memory/results/reports back in as "source" and inflate the
+  denominator. Seed the LOOP CONTROL coverage map from this list and tick each file off as its lines are read.
+  (Enumerating/persisting once also avoids re-listing the tree on every pass and lets D3 reconcile every lens
+  against one denominator.)
 - REFERENCE LOADING (stack-gated by the SCOPE MANIFEST — coverage-safe; DEFAULTS TO LOAD):
   - Gate on the files actually present (NOT a coarse "detected stack" label), detected two cheap and
     deterministic ways: (1) filename/extension over the SCOPE MANIFEST; and (2) a one-shot `rg -l` CONTENT
@@ -525,9 +385,6 @@ GROUND RULES
       * electron_desktop_security ← "electron"/"electron-builder"/"@electron/remote"/"nw" in package.json / BrowserWindow|BrowserView|webPreferences|contextBridge|nodeIntegration in *.js|*.mjs|*.cjs|*.ts|*.jsx|*.tsx / *preload* / electron-builder.{yml,yaml,json} / nwjs config
       * smart_contract_security ← *.sol / *.vy
       * solana_smart_contract_security ← Solana/Anchor programs (Rust): *.rs carrying a Solana/Anchor signal (`solana_program`·`anchor_lang`·`declare_id!`·`#[program]`·`#[account]`) / Anchor.toml / Cargo.toml deps `solana-program`·`anchor-lang`·`spl-token`. (A Solana/Anchor signal is REQUIRED — bare *.rs is generic Rust, NOT Solana; content-probe the manifest for these markers.)
-      * move_aptos_security ← *.move / Move.toml / aptos_framework·sui::·module  content signals
-      * tron_smart_contract_security ← TRON deploy signals (tronbox.js / tronweb / @tronprotocol / shasta·nile / T-address scripts) — load **in addition to** smart_contract_security when TRON markers appear on *.sol or deploy configs
-      * substrate_pallet_security ← Substrate/FRAME/XCM (frame_support·construct_runtime!·pallet_*·xcm_executor·polkadot-sdk / Cumulus in Cargo.toml or runtime sources)
       * aspnet_security_misconfig ← *.cs / *.aspx / *.cshtml / *.csproj / web.config
       * jndi_injection, expression_language_injection ← JVM sources *.java / *.kt / *.scala (+ pom.xml / build.gradle)
       * server_side_prototype_pollution ← Node backend (*.js / *.ts + package.json)
@@ -564,10 +421,6 @@ GROUND RULES
     smuggling_desync, http_response_splitting, host_header_poisoning, cors_misconfiguration, web_cache_deception,
     denial_of_service, regex_injection_redos, log_injection, file_permissions, output_encoding, api_security,
     trust_boundary, xff_spoofing (client-IP/network-origin trust — derived from request handling, not a stack), etc.
-  - EXTERNAL CONTEXT (ungated — ALWAYS read, never part of the stack gate above): read every `*.md` in the base
-    skill's `context/` directory per base skill Step 2 → **External Context** — trusted docs on out-of-repo systems,
-    used to resolve cross-boundary taint; cite any file that changed a verdict in the finding's `Context:` line.
-    No `*.md` there ⇒ silent no-op.
   - MAINTENANCE INVARIANT (keep this gate in sync with references/): EVERY platform/language/stack/protocol-bound
     reference MUST have a gate entry above. When a new ecosystem-specific reference is added to references/, add
     its detection signal here in the SAME change — otherwise it silently falls into "ALL OTHER / ALWAYS load" and
@@ -584,19 +437,19 @@ GROUND RULES
     it by reading + tracing the sink. Record "excluded — not in stack" ONLY when the surface itself is absent
     (see the KEYWORD-ANCHORING GUARD under LOOP CONTROL).
   - LOAD ONCE PER RUN: load each needed reference at most once; keep its key sources/sinks/sanitizers in
-    working notes and do NOT re-load full reference files on later passes when the same reference set recurs.
+    working notes and do NOT re-load full reference files on later passes when a lens recurs.
 - During the loop, run Steps 1–5 ONLY: Source→Sink taint tracking (Step 3), business-logic/auth analysis
   (Step 4), and Judge re-verification (Step 5). DO NOT run Adversarial Impact Validation (Step 6) inside the
   loop — no adv during passes.
 - Only carry forward CONFIRMED / LIKELY findings that survive the Judge. Apply all false-positive guardrails
   (trusted-VPN/internal-only, bounded-DoS, operator self-harm, etc.).
-LOOP CONTROL (five-pass mandatory floor; convergence eligible only at pass 5+; absolute hard cap of 10; NO adv
-inside the loop)
+LOOP CONTROL (convergence-driven; pass 5 is the CEILING for the converge phase, extendable to an absolute
+cap of 10; NO adv inside the loop)
 - Maintain (a) a running ledger of every finding already reported (by **entry point + file:line + vuln class** — so distinct entry points that share a sink line are NOT collapsed; per the base skill's *(entry point → sink)* finding-identity rule, a shared helper/DAO/render sink reached by many routes is one ledger entry **per route**) so you never
   re-report the same issue, and (b) a coverage map of which files / line-ranges have already been READ.
 - READ vs. ANALYZE (token discipline): read each in-scope file's full text ONCE — during pass 1, or the
   first pass that reaches it — and keep notes sufficient to reason about it later. A subsequent "pass" is a
-  re-ANALYSIS of already-read code under a different pass role, NOT a fresh full re-read. Re-read a file's bytes
+  re-ANALYSIS of already-read code under a different lens, NOT a fresh full re-read. Re-read a file's bytes
   only when (a) it still has unread lines, or (b) you are tracing a cross-file data-flow chain into it. This
   keeps total read cost ~1x the repo while still getting multi-lens depth. (Optional accelerator: `rg` for
   high-risk sink keywords to decide where to look first — but you MUST still read every in-scope line for
@@ -619,38 +472,17 @@ inside the loop)
     node-serialize)` — is **INVALID** and is scored as **NOT-YET-EVALUATED** (a class-coverage GAP), not a
     clearance. This gate **overrides** the "rg is a prioritizer only" / "keep read cost ~1x" guidance: any file a
     structural sweep hits MUST be opened and traced regardless of read budget.
-  - **PEER-DIFFERENTIAL CLEARANCE GATE (all lenses, all classes — Pass 3 is mandatory, this gate is the written
-    form).** A class-level negative verdict that cites a control seen on *peer* routes/handlers/mutations is
-    **INVALID** unless the same Clearance Record lists **every structural-sweep hit** on that surface with its
-    own `file:line` disposition (guard present `@file:line`, absent → finding, or **not-reachable** with proof).
-    Forbidden disposition shapes include `SAFE-because reCAPTCHA on sensitive flows`,
-    `SAFE-because rate limiting on auth endpoints`, `SAFE-because CSRF middleware on mutations`, or any plural
-    area-wide generalization without per-entry-point proof. Naming one outlier in prose without a `file:line` or
-    `VULN-` citation does not repair the record — each sweep hit still needs its own disposition line.
-    **Pass 3 differential analysis MUST run before you may clear any class whose peers mix guarded and unguarded
-    entry points** (credential/verification operations, handlers carrying an authorization annotation but not
-    the module's auth middleware, export vs import pipelines, escaped vs raw query branches, etc.).
-
-    | Rationalization (INVALID clearance) | Required instead |
-    |-------------------------------------|------------------|
-    | "Peers use reCAPTCHA → whole class SAFE" | List each mutation/handler with recaptcha present or absent at `file:line` |
-    | "Only swept the gated endpoints" | Open every structural-sweep hit, including unguarded siblings |
-    | "Pass 3 implied by class sweep" | Pass 3 peer diff is mandatory when mixed guards exist on the same surface |
-    | "One outlier is a separate finding so class is clear" | Outlier may be a finding, but remaining hits still need dispositions — cannot clear the class in one line |
-
   - **IMPACT GATE — a confirmed reachable sink is a finding; missing impact is a severity floor, not a drop**
     (base skill's **IMPACT-ANCHORING GUARD**, the disposition-side mirror of this guard). Once a structural sweep
-    hit clears gates 1–4 (tainted origin, no upstream guard, no structural mitigation, reachable in prod) **and is
-    not eliminated by Judge gate 6** (same-actor same-outcome path), you may NOT bury it because its highest-impact
-    chain is unproven. A missing downstream gadget/weaponization LOWERS the severity to the class floor
-    (prototype-pollution / dynamic-key write sink without a proven gadget = **Low**), it never converts the finding
-    into a Hardening Note / "defense-in-depth" / "no-gadget" non-finding. Judge gate 5 forbids *vague wording*, not
-    *unproven weaponization* — the sink behavior (e.g. "arbitrary write to `Object.prototype` process-wide") IS the
-    concrete impact. "No gadget / no impact" counts only if proven PROCESS-GLOBALLY (framework/stdlib option reads +
-    app `if (obj.<flag>)` reads + attacker-controlled key AND value all ruled out); object-local reasoning is
-    INVALID. Non-report dispositions: FALSE POSITIVE (cited positive guard), NEEDS CONTEXT (Unverifiable), or
-    gate 6 FALSE POSITIVE / Hardening Note when a cited path already grants the same actor the same outcome.
-    Gate 6 Hardening Notes are not the forbidden "missing gadget → note" burial.
+    hit clears gates 1–4 (tainted origin, no upstream guard, no structural mitigation, reachable in prod), you may
+    NOT bury it because its highest-impact chain is unproven. A missing downstream gadget/weaponization LOWERS the
+    severity to the class floor (prototype-pollution / dynamic-key write sink without a proven gadget = **Low**),
+    it never converts the finding into a Hardening Note / "defense-in-depth" / "no-gadget" non-finding. Judge
+    gate 5 forbids *vague wording*, not *unproven weaponization* — the sink behavior (e.g. "arbitrary write to
+    `Object.prototype` process-wide") IS the concrete impact. "No gadget / no impact" counts only if proven
+    PROCESS-GLOBALLY (framework/stdlib option reads + app `if (obj.<flag>)` reads + attacker-controlled key AND
+    value all ruled out); object-local reasoning is INVALID. The only non-report dispositions remain FALSE
+    POSITIVE (cited positive guard) or NEEDS CONTEXT (reported under Unverifiable).
   - **A stack-gate skip is NOT a class verdict.** REFERENCE LOADING may skip a reference only when its
     behavioral **surface** is *provably absent* — never merely because a specific enumerated library keyword is
     absent. If the surface exists in a non-enumerated flavor — a datastore/query-DSL not on the sql/nosql/graphql
@@ -686,45 +518,33 @@ inside the loop)
     | **Deserialization of external bytes** (insecure deserialization, XXE) | `rg -n '(JSON\.parse|parse|load|unserialize|deserialize|fromXML|xml2js|yaml)\s*\('` — then trace whether the bytes are attacker-origin (not server-encrypted/-signed) |
     | **User-influenced format / regex** (format string, ReDoS) | non-literal format arg to a log/format call · `new RegExp(` from input · static regex with nested quantifiers over overlapping classes matched against input |
     | **User-influenced redirect / header / URL** (open redirect, SSRF, response splitting, header injection) | `res.redirect`/`Location`/`setHeader` from input · outbound client URL/host built from input |
-    | **Server-assisted verification / OTP self-approval** (verification code abuse, business logic) | a flag or mode parameter that switches a verification call from claimant-supplied proof to server-completed (`rg -n '(auto\|skip\|bypass\|internal\|trusted\|force)[A-Z_]?\w*(Verif\|Validat\|Challeng\|Otp\|Code)'`) · a backend call whose **return value** is the challenge rather than an out-of-band delivery (`rg -n '=\s*await\s+\w+\.(invite\|provision\|issue\|generate\|fetch\|get)\w*\('`) · **peer differential:** list every credential/verification entry point on the module with its full guard chain, so guarded and unguarded siblings sit side by side — apply **PEER-DIFFERENTIAL CLEARANCE GATE** |
-- Iteration = one analysis pass that covers the entire in-scope repo under the current pass role (reading any
-  not-yet-read files in full as it goes). Passes 1–5 are **unconditional** — you MUST run all five mandatory roles
-  before convergence is eligible, even when an earlier pass surfaces zero new bugs.
-- Record every pass in a **Pass log** section: `- **Pass N — <role> (+M new):** …` where `<role>` is one of the
-  five mandatory roles for passes 1–5 (Surface inventory, Class sweep, Differential analysis, Cross-file analysis,
-  Negative-verdict challenge); passes 6–10 continue Negative-verdict challenge or deepen the same role axes.
+- Iteration = one analysis pass that covers the entire in-scope repo under the current lens (reading any
+  not-yet-read files in full as it goes).
 - After each pass, compare against the ledger:
-    * Passes 1–4: always continue to the next mandatory pass, regardless of whether the pass surfaced new bugs.
-    * Pass 5+: if the pass surfaced at least one NEW, previously-unreported bug → record it, then run ANOTHER pass
-      (up to pass 10).
-    * Pass 5+: if the pass finds NO new bug → STOP the loop (`converged`).
+    * If the pass surfaced at least one NEW, previously-unreported bug → record it, then run ANOTHER pass.
+    * If a pass finds NO new bug → STOP the loop (converged).
 - Stop conditions (in priority order):
-    1. MANDATORY FLOOR: passes 1–5 MUST run in order with their required roles. A zero-new pass before pass 5
-       does NOT satisfy convergence — continue unconditionally.
-    2. CONVERGENCE (eligible at pass 5+): when pass 5 or later surfaces NO new bug, STOP (`converged`).
-    3. EXTENSION: while each pass at or beyond 5 keeps surfacing at least one NEW bug and pass count is below 10,
-       continue one pass at a time.
-    4. ABSOLUTE HARD CAP = pass 10: STOP after pass 10 regardless, even if new bugs are still appearing
-       (`NOT CONVERGED`).
-- If a coverage-gap or class-gap closing pass adds a finding after a prior zero-new pass, invalidate any prior
-  convergence claim and require at least one later zero-new analysis pass before the artifact may claim
-  `converged`.
-- On each mandatory pass, apply the role defined in the **MANDATORY FIVE-PASS CONTRACT** above (pass 1: Surface
-  inventory; pass 2: Class sweep; pass 3: Differential analysis; pass 4: Cross-file analysis; pass 5:
-  Negative-verdict challenge). **Parallel mode (`lens=<lens>`):** execute all five role passes within your assigned
-  lens — do not switch lens groups. **Single mode:** each role pass spans all on-allowlist lens groups from the
-  Step D2 table; batch references one lens group at a time within the role when context requires it — never
-  substitute lens rotation for a required role. Passes 6–10: continue Negative-verdict challenge or deepen prior
-  role axes (e.g. concurrency/TOCTOU, trust-boundary, header/transport, supply-chain, full cross-file taint chains).
-  Load only the reference files relevant to the current pass role and scope (not all 106 at once) to keep context
-  cost bounded. Across all passes you MUST apply EVERY applicable class — every class on the stack-gated allowlist
-  (see REFERENCE LOADING) — in all six lens groups from the Step D2 table, including the cloud/infrastructure and
-  web-platform classes (IaC, Kubernetes/cloud, CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering,
-  privacy/PII, supply-chain) whenever their files are present. The D2 table, gated by the allowlist, is the
-  authoritative class set for class coverage.
-COVERAGE VERIFICATION (run whenever the loop stops — at convergence or the pass-10 hard cap)
+    1. CONVERGENCE (primary rule): the moment ANY pass surfaces NO new bug, STOP immediately — whether that
+       is pass 2 or pass 9. Convergence always wins; do not keep running just to reach pass 5.
+    2. CEILING = pass 5: if passes are STILL finding new bugs at pass 5, you MAY extend past it; if they are
+       not, you will already have converged at or before pass 5.
+    3. EXTENSION: while each pass at or beyond 5 keeps surfacing at least one NEW bug, continue one pass at a
+       time.
+    4. ABSOLUTE HARD CAP = pass 10: STOP after pass 10 regardless, even if new bugs are still appearing.
+- On each pass, vary your analysis lens to find what earlier passes missed (e.g., pass 1: injection/SSRF/
+  path-traversal; pass 2: auth/IDOR/business-logic; pass 3: deserialization/DoS/race conditions; pass 4:
+  crypto/secrets/info-disclosure/supply-chain; pass 5: cross-file data-flow chains and prompt-injection;
+  passes 6–10: rotate/deepen these lenses, e.g. concurrency/TOCTOU, trust-boundary, header/transport,
+supply-chain, and full cross-file taint chains). Load only the reference files relevant to the current
+pass's lens (not all 103 at once) to keep context cost bounded. Across all passes you MUST apply EVERY
+applicable class — every class on the stack-gated allowlist (see REFERENCE LOADING) — in all six lens groups
+from the Step D2 table, including the cloud/infrastructure and web-platform classes (IaC, Kubernetes/cloud,
+CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-chain) whenever their files
+are present — not only the example lenses named above. The D2 table, gated by the allowlist, is the
+authoritative class set for class coverage.
+COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-5 ceiling, or the pass-10 cap)
 - Before finalizing, reconcile the coverage map against the shared SCOPE MANIFEST
-  (`${CURRENT_SNAPSHOT}/scope-manifest.b64.tsv`, published in D1 — NOT a privately rebuilt list, so every lens
+  (`.llm-sast-scanner-cache/scope-manifest.txt`, persisted in D1 — NOT a privately rebuilt list, so every lens
   reconciles against the identical denominator) and confirm that EVERY line of EVERY in-scope file (per the
   GROUND RULES scope + exclusions) was actually read (not sampled) — every manifest file marked fully read
   `1..total_lines`. Produce a coverage checklist: each file with its total line count and the line ranges read.
@@ -752,34 +572,28 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence or the pas
   NOT 100% coverage.
 - State the final coverage result explicitly (e.g., "100% of N in-scope files / M lines read; K paths
   excluded; all C applicable classes applied").
-- CONVERGENCE STATUS (distinct from coverage — record in a dedicated `## CONVERGENCE STATUS` section AND in the
-  terminal sentinel). **Coverage is not convergence:** 100% line + class coverage only means every line was read
-  under every applicable class once, NOT that analysis depth saturated. The section's first line and the sentinel
-  `convergence=` value MUST agree. Record one of:
-  - `converged` — the loop stopped because pass 5 or later surfaced NO new bug. The finding set is exhaustive
-    to this loop's depth.
-  - `NOT CONVERGED` — the loop stopped while the final pass was STILL surfacing new bugs at the **pass-10
-    absolute hard cap**. Append the stop reason and the last pass's new-bug count — e.g.
-    `NOT CONVERGED (hit pass-10 hard cap; last pass +3 new)` — plus which lens(es)/area(s) were still
-    productive. This means the finding set is **likely INCOMPLETE** — more undiscovered vulns probably remain —
-    and MUST be escalated into the report (see OUTPUT / Step D3), not just the loop log.
+- CONVERGENCE STATUS (distinct from coverage — record it alongside the coverage result). **Coverage is not
+  convergence:** 100% line + class coverage only means every line was read under every applicable class once,
+  NOT that analysis depth saturated. Record one of:
+  - `converged` — the loop stopped because a pass surfaced NO new bug (at convergence, or already converged at
+    or before the pass-5 ceiling). The finding set is exhaustive to this loop's depth.
+  - `NOT CONVERGED` — the loop stopped while the final pass was STILL surfacing new bugs, i.e. analysis depth
+    did NOT saturate. This covers EITHER forced stop: you stopped at the **pass-5 ceiling** without extending,
+    OR you hit the **pass-10 absolute hard cap**. Append which stop and the last pass's new-bug count — e.g.
+    `NOT CONVERGED (stopped at pass-5 ceiling; last pass +1 new)` or `NOT CONVERGED (hit pass-10 hard cap;
+    last pass +3 new)` — plus which lens(es)/area(s) were still productive. This means the finding set is
+    **likely INCOMPLETE** — more undiscovered vulns probably remain — and MUST be escalated into the report
+    (see OUTPUT / Step D3), not just the loop log.
 FINAL ADVERSARIAL PASS (run ONCE, after the loop is fully done)
 - SINGLE-AGENT MODE ONLY. If you are a parallel-mode lens subagent (`lens=<lens>` set), SKIP this section and
-  the OUTPUT section — write your Judge-passed findings + coverage result + **Pass log** + **`## CONVERGENCE STATUS`**
-  section (`converged`, or `NOT CONVERGED` — hit pass-10 hard cap while the final pass was still surfacing new bugs,
-  with the last pass's new-bug count) to `.llm-sast-scanner-cache/deep-<lens>-results.md`, **append the
-  `<!-- LLM-SAST-COMPLETE lens=<lens> contract=five-pass-v1 source-fingerprint=<hex> passes=<N> coverage=100% convergence=<status> -->`
-  sentinel as the last line (only once coverage is verified — a file without it, without
-  `contract=five-pass-v1`, or with a mismatched `source-fingerprint=` is treated as a crashed/pre-contract/stale lens and re-run)**,
+  the OUTPUT section — write your Judge-passed findings + coverage result + CONVERGENCE STATUS (`converged`, or
+  `NOT CONVERGED` — noting which forced stop, pass-5 ceiling or pass-10 hard cap, and the last pass's new-bug
+  count) to `.llm-sast-scanner-cache/deep-<lens>-results.md`, **append the `<!-- LLM-SAST-COMPLETE ... -->` sentinel
+  as the last line (only once coverage is verified — a file without it is treated as a crashed lens and re-run)**,
   and stop; Step D3 runs the adversarial pass once over the merged set and surfaces any lens's non-convergence in
   the report.
-- After the loop terminates (converged at pass 5+ or hit the pass-10 hard cap) AND coverage is verified at
-  100%, run **snapshot verify immediately before Step 6/report** (D3 parity):
-  ```bash
-  bash "<scanner-repo>/scripts/scan-cache-contract.sh" snapshot verify \
-    --target "<dir>" --cache "<dir>/.llm-sast-scanner-cache"
-  ```
-  On verify mismatch, **invalidate the run** — discard findings and **restart from snapshot prepare + pass 1** (do not proceed to Step 6 or report generation). When verify succeeds, take the FULL consolidated set of Judge-passed findings and run Adversarial Impact Validation (Step 6)
+- After the loop terminates (converged, reached the pass-5 ceiling, or hit the 10-pass cap) AND coverage is verified at
+  100%, take the FULL consolidated set of Judge-passed findings and run Adversarial Impact Validation (Step 6)
   ONE TIME over all of them with the `adv` value (default adv=critical,high,medium).
 - Apply the adversarial verdicts (STANDING / DOWNGRADED / DISPUTED / WITHDRAWN) to finalize severities.
 - Then run the base skill's **Citation & Evidence Verification** over every surviving finding: re-open each
@@ -791,26 +605,20 @@ OUTPUT (single-agent mode)
   `sast_report-<timestamp>.md`, where `<timestamp>` is the output of `date +%Y-%m-%d_%H-%M-%S`
   (e.g., `sast_report-2026-06-11_14-30-05.md`). Use the skill's report structure (Executive Summary;
   Critical/High/Medium/Low/Informational; Unverifiable; Hardening Notes; Positive Patterns; Remediation
-  Priority), with exact file paths + line numbers and concrete remediations. Record the run's
-  `source-fingerprint:` (`CURRENT_FP`) in loop metadata. Write the report body first with **original target-relative paths**. Run `snapshot verify` immediately before the completion sentinel; on mismatch restart from snapshot prepare. Append
-  `<!-- LLM-SAST-COMPLETE source-fingerprint=<hex> -->` as the final nonblank line once it is fully written (where `<hex>` is `CURRENT_FP`), then confirm the report passes:
-  ```bash
-  bash "<scanner-repo>/scripts/scan-cache-contract.sh" artifact report \
-    --file "<dir>/sast_report-<timestamp>.md" \
-    --expected-fingerprint "$CURRENT_FP"
-  ```
-  Update project memory, then run `snapshot cleanup`. Never update memory or cleanup before successful verify and sentinel validation.
+  Priority), with exact file paths + line numbers and concrete remediations. As the report's FINAL line, append
+  `<!-- LLM-SAST-COMPLETE -->` once it is fully written, so any resume/skip check can tell a finished report from
+  a crashed partial one.
 - NON-CONVERGENCE ESCALATION (report body, not just the loop log). If the CONVERGENCE STATUS was
-  `NOT CONVERGED` (hit the pass-10 hard cap while the final pass was still surfacing new bugs), the
+  `NOT CONVERGED` (EITHER forced stop — the pass-5 ceiling without extending, or the pass-10 hard cap), the
   **Executive Summary** MUST open with a prominent warning that the audit did not saturate and is likely
-  INCOMPLETE — e.g. *"NON-CONVERGENT AUDIT: new findings were still appearing when the scan stopped (hit
-  pass-10 hard cap), so more undiscovered vulnerabilities probably remain. 100% coverage was reached (every
-  in-scope line read, every applicable class applied) but analysis depth did not converge. Treat the
-  still-productive areas (<lens(es)/files>) as hotspots requiring manual deep review or a re-scan."* State
+  INCOMPLETE — e.g. *"NON-CONVERGENT AUDIT: new findings were still appearing when the scan stopped (<stopped at
+  pass-5 ceiling | hit pass-10 cap>), so more undiscovered vulnerabilities probably remain. 100% coverage was
+  reached (every in-scope line read, every applicable class applied) but analysis depth did not converge. Treat
+  the still-productive areas (<lens(es)/files>) as hotspots requiring manual deep review or a re-scan."* State
   the last pass's new-bug count. Do NOT present a non-converged scan as exhaustive. When the status was
   `converged`, add no such warning (it would be a false alarm) — optionally note the audit converged.
 - Also print a short loop log: how many passes ran, what NEW finding (if any) each pass added, the reason the
-  loop stopped (converged with no new bug at pass 5+, or hit the pass-10 hard cap), the final
+  loop stopped (converged with no new bug, reached the pass-5 ceiling, or hit the 10-pass cap), the final
   line-coverage result (100% of N in-scope files / M lines, with the per-file checklist), and the adversarial
   verdict applied to each finding.
 - Finally, as the single writer, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project

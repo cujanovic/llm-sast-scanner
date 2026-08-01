@@ -1,10 +1,13 @@
 ---
 name: llm-sast-scanner
 description: >
-  Use when reviewing source code for vulnerabilities, auditing a repository or component, tracing a specific
-  vulnerability class, performing a SAST scan, or producing a security assessment for any language or framework.
+  General-purpose Static Application Security Testing (SAST) skill for code vulnerability analysis.
+  Trigger when the user asks to: "analyze code for vulnerabilities", "review code security", "find security bugs",
+  "do a SAST scan", "check for [vulnerability type] in code", "audit source code", or requests a security
+  code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
+  Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.51.39"
+  version: "1.48.1"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -19,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 106 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 103 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -34,7 +37,7 @@ documenting the sources, sinks, and sanitizers/barriers used to detect and triag
 | **AI / LLM Application Security** | Prompt Injection (LLM01, see Injection), Insecure Output Handling (LLM05), Excessive Agency (LLM06), System Prompt Leakage (LLM07), RAG / Vector & Embedding Security (LLM08), ML Supply Chain & Data/Model Poisoning (LLM03/04), AI Editor / Agent Config Poisoning (repo poisoning) |
 | **Output & Hardening** | Output Encoding (context mismatch), Format String Injection, ASP.NET Security Misconfiguration, Hardcoded Code / Backdoor, Improper Input Validation (semantic-type mismatch / missing format validation, standalone Low) |
 | **Supply Chain** | Dependency Confusion (candidate flagging across npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo), Supply Chain Security (dependency integrity, SRI, lifecycle scripts, provenance) |
-| **Language/Platform** | PHP Security, TYPO3 CMS Security (Fluid / TypoScript / Extbase), Android Security, iOS Security, Electron / Desktop App Security, C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Solana / Anchor Program Security (Rust), Move / Aptos / Sui Module Security, TRON / TVM Smart-Contract Security, Substrate / Polkadot FRAME & XCM Pallet Security, Batch / ETL / Mainframe Data-Pipeline Security |
+| **Language/Platform** | PHP Security, TYPO3 CMS Security (Fluid / TypoScript / Extbase), Android Security, iOS Security, Electron / Desktop App Security, C/C++ Memory Safety, Smart Contract Security (Solidity/EVM), Solana / Anchor Program Security (Rust), Batch / ETL / Mainframe Data-Pipeline Security |
 
 ---
 
@@ -158,12 +161,12 @@ Based on the code being reviewed, load the appropriate reference files from `ref
 ```
 references/sql_injection.md          — SQL / ORM injection
 references/xss.md                    — Cross-site scripting
-references/ssrf.md                   — Server-side request forgery (incl. SVG/ImageMagick UNC→NTLM; syntax-only URL validators are not SSRF guards)
+references/ssrf.md                   — Server-side request forgery
 references/rce.md                    — Remote code execution
 references/environment_variable_injection.md — Env var injection: user-controlled name/value into process env (process.env/os.environ/setenv/ENV[]/SetEnvironmentVariable) → loader hijack (LD_PRELOAD/NODE_OPTIONS/PATH) or secret/flag override (CWE-99/454)
 references/idor.md                   — Insecure direct object reference
-references/authentication_jwt.md     — Auth flaws, JWT weaknesses (alg/iss/aud array wrap; whitespace-PEM HS confusion)
-references/oauth_oidc_misconfiguration.md — OAuth 2.0 / OIDC flow misconfig: weak redirect_uri match, missing state/PKCE, code reuse/race, cross-client token acceptance, unverified-email linking, implicit/ROPC, dynamic-registration SSRF, SAML signature flaws (stripping, wrapping, partial Response-only signing, comment truncation), SAML ACS/Destination/Recipient binding (CWE-287/346/601)
+references/authentication_jwt.md     — Auth flaws, JWT weaknesses
+references/oauth_oidc_misconfiguration.md — OAuth 2.0 / OIDC flow misconfig: weak redirect_uri match, missing state/PKCE, code reuse/race, cross-client token acceptance, unverified-email linking, implicit/ROPC, dynamic-registration SSRF, SAML signature-validation flaws (signature stripping, XML signature wrapping, comment truncation) (CWE-287/346/601)
 references/reverse_proxy_access_bypass.md — Reverse-proxy access bypass: authz applied to a different path representation than routing (rewrite headers X-Original-URL/X-Rewrite-URL, normalization mismatch, stale API versions, Referer/Origin gates) (CWE-863/289/436)
 references/session_puzzling.md       — Session puzzling / session-variable overloading: unauthenticated or mid-flow session keys reused as proof of full authentication (CWE-841/384)
 references/email_parser_differential.md — Email validation-vs-parsing differential: regex/split('@') accepted but mail library parses differently (encoded-words, comments, multiple @, IDN) → takeover; identity-key collisions (CWE-20/697)
@@ -177,8 +180,8 @@ references/ssi_injection.md          — Server-Side Include (SSI) injection: #e
 references/esi_injection.md          — Edge Side Include (ESI) injection: esi:include SSRF/metadata + content injection, esi:vars cookie/header theft (HttpOnly bypass) on an ESI-enabled surrogate cache/CDN (Varnish/Squid/Fastly/Akamai); gate on Surrogate-Control/esi-on/do_esi (CWE-97)
 references/xxe.md                    — XML external entity (XXE) + XSLT injection (user-controlled stylesheet → file read/write, SSRF, RCE via XSLTProcessor/php:function, .NET msxsl:script, Xalan/Saxon, EXSLT)
 references/insecure_deserialization.md    — Insecure deserialization
-references/arbitrary_file_upload.md      — Arbitrary file upload + post-upload media/variant pipelines (unsafe default loaders)
-references/privilege_escalation.md       — Privilege escalation / BFLA; check-view≠use-view (policy–execution interpretation differential)
+references/arbitrary_file_upload.md      — Arbitrary file upload
+references/privilege_escalation.md       — Privilege escalation
 references/nosql_injection.md            — NoSQL injection
 references/graphql_injection.md          — GraphQL injection
 references/graphql_dos.md                — GraphQL denial of service (depth/complexity/cost, alias/batch/directive/field overloading, circular types/fragments, pagination caps, execution timeouts, N+1 amplification)
@@ -201,7 +204,7 @@ references/business_logic.md             — Business logic flaws
 references/http_method_tamper.md         — HTTP method tampering
 references/smuggling_desync.md           — HTTP request smuggling / desync
 references/web_cache_deception.md        — Web cache deception / cache poisoning (cached personalized data, unkeyed-input poisoning)
-references/shared_client_cache_leak.md   — Cross-user leak via shared client caches / request dedup-coalescing / mutable-auth singletons / pooled-connection & thread-local reuse / module-global request state / shared LLM KV·prefix caches (in-process, all client libs & languages)
+references/shared_client_cache_leak.md   — Cross-user leak via shared client caches / request dedup-coalescing / mutable-auth singletons / pooled-connection & thread-local reuse / module-global request state (in-process, all client libs & languages)
 references/dependency_confusion.md       — Dependency confusion candidate flagging (npm/PyPI/RubyGems/Maven/Gradle/NuGet/Go/Composer/Cargo)
 references/cve_patterns.md               — Known-CVE methodology (sink+source not version, fix-pattern variant sweep); generic sinks delegated to class refs (SAST, not SCA version matching)
 references/expression_language_injection.md — Expression language injection (SpEL / OGNL)
@@ -221,7 +224,7 @@ references/host_header_poisoning.md      — Host header poisoning / email-link 
 references/clickjacking.md               — Clickjacking / missing X-Frame-Options / CSP frame-ancestors (CWE-451)
 references/log_injection.md              — Log injection / log forging (CWE-117)
 references/correlation_header_injection.md — Correlation/tracing headers (X-Request-ID/X-Correlation-ID/X-Trace-ID) taken from the request into log/path/shell/SQL/JSON/downstream sinks unsanitized (CWE-117/93/74)
-references/certificate_validation.md     — TLS certificate / hostname / pinning / revocation failures (CWE-295/297/299/322); Flutter/Dart dart:io badCertificateCallback / HttpOverrides / dio trust-all (embedded BoringSSL ≠ Android NSC)
+references/certificate_validation.md     — TLS certificate / hostname / pinning / revocation failures (CWE-295/297/299/322)
 references/cleartext_transmission.md     — Cleartext transmission, missing TLS (CWE-319/311)
 references/mass_assignment.md            — Mass assignment / autobinding of privileged fields (CWE-915)
 references/baas_security.md              — BaaS client-side authorization: Supabase/Postgres RLS disabled or `true` policies, Firebase/Firestore/RTDB/Storage rules allowing public read/write, service_role/admin keys in client bundles, anon writes, over-broad realtime (CWE-862/863/732/798)
@@ -241,26 +244,26 @@ references/xs_leaks.md                    — Cross-site leaks (timing/frame/sta
 references/privacy_data_protection.md    — Privacy / PII handling: over-collection, retention, PII in logs/URLs/third parties
 references/supply_chain_security.md      — Supply chain: unpinned deps, missing integrity/SRI, lifecycle scripts, untrusted registries
 references/api_security.md               — API / REST / web-service layer: excessive data exposure, rate limits, endpoint inventory, misconfig
-references/webhook_integration_security.md — Webhook/integration surface: outbound test/ping SSRF, webhook CRUD IDOR/BFLA, unallowlisted delivery + redirects, inbound signature/replay failures, signing-secret disclosure, third-party support/feedback/chat widget identity without server-signed JWT/HMAC (CWE-918/639/352/287)
+references/webhook_integration_security.md — Webhook/integration surface: outbound test/ping SSRF, webhook CRUD IDOR/BFLA, unallowlisted delivery + redirects, inbound signature/replay failures, signing-secret disclosure (CWE-918/639/352)
 references/mcp_security.md               — MCP (Model Context Protocol): tool poisoning, injection via tool output, over-broad/unauth servers
 references/grpc_security.md               — gRPC/gRPC-Web/Connect server-side: reflection in prod, plaintext/h2c, missing auth interceptor (per-method authz), proxy-injected identity metadata trust, -bin metadata bypass, transcoder re-exposure (CWE-306/287/319/863)
-references/iac_security.md               — Infrastructure-as-Code misconfig (Terraform/CloudFormation/ARM/Bicep/Pulumi); non-prod cloud API endpoints / audit bypass
+references/iac_security.md               — Infrastructure-as-Code misconfig (Terraform/CloudFormation/ARM/Bicep/Pulumi)
 references/subdomain_takeover.md         — Subdomain takeover candidate flagging: dangling DNS (CNAME/ALIAS) in IaC/zone files pointing at takeover-prone S3/CloudFront/PaaS/SaaS endpoints with no co-managed backing resource (CWE-350)
 references/kubernetes_cloud_security.md  — Kubernetes / cloud orchestration: privileged pods, RBAC, securityContext, secrets, NetworkPolicy
 references/cicd_container_security.md     — CI/CD pipeline + container/Docker security (PPE, untrusted inputs, root images, unpinned tags)
 references/nginx_security.md              — nginx/OpenResty config: alias traversal, CRLF/response splitting, proxy_pass SSRF, header redefinition, access-control bypass, regex ReDoS, info disclosure
 references/memory_safety_c_cpp.md        — C/C++ memory safety: buffer overflow, UAF, unsafe string funcs, integer overflow, toolchain hardening
-references/smart_contract_security.md    — Solidity/EVM smart contracts: reentrancy (incl. EIP-1153 sticky transient locks), access control (incl. hollow modifiers / EIP-7702 EOA-gate failure), unsafe delegatecall/low-level calls, integer over/underflow, oracle/MEV (incl. L2 sequencer uptime), cross-chain message auth (lzCompose / Wormhole / Across), block-height-as-wall-clock vesting, proxy-upgrade, ERC-20/721/1155, native/ERC20 dual-path msg.value asymmetry, vault deposit/withdraw rounding direction
-references/solana_smart_contract_security.md — Solana/Anchor programs (Rust): missing signer/owner/account-data checks, account-type confusion (cosplay), arbitrary CPI, Token-2022 transfer-hook bypass + transfer-fee balance-delta accounting, PDA bump canonicalization & PDA sharing, unsafe account closing (revival), duplicate mutable accounts, reinitialization, lamport/precision arithmetic (distinct account model from EVM; gate: solana_program/anchor_lang, declare_id!, #[program], Anchor.toml)
-references/move_aptos_security.md         — Move/Aptos/Sui modules: capability ability misuse (copy/store/drop on AdminCap), by-value cap consumption, unconstrained phantom tickets, Sui public(package)+entry visibility bypass, single-attester/CCTP quorum SPOF (gate: *.move, Move.toml, aptos_framework/sui::)
-references/tron_smart_contract_security.md — TRON TVM / Solidity-on-TRON: block.number vesting deltas, .transfer / Stake-2.0 silent-failure vs ETH revert (gate: tronbox/tronweb/shasta/nile/T-address deploy signals; use with smart_contract_security.md)
-references/substrate_pallet_security.md  — Substrate/Polkadot FRAME & XCM: CallFilter=Everything, unsigned extrinsics, ensure_signed-without-role (gate: frame_support/construct_runtime!/xcm_executor/pallet_*)
+references/smart_contract_security.md    — Solidity/EVM smart contracts: reentrancy, access control, unsafe delegatecall/low-level calls, integer over/underflow, oracle/MEV, proxy-upgrade, ERC-20/721/1155
+references/solana_smart_contract_security.md — Solana/Anchor programs (Rust): missing signer/owner/account-data checks, account-type confusion (cosplay), arbitrary CPI, PDA bump canonicalization & PDA sharing, unsafe account closing (revival), duplicate mutable accounts, reinitialization, lamport/precision arithmetic (distinct account model from EVM; gate: solana_program/anchor_lang, declare_id!, #[program], Anchor.toml)
+references/move_aptos_security.md         — Move / Aptos / Sui modules: resource & capability misuse, missing signer checks, global storage access control, generic type confusion (gate: *.move, Move.toml, aptos_framework/sui:: signals)
+references/tron_smart_contract_security.md — TRON / TVM contracts: TRC-20/721 pitfalls, energy/bandwidth abuse, delegatecall & permission model differences from EVM (gate: tronbox/tronweb/@tronprotocol, shasta/nile, T-address deploy scripts; loads in addition to smart_contract_security.md)
+references/substrate_pallet_security.md   — Substrate / Polkadot FRAME & XCM pallets: unchecked origins, weight/benchmark mismatch, storage-bloat DoS, unsafe XCM instruction handling (gate: frame_support, construct_runtime!, pallet_*, xcm_executor, polkadot-sdk/Cumulus in Cargo.toml)
 references/insecure_output_handling.md   — Insecure handling of LLM/model output reaching HTML/SQL/shell/HTTP/eval sinks (OWASP LLM05)
-references/excessive_agency.md           — Excessive LLM/agent functionality, permissions, or autonomy without human approval (OWASP LLM06); regex-only skill content guards are not HITL
+references/excessive_agency.md           — Excessive LLM/agent functionality, permissions, or autonomy without human approval (OWASP LLM06)
 references/system_prompt_leakage.md      — Secrets / authorization logic in system prompts; reliance on prompt secrecy (OWASP LLM07)
 references/rag_vector_security.md        — RAG / vector & embedding weaknesses: permission-blind retrieval, cross-tenant leak, indirect injection (OWASP LLM08)
 references/ml_supply_chain_poisoning.md  — AI/ML model & dataset supply chain and data/model poisoning: unsafe model load, trust_remote_code, unverified artifacts (OWASP LLM03/04)
-references/ai_editor_config_poisoning.md — Repo poisoning of AI coding agents: weaponized editor/agent config & instruction files (.cursorrules/CLAUDE.md/AGENTS.md/SKILL.md/.claude/skills/**/.mcp.json), hidden-unicode/HTML payloads, approval/YOLO-mode bypass
+references/ai_editor_config_poisoning.md — Repo poisoning of AI coding agents: weaponized editor/agent config & instruction files (.cursorrules/CLAUDE.md/AGENTS.md/SKILL.md/.mcp.json), hidden-unicode/HTML payloads, approval/YOLO-mode bypass
 references/batch_etl_pipeline_security.md — Batch / ETL / mainframe data-pipeline flaws: job-param & record-field path traversal, landing-dir TOCTOU, fixed-width/COMP-3/EBCDIC parse bounds, trailer integrity, restart double-post (CWE-22/78/367/125/707)
 ```
 
@@ -273,7 +276,6 @@ sanitizers/barriers that neutralize it. Prefer those recognized barriers when ru
   in-file signals (k8s `kind:`, CloudFormation, AI-SDK deps) — NOT a coarse stack
   label: ALWAYS load the language-agnostic classes, and load a platform/language/infra-specific reference
   (e.g. `php_security.md`, `android_security.md`, `ios_security.md`, `memory_safety_c_cpp.md`, `smart_contract_security.md`,
-  `solana_smart_contract_security.md`, `move_aptos_security.md`, `tron_smart_contract_security.md`, `substrate_pallet_security.md`,
   `aspnet_security_misconfig.md`, `iac_security.md`, `kubernetes_cloud_security.md`) ONLY when its ecosystem
   appears in the tree; when unsure, LOAD (coverage wins over tokens). This still covers every applicable
   class while skipping only provably-absent stacks.
@@ -377,7 +379,6 @@ even when a keyword grep looked clean and even if doing so exceeds the ~1x read 
 | "It uses a safe builder, not string concatenation" | A builder fed tainted input stays a sink until read + trace prove it cannot carry metacharacters/operators/keys to the engine. |
 | "The grep for `__proto__` (or `<keyword>`) found nothing" | Sinks are *shapes* (e.g. `obj[k][k2]=` from input-derived keys), not literals. |
 | "That's the other lens's / another area's job" | A shared behavioral primitive is cleared by whoever sees it, WITH a Clearance Record — never by deferral. |
-| "Peer routes have reCAPTCHA / CSRF / rate limits → class SAFE" | Peer controls prove nothing about unlisted siblings. Pass 3 differential analysis MUST enumerate every structural-sweep hit with its own `file:line` guard or absence — plural `SAFE-because … on sensitive flows` without per-hit proof is INVALID. |
 
 For each loaded vulnerability class, perform taint analysis:
 
@@ -389,18 +390,6 @@ For each loaded vulnerability class, perform taint analysis:
    - Database reads of user-supplied data, deserialized objects
    - **Event-driven / serverless / RPC entry points** — handlers invoked outside the HTTP request path still receive attacker-influenced data: serverless/cloud-function handlers (`event`/payload args), message-queue and stream consumers (Kafka, RabbitMQ, SQS/SNS, Pub/Sub, Kinesis), gRPC/RPC and GraphQL resolver methods, scheduled/cron jobs that read external state, and CLI argument/stdin parsers. Enumerate the full attack surface — including undocumented, deprecated, and debug handlers still registered — not just documented routes.
    - **Library/SDK mode** — when the target is a library, framework, or SDK with no HTTP layer, treat the parameters of public/exported API methods (those a downstream consumer can call with attacker-influenced input, e.g. parsers, deserializers, path/URL/command builders) as taint sources. Internal/private helpers and config-only setters are not sources.
-
-   **REQUIRED artifact — Input Inventory (completeness contract).** Before tracing or assigning dispositions for the current scope, write a numbered inventory of every user-controllable input you identified:
-
-   `| # | source | location (file:line) | variable | entry point | trust | disposition |`
-
-   Every inventory row MUST receive a disposition in that last column before the scope is marked complete: `CANDIDATE` (proceeds to Judge) | `SAFE` (cite guard@file:line) | `NO-MATCH` (class not applicable — say why) | `CROSS-CLASS` (hand to the owning class). A findings-only report with unresolved inventory rows is **incomplete** — go back and disposition the missing rows. "No interesting sinks" / "nothing to report" / "dashboard volume first" does **not** waive the inventory.
-
-   | Excuse | Reality |
-   |--------|---------|
-   | "No vulns — inventory is unnecessary paperwork" | Completeness is the inventory, not the finding count. SAFE/NO-MATCH rows are the work product. |
-   | "Volume over process — list bugs and move on" | Unresolved inputs are unread attack surface. Disposition every row, then report. |
-   | "Only free-text / Low validation — skip the table" | Still inventory them; disposition may be NO-MATCH or CANDIDATE, not omission. |
 
 2. **Trace Data Flow** — Follow the data through:
    - Variable assignments, function arguments, return values
@@ -494,7 +483,7 @@ For each candidate finding, answer all of the following:
 | **CONFIRMED** | All reachability/sanitization/exploitability checks pass | Include in report |
 | **LIKELY** | Most checks pass; one uncertainty remains | Include in report, flag uncertainty |
 | **NEEDS CONTEXT** | Cannot determine without runtime behavior / config / additional files | Note as "unverifiable without X" |
-| **FALSE POSITIVE** | Positive evidence the path is not a reportable bug — cite the exact file+line of the sanitization, allowlist, guard, framework auto-protection, **or** (gate 6) a same-actor same-outcome path that already grants the concrete result without this defect | Drop silently (or Hardening Note when gate 6 applies and a note is more useful than silent drop) |
+| **FALSE POSITIVE** | Positive evidence of protection found — cite the exact file+line of the sanitization, allowlist check, guard, or framework-level auto-protection that makes the sink safe | Drop silently |
 
 **Only CONFIRMED and LIKELY findings are reported.**
 
@@ -502,39 +491,32 @@ For each candidate finding, answer all of the following:
 
 #### Verification Standard (no false positives)
 
-A single pass/fail bar over the checks above: a finding is reported (CONFIRMED / LIKELY) ONLY after it clears ALL six gates. This is a generalized, all-class, language-agnostic version of a "no false positives" standard — every gate must be answered from code you actually read and traced, never assumed. Gates 1–4 restate the Judge checks as one bar (cross-referenced, not re-run); gate 5 is a distinct anti-vagueness bar; gate 6 is the same-outcome / new-capability filter.
+A single pass/fail bar over the checks above: a finding is reported (CONFIRMED / LIKELY) ONLY after it clears ALL five gates. This is a generalized, all-class, language-agnostic version of a "no false positives" standard — every gate must be answered from code you actually read and traced, never assumed. Gates 1–4 restate the Judge checks as one bar (cross-referenced, not re-run); gate 5 is a distinct anti-vagueness bar.
 
 1. **Data origin traced** — the dangerous value provably comes from an untrusted source (request/upload/header/cookie/queue-or-RPC message/DB-of-user-data/deserialized object/public-API arg), not a constant, an operator-supplied config/CLI value, or an already-validated value. (Reachability Q1 + Step 3 trace.)
 2. **No upstream guard** — you walked the full call chain (parent functions, middleware, decorators, framework) and found no auth check, allowlist, validation, or effective sanitizer that neutralizes the case before the sink. (Reachability Q3 + Sanitization Re-Evaluation.)
 3. **No structural mitigation** — the bad case is not already made impossible by the value's type/shape or a platform guarantee: a parameterized/bound query API that cannot interpolate, an auto-escaping template context, an ORM that binds, a typed/enum/fixed-width value that cannot carry the metacharacter or reach the out-of-range case (e.g. an `unsigned`/length-bounded value ruling out the negative/overflow, a size derived from the same buffer). (Sanitization Re-Evaluation + the FALSE POSITIVE "cite framework auto-protection" rule.)
 4. **Reachable in a normal deployment** — the path runs in a default/production build and config, reachable from a real entry point — not dead/commented code, and not code whose ONLY caller is example/demo/sample/test/spec/fixture/seed scaffolding. (Reachability Q2. Conditional/flag-gated or non-default-config paths are NOT force-failed here — the `Scope → Non-default config` guardrail already handles them by capping severity; do not silently drop them.)
-5. **Consequence stated concretely** — the `Impact:` names the specific attacker outcome and what it exposes or achieves (e.g. "reads any other user's order via IDOR on `GET /orders/{id}`", "runs an attacker-controlled shell command as the app user", "returns rows belonging to other tenants", "writes N bytes past a fixed-size buffer") — NOT a vague "might be exploitable", "could allow attackers", or "potential issue". **Deriving the consequence is part of the analysis, not an optional write-up:** if the flow cleared gates 1–4, work the concrete outcome out from the sink's behavior and state it — then apply gate 6 before any CONFIRMED / LIKELY report. A finding is **NEVER** demoted just because its first draft was worded vaguely — fix the wording, do not drop the bug. Fall to `NEEDS CONTEXT` ONLY when the concrete consequence genuinely cannot be determined without runtime/config/more files (e.g. an opaque third-party sink whose behavior is unknown) — the same unverifiability gates 1–4 already surface — never as a penalty for under-describing a real finding.
-
-6. **Same-outcome / new-capability (conditional).** If you can cite a specific existing path at `file:line` that already grants the **same actor** the **same outcome** without this defect, do **not** CONFIRMED — disposition FALSE POSITIVE or a Hardening Note (mechanism without new capability), and cite that path. Speculated infrastructure outside the audited repo does not count. **Does not apply when:** (a) the class is missing authentication / IDOR / authz gap whose baseline is "can reach the endpoint" (absence of auth cannot pre-authorize the protected operations); (b) the sink is an amplifier/pollution/global-state primitive covered by the IMPACT-ANCHORING GUARD below — those still report at class floor.
-
-| Excuse | Reality |
-|--------|---------|
-| "Weak crypto / reversible token is still a finding — IMPACT-ANCHORING says report the mechanism" | IMPACT-ANCHORING covers amplifier/pollution sinks without a gadget. Same-actor same-outcome via a cited sibling path is gate 6 — Hardening Note / FP, not CONFIRMED. |
-| "Dashboard wants a crypto row — confirm at Low" | Severity floors do not override gate 6. No new capability → not CONFIRMED. |
+5. **Consequence stated concretely** — the `Impact:` names the specific attacker outcome and what it exposes or achieves (e.g. "reads any other user's order via IDOR on `GET /orders/{id}`", "runs an attacker-controlled shell command as the app user", "returns rows belonging to other tenants", "writes N bytes past a fixed-size buffer") — NOT a vague "might be exploitable", "could allow attackers", or "potential issue". **Deriving the consequence is part of the analysis, not an optional write-up:** if the flow cleared gates 1–4, work the concrete outcome out from the sink's behavior, state it, and report CONFIRMED / LIKELY. A confirmed finding is **NEVER** demoted just because its first draft was worded vaguely — fix the wording, do not drop the bug. Fall to `NEEDS CONTEXT` ONLY when the concrete consequence genuinely cannot be determined without runtime/config/more files (e.g. an opaque third-party sink whose behavior is unknown) — the same unverifiability gates 1–4 already surface — never as a penalty for under-describing a real finding.
 
 **Disposition when a gate fails:** with positive evidence a gate fails (a cited guard, type/structural fact, or deployment fact), record it as FALSE POSITIVE — "investigated, not a bug", with the reason — and drop it. If a gate is genuinely UNCERTAIN after reading the sink, its callers, and the framework, use `NEEDS CONTEXT` (needs-PoC) — never CONFIRMED / LIKELY on a speculative gate.
 
 #### IMPACT-ANCHORING GUARD (confirmed-sink severity FLOOR — global, every class)
 
-The disposition-side mirror of the "Behavior, not keyword" detection rule: just as a missing *library keyword* never clears a class, a missing *downstream gadget / weaponization / high-impact chain* never clears a **reachable sink that cleared gates 1–4 and is not eliminated by gate 6**. When gates 1–4 pass (tainted origin, no upstream guard, no structural mitigation, reachable in prod) **and gate 6 does not apply**, the finding STANDS — missing *gadget/weaponization* **LOWERS SEVERITY toward the class floor, it does NOT delete or relocate the finding**.
+The disposition-side mirror of the "Behavior, not keyword" detection rule: just as a missing *library keyword* never clears a class, a missing *downstream gadget / weaponization / high-impact chain* never clears a **confirmed, reachable sink**. When gates 1–4 pass (tainted origin, no upstream guard, no structural mitigation, reachable in prod), the finding STANDS — missing impact **LOWERS SEVERITY toward the class floor, it does NOT delete or relocate the finding**.
 
 - **Gate 5 is anti-vagueness, not proof-of-weaponization.** For a *primitive / amplifier* sink whose own behavior is the harm — server-side prototype pollution, dynamic-key write / mass assignment, unsafe reflection, an open deserialization point, a global-state write — the concrete consequence IS the sink behavior itself (e.g. "attacker sets arbitrary keys on `Object.prototype` process-wide, changing every later undefined-property read in this shared multi-tenant process"). State THAT as `Impact:` and report. You do NOT also have to exhibit a downstream gadget (`lodash.merge`, `child_process`, a template engine, an `if (user.isAdmin)` read) to report — the reference's gadget catalog sets *severity*, not *existence*.
 - **Severity floor, not deletion.** Absence of a proven high-impact gadget/chain caps the finding at the class's defense-in-depth floor and it is REPORTED there. Example: `server_side_prototype_pollution.md`'s Severity Heuristics set **Low** for "pollution sink without a confirmed reachable gadget" — so a confirmed attacker-controlled prototype write is at minimum a **Low finding**, never a non-finding.
 - **"No gadget / no impact" is UNCERTAIN by default** — you almost never can prove that negative across the whole process + framework + transitive deps. Reason PROCESS-GLOBALLY, never object-locally: "this parsed object is only serialized downstream" is a category error — pollution mutates the *shared prototype*, not one object. Before you may even *lower* severity on a "no gadget" basis you must have positively ruled out (a) framework/stdlib gadgets (Express/Koa/Fastify/Apollo option-object reads, `child_process` env spread), (b) application-flag gadgets (`if (obj.<flag>)` / `if (user.<role>)` undefined-property reads), and (c) attacker-controlled-key **and** -value writes aimed at known gadget properties. Not ruled out ⇒ keep the finding at floor severity (or `NEEDS CONTEXT`), never drop.
 - **Global-state / pollution sinks are inherently cross-tenant, not self-harm.** The "victim other than the attacker" guardrail does NOT apply — polluting a shared prototype (or any process-global) affects every other request/user in the process.
-- **Non-report dispositions for a reachable sink:** FALSE POSITIVE (cite the *positive* guard/type/deploy fact that stops the value reaching the sink — per the FP burden of proof); NEEDS CONTEXT (reported under *Unverifiable*); or **gate 6** FALSE POSITIVE / Hardening Note when a cited `file:line` already grants the **same actor** the **same outcome** (mechanism without new capability). **Silently relocating a sink into "Hardening Notes" merely because a high-impact gadget is unproven is FORBIDDEN** — that is the impact-anchored burial this guard blocks. Gate 6 Hardening Notes are different: they require a cited same-outcome path, not a missing gadget.
+- **Only two non-report dispositions exist for a confirmed reachable sink:** FALSE POSITIVE (cite the *positive* guard/type/deploy fact that stops the value reaching the sink — per the FP burden of proof) or NEEDS CONTEXT (reported under *Unverifiable*). **Silently relocating a confirmed attacker-reachable sink into "Hardening Notes", "defense-in-depth", or "Positive Patterns" is FORBIDDEN** — those are only for gaps *behind an already-effective layer*; a sink with no neutralizing layer is a finding.
 
 | Rationalization (do NOT accept as a drop / demote-to-note) | Reality |
 |------------------------------------------------------------|---------|
 | "Pollution sink but no `lodash.merge` / `child_process` / template gadget → not reported" | Reference sets sink-without-gadget = **Low finding** (defense-in-depth). Report at floor; the gadget sets severity, not existence. |
 | "The polluted object is just serialized downstream, so no in-process impact" | Prototype pollution is *process-global* — it changes every later undefined-property read in the shared process. Object-local reasoning is invalid. |
 | "Gate 5 (concrete impact) not met" | Gate 5 forbids *vague wording*, not *unproven weaponization*. The sink behavior IS the concrete consequence — state it and report. |
-| "Filed it as a Hardening Note / defense-in-depth item" | Hardening Notes for *missing gadget* burial are forbidden — report at class floor. Gate 6 Hardening Notes (cited same-actor same-outcome path) remain valid. |
+| "Filed it as a Hardening Note / defense-in-depth item" | Hardening Notes are for gaps behind an *effective* layer. A confirmed reachable sink with no neutralizing guard is a finding (≥ class floor), never a note. |
 | "Only self-affects the importer's own data" | A shared-prototype / global-state write is cross-tenant by construction — not self-harm. |
 
 This guard does NOT override the existing False-Positive Guardrails (bounded-DoS, operator self-harm, non-default-config severity caps, trusted-admin, etc.) — those still legitimately cap or drop with cited evidence. It forbids only the *impact-anchored* drop: dropping/burying a confirmed reachable sink merely because its highest-impact chain is unproven.
@@ -554,16 +536,16 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 **Tags**
 - `default_credentials`: require a reachable auth path that accepts the hardcoded login PAIR. A bare secret literal (API key, token, signing/JWT secret, private key, connection string) is `hardcoded_secrets`, not this tag.
 - `hardcoded_secrets`: a real secret literal at rest (provider format or ≥20 random chars) — not a placeholder, publishable-by-design key (Stripe `pk_*`, Firebase client `apiKey`), test/sandbox key, or env-var read. Severity by public exposure: client-shipped (bundle/mobile/source-map/public asset) → High/Critical; backend-only → Medium (still a finding — VCS/rotation exposure; do not drop). Algorithm/key-*strength* defects are `weak_crypto_hash`; runtime leakage is `information_disclosure`. Never write the raw secret — mask it.
-- `weak_crypto_hash`: require direct use of a weak hash/algo **or** a hand-rolled/underhanded copy of one (MD5/SHA-1 IV magic constants / homemade digester on security values) — not just an import. Covers weak algorithms (DES, RC4, ECB), weak hashes (MD5, SHA-1 for passwords), CWE-335 custom weak digests, and **legacy KDFs** (`PasswordDeriveBytes` / PBKDF1 / `CryptoJS.PBKDF1` / `EVP_BytesToKey` as sole password→key). Do not use `weak_crypto` as a separate tag. "No `hashlib.md5`/`MessageDigest` call" does **not** clear a homemade MD5/SHA-1 used for tokens/passwords. "`PasswordDeriveBytes` is Microsoft KeyDerivation" / "name contains pbkdf" does **not** clear PBKDF1 — require `Rfc2898DeriveBytes` / `KeyDerivation.Pbkdf2` / PBKDF2+ at table params.
+- `weak_crypto_hash`: require direct use of weak hash/algo — not just an import or third-party component. Covers both weak algorithms (DES, RC4, ECB) and weak hashes (MD5, SHA-1 for passwords); do not use `weak_crypto` as a separate tag.
 - `rce` → prefer `command_injection` for direct shell/process execution. Do not replace `spel_injection` with `rce`/`command_injection`.
 - `jndi_injection` in demos: only if the JNDI sink is the primary exploit path.
 - Broad tags (`trust_boundary`, `authentication`, `privilege_escalation`): prefer the narrowest valid tag (`xff_spoofing`, `session_fixation`, `verification_code`).
 - `open_redirect`: only if the attacker-controlled redirect is the primary exploit (not infra/parser misconfiguration).
 - `csrf`: skip for stateless Bearer-token-only APIs (`SessionCreationPolicy.STATELESS`).
-- `insecure_deserialization`: skip if `component_vulnerability` covers the same sink. Fastjson **CVE-2026-16723**: KEEP Critical on untrusted `parse`/`parseObject` with **1.2.68–1.2.83** (AutoType off / DTO bind do not clear); **CLOSE Critical** for this chain when dependency is **≥1.2.84**, `*_noneautotype`, or safeMode — do not KEEP solely because “newer 1.x is never a fix.” Do not attribute CVE-2026-16723 Critical to default **fastjson2** from the “even latest 2.x” tweet; still KEEP if `SupportAutoType` is enabled on untrusted input.
-- `arbitrary_file_upload`: skip **classic webshell deposit** for avatar/profile upload with type restrictions and non-webroot / object storage. Do **not** skip the **post-upload media/variant pipeline** — untrusted image bytes fed to libvips / ImageMagick / `sharp` / Active Storage variants / thumbnail workers without untrusted-ops / coder-policy hardening stay reportable as `rce` / `path_traversal` / `ssrf` (see `arbitrary_file_upload.md` *Post-Upload Media Processing Chain*).
+- `insecure_deserialization`: skip if `component_vulnerability` covers the same sink.
+- `arbitrary_file_upload`: skip for avatar/profile upload with type restrictions and non-webroot storage.
 - `session_fixation`: skip when Spring Security default session management is active.
-- `information_disclosure`: skip for DB credentials in config files — route a connection string with an embedded password to `hardcoded_secrets` (extractable secret at rest); reserve `information_disclosure` for runtime leakage (logs/errors/responses/served source maps) **and** outbound posts of session/refresh tokens, cookies, or PII to third-party paste/gist/hastebin hosts (constant URL / `private` paste / “on-call tooling” does **not** clear). Bare pastebin hostname inventory without secrets in the body is not a finding.
+- `information_disclosure`: skip for DB credentials in config files — route a connection string with an embedded password to `hardcoded_secrets` (extractable secret at rest); reserve `information_disclosure` for runtime leakage (logs/errors/responses/served source maps).
 - `shared_client_cache_leak`: require a structure that is BOTH shared across requests/users AND keyed/scoped without the identity the value depends on. Safe (drop) when the key provably includes `userId`/`tenantId`/session/auth-token-hash, when the client/cache/loader is created per-request, when the cached data is identity-independent (public/config), or when only a stateless transport is reused with auth passed per-call. Prefer `web_cache_deception` when the cache is an HTTP/CDN/edge/proxy cache; use `shared_client_cache_leak` only for in-process caches/dedup/singletons/pools/thread-locals/globals. Do not flag mutation paths for the dedup sub-class (query dedup does not merge mutations).
 
 **Scope**
@@ -571,7 +553,7 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - Non-default config: verify the DEFAULT value before reporting. Requires non-default/deprecated → cap `Low`. Explicitly labeled `legacy` or deprecated in code/docs → cap `Informational`.
 
 **Trust Boundary**
-- Operator self-harm: skip findings where the "attacker" input comes from operator-written config files (YAML/JSON/TOML), CLI flags the operator supplies themselves (`--file`, `--url`, `--chain-id`), or commands the operator must explicitly run. **Does not clear insecure-configuration findings** whose defect is the **config value itself** (e.g. CloudTrail/`enable_logging = false`, hardcoded non-production cloud API `endpoint_url` / `AWS_ENDPOINT_URL` to vendor `gamma`/`alpha`/`aws.a2z.com` hosts) — those are audit/posture bugs after credential theft, not "operator was the attacker." See `iac_security.md` *Non-production cloud API endpoints*.
+- Operator self-harm: skip findings where the "attacker" input comes from operator-written config files (YAML/JSON/TOML), CLI flags the operator supplies themselves (`--file`, `--url`, `--chain-id`), or commands the operator must explicitly run.
 - Trusted admin role: skip `privilege_escalation`/`business_logic` for actions behind `onlyAdmin`/`onlyOwner`/`onlyPoolAdmin` when that role is trusted by design. Only report if an unprivileged user can reach the same path.
 - Internal-only service: skip `authentication` and `information_disclosure` when the entire codebase has zero auth AND references internal infra (VPC vars, `EC2_INSTANCE_ID`, Eureka, Consul). Auth is at the network layer.
 - Code generators: skip `injection`/`path_traversal`/`rce` for codegen tools (`protoc`, `swagger-codegen`, etc.) whose input comes from developer-controlled source comments, annotations, or local config.
@@ -585,7 +567,7 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - Library dead path: if no real caller in the codebase triggers the vulnerable parameter combination AND the code has a warning log for that path → `NEEDS CONTEXT`, not a finding.
 
 **Platform**
-- Android app-private storage: skip `insecure_storage`/`information_disclosure` for `SharedPreferences`/`DataStore` in app-private storage without `android:allowBackup="true"` in a production manifest. **Exception:** `openFileOutput`/`getSharedPreferences` with mode `1`/`2`/`3` or `MODE_WORLD_*` is **not** app-private — keep as insecure storage (numeric literals count; "fork maps 2→PRIVATE" does not clear without evidence in-tree).
+- Android app-private storage: skip `insecure_storage`/`information_disclosure` for `SharedPreferences`/`DataStore` in app-private storage without `android:allowBackup="true"` in a production manifest.
 - Terraform state: skip `information_disclosure` for providers writing secrets to state when attributes are marked `Sensitive: true`.
 - Intra-org CI/CD: skip `supply_chain` for mutable action tags (e.g., `@v3`) when the action org matches the repo org. Only report third-party org actions.
 - Local dev tools: skip `authentication` for README-described local dev tools with no production docs. Exception: report (reduced severity) if the tool does not bind to `localhost`, exposes tokens in API responses, or allows destructive ops.
@@ -598,9 +580,6 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - [ ] Production code, or demo/example/sample/test/fixture directory?
 - [ ] Attacker is genuinely untrusted, not an admin/operator within their own trust boundary?
 - [ ] Concrete consequence derived and stated — a specific attacker outcome, not a vague "might/could"? (Fix lazy wording on a confirmed finding; use `NEEDS CONTEXT` only when the consequence is genuinely undeterminable.)
-- [ ] Input Inventory complete — every numbered input has a disposition (not findings-only)?
-- [ ] All-NONE auth surface — Platform Auth Gap rollup emitted (not N duplicate missing-auth rows)?
-- [ ] Same-outcome check — if a cited existing path already grants the same actor the same outcome, not CONFIRMED?
 - [ ] Verify DEFAULT config value — does the attack work with defaults?
 - [ ] SSRF required by protocol spec?
 - [ ] SSRF response reachable by attacker (readable / side effect / error oracle)?
@@ -723,36 +702,6 @@ On any mismatch: correct the citation if the real evidence is found, or **downgr
 | **Low** | Information disclosure, open redirect, weak crypto, insecure cookie, improper input validation (semantic-type mismatch / missing format validation, CWE-20 — see `input_validation.md`) |
 | **Informational** | Missing security headers, verbose errors, defense-in-depth gaps |
 
-#### Standalone-Weak Cap (no severity inflation)
-
-Quota pressure, "report everything", or "security will downgrade later" does **not** raise severity. When the **only** evidence is one of the rows below — with **no** chained token/session/credential exfil, authz bypass, or sensitive data read — apply the **max disposition** in that row. Never ship **Medium+ CONFIRMED** for these alone.
-
-| Alone evidence | Max disposition |
-|----------------|-----------------|
-| Missing CSP / HSTS / X-Frame-Options / security headers only | **Informational** Hardening Note (or WITHDRAWN under `adv`) |
-| `Server` / banner / version disclosure without a working CVE exploit path | **Informational** |
-| GraphQL introspection / OpenAPI/`__schema` dump alone (no field authz bypass) | **Informational** or WITHDRAWN |
-| CORS `Access-Control-Allow-Origin: *` without credentials and without a sensitive credentialed data path | **FALSE POSITIVE** / Informational (browsers block credentialed `*`) |
-| Open redirect with no OAuth `code`/token/session in the redirect target | **Low** max (class floor) — never Medium+ |
-| Clickjacking on non-sensitive pages, logout CSRF, self-XSS, open redirect "phishing only" | **Informational** or WITHDRAWN |
-| SSRF that **only** resolves DNS (`socket.gethostbyname` / `dns.lookup` / equivalent) and returns an IP/ok flag — **no** HTTP(S) fetch, TCP service connect, metadata/IMDS read, or response-body relay | **Low** max (recon). **Never High/Critical** from the SSRF severity-table default. Escalate only with a proven further chain (fetch/gadget/metadata). |
-
-**If a chain exists** (open redirect carries OAuth `code`, CORS reflects origin **with** credentials on an authenticated API, schema dump enables a further IDOR, DNS resolve followed by an HTTP fetch to the resolved host) — score the **chain**, not the alone primitive.
-
-| Excuse | Reality |
-|--------|---------|
-| "Quota wants ≥3 CONFIRMED Medium+" | Severity table + this cap win. Pad with Low/Info Hardening Notes — do not inflate. |
-| "Staff said report everything / downgrade later" | Report at the correct severity. Inflation is a Judge failure. |
-| "Open redirect is always Medium" | Severity Classification says **Low**; Medium requires a proven chain. |
-| "Missing CSP is a real bug" | Real as hardening — **Informational**, not Medium CONFIRMED. |
-| "SSRF is always High" / "any DNS lookup is High SSRF" | Class default High is for **fetch/reach** impact. DNS-only → **Low** per this cap (`ssrf.md` DNS-only). |
-
-**Red flags — STOP and re-score:**
-- Raising severity to meet a finding count
-- CONFIRMED Medium+ for CSP/headers/introspection/`Server`/CORS `*` alone
-- Open redirect Medium+ with no token/session in the Location target
-- CONFIRMED High/Critical SSRF for resolve-only / IP-oracle with no outbound fetch or internal gadget
-
 **Severity Downgrade Rule:** When exploitation requires authentication, specific non-default configuration, chained prerequisites, or is only reachable through an internal/admin-only path, downgrade severity by one level from the class default; LIKELY-verdict findings whose exploitability is marked UNCERTAIN must be capped at one level below the class default regardless of vulnerability type.
 
 **Downgrade floor (interacts with the IMPACT-ANCHORING GUARD):** the Severity Downgrade Rule may lower severity but may NEVER push a CONFIRMED, attacker-reachable sink *below* its class-specific defense-in-depth floor, nor out of the findings body. If a class reference sets a floor for a confirmed sink (e.g. `server_side_prototype_pollution.md` → **Low** for a sink without a proven gadget), that floor is the minimum reported severity — a further "authenticated" or "UNCERTAIN" downgrade does not demote it to Informational-as-burial or to a Hardening Note. `Informational` is for genuinely non-exploitable observations, never a way to move a confirmed reachable sink out of the findings.
@@ -798,12 +747,6 @@ Blocked by: <what additional context is needed>
 - **A shared sink line is NOT automatically one finding.** When several **independently-reachable entry points** (e.g. many routes/params funneling through one shared helper, DAO, query wrapper, or render/`sendLabel` util) reach the **same** sink line, report **each entry point as its own finding**: they differ in reachability, severity (a `payments` route ≠ a `products` route), and remediation surface (validating one caller does not fix the others), and collapsing them risks under-enumeration. Cite the shared sink line, but name the specific route/param/source in each finding. Do **not** collapse independent entry points just because they share a sink line.
 - **Collapse equivalent hops of ONE entry point.** When a **single** entry point's tainted value flows through several equivalent wrapper hops (e.g. `decorate`→`emphasize`→`frame`, or re-passed to the same API) before its final externally-visible sink, report only that final sink — one finding. The intermediate wrapper hops are propagation, not separate findings, unless an intermediate stage is independently reachable or exploitable.
 - Distinct sink lines remain separate findings when independently reachable/exploitable; a single shared sink line reached by distinct entry points still yields **one finding per entry point**.
-- **Platform Auth Gap (conditional exception).** When a coherent surface (shared route prefix, controller, or router module) has **no authentication at all** on its sensitive handlers — every sibling is effectively unauthenticated — emit **one** finding tagged `privilege_escalation` / missing-auth whose `Impact:` and `Evidence:` list every affected `METHOD /route`. That single Platform Auth Gap finding is the reportable unit for the shared root cause. Do **not** emit N nearly-identical per-route missing-auth findings for the same all-NONE surface just to inflate the count. **Still emit a separate finding** for any route on that surface that has an *additional* distinct bug (injection, IDOR-after-identity, mass assignment, etc.). "Dashboard volume" / "Step 7 always wants one-per-route" does not waive this when the sole shared root cause is total absence of authentication. **Still subject to False Positive Guardrails** — if Internal-only service (zero auth + internal infra refs) or Scope (fixtures/demo) would skip `authentication`/`privilege_escalation`, do not emit a Platform Auth Gap either.
-
-| Excuse | Reality |
-|--------|---------|
-| "One finding per entry point — emit 5 missing-auth rows" | That rule covers distinct taint paths. All-NONE auth on one surface is one root cause → one Platform Auth Gap listing the routes. |
-| "Volume for the dashboard — more findings look better" | Duplicate missing-auth rows are noise. One rollup with the full route list is the actionable unit. |
 
 #### Chained / Compound Risk
 
