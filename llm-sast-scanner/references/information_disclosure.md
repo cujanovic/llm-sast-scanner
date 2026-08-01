@@ -1,0 +1,387 @@
+---
+name: information_disclosure
+version: "0.5"
+description: Information disclosure testing covering error messages, debug endpoints, metadata leakage, source exposure, and serialization-redaction bypass / excessive data exposure (denylist as_json/toJSON failing open, Go pointer-receiver MarshalJSON skipped on by-value encode, malformed Go JSON omission tags)
+---
+
+# Information Disclosure
+
+Leaked information acts as a force multiplier for attackers — it maps the codebase, pinpoints component versions, surfaces credentials, and defines trust boundaries. Every byte returned by the server, every artifact published, and every header emitted is potential intelligence. The goal is to minimize, normalize, and tightly scope what gets exposed across every channel.
+
+## Where to Look
+
+- Errors and exception pages: stack traces, file paths, SQL, framework versions
+- Debug/dev tooling reachable in prod: debuggers, profilers, feature flags
+- **Third-party paste / scratch sinks** that receive session tokens, refresh tokens, cookies, or PII (pastebin, hastebin, ghostbin, zerobin, gist APIs, similar “private paste” SaaS) — even when the destination URL is a constant and labeled support/on-call tooling
+- DVCS/build artifacts and temp/backup files: .git, .svn, .hg, .bak, .swp, archives
+- Configuration and secrets: .env, phpinfo, appsettings.json, Docker/K8s manifests
+- API schemas and introspection: OpenAPI/Swagger, GraphQL introspection, gRPC reflection
+- Client bundles and source maps: webpack/Vite maps, embedded env, `__NEXT_DATA__`, static JSON
+- Headers and response metadata: Server/X-Powered-By, tracing, ETag, Accept-Ranges, Server-Timing
+- Storage/export surfaces: public buckets, signed URLs, export/download endpoints
+- Observability/admin: /metrics, /actuator, /health, tracing UIs (Jaeger, Zipkin), Kibana, Admin UIs
+- Directory listings and indexing: autoindex, sitemap/robots revealing hidden routes
+
+## High-Value Surfaces
+
+### Errors and Exceptions
+
+- SQL/ORM errors: reveal table/column names, DBMS, query fragments
+- Stack traces: absolute paths, class/method names, framework versions, developer emails
+- Template engine probes: `{{7*7}}`, `${7*7}` identify templating stack
+- JSON/XML parsers: type mismatches leak internal model names
+
+### Debug and Env Modes
+
+- Debug pages: Django DEBUG, Laravel Telescope, Rails error pages, Flask/Werkzeug debugger, ASP.NET customErrors Off
+- Profiler endpoints: `/debug/pprof`, `/actuator`, `/_profiler`, custom `/debug` APIs
+- Feature/config toggles exposed in JS or headers
+
+#### Diagnostic-endpoint catalog (framework-specific, high-value)
+
+Concrete reachable surfaces worth enumerating by name. The heap/env/config dumps leak secrets, session tokens, and connection strings (**Critical** per rubric — "config dumps"); the interactive consoles and JMX bridges are code-execution sinks (cross-ref `rce.md`).
+
+- **Spring Boot Actuator** sub-endpoints (beyond `/actuator/health`): `/actuator/heapdump` (full JVM heap → in-memory secrets, session tokens, request bodies), `/actuator/threaddump`, `/actuator/env` & `/actuator/configprops` (config + masked-but-often-leaked secrets), `/actuator/mappings`, `/actuator/loggers` (runtime log-level **write** → can flip sensitive logging on), `/actuator/sessions`, `/actuator/shutdown` (state-changing)
+- **Jolokia / JMX-over-HTTP**: `/jolokia`, `/actuator/jolokia` — read/write MBeans; certain MBeans (e.g. `reloadByURL`, logback `JMXConfigurator`, Diagnostic `Compiler`) escalate to **RCE/SSRF** → cross-ref `rce.md`, `ssrf.md`
+- **Werkzeug interactive debugger console**: the `__debugger__` endpoint (`?__debugger__=yes&cmd=...&frm=...&s=...`) evaluates arbitrary Python when the console PIN is disabled/guessable → **RCE** (cross-ref `rce.md`); generic "Flask debug on" is the lower-severity signal
+- **PHP Xdebug** triggers: `XDEBUG_SESSION` cookie, `XDEBUG_SESSION_START` (GET/POST), `XDEBUG_PROFILE` / `start_profiler` — switch a prod app into remote-debug or profiling mode; historic `xdebug.remote_connect_back` enables attacker-directed debug connections → **RCE**
+- **Laravel Debugbar** (`/_debugbar/open`, `/_debugbar/...`) and **Clockwork** (`/__clockwork/...`): expose executed SQL, bound params, env, session, and full request/response data
+- **Symfony** web profiler `/_profiler` and web-debug-toolbar `/_wdt/<token>`
+- **Go** `net/http/pprof`: `/debug/pprof/` (and `/debug/pprof/heap|goroutine|cmdline|profile`) auto-registered on the default mux — leaks memory, args, and CPU profiles
+
+### DVCS and Backups
+
+- DVCS: `/.git/` (HEAD, config, index, objects), `.svn/entries`, `.hg/store` → reconstruct source and secrets
+- Backups/temp: `.bak`/`.old`/`~`/`.swp`/`.swo`/`.tmp`/`.orig`, db dumps, zipped deployments
+- Build artifacts: dist artifacts containing `.map`, env prints, internal URLs
+
+### Configs and Secrets
+
+- Classic: web.config, appsettings.json, settings.py, config.php, phpinfo.php
+- Containers/cloud: Dockerfile, docker-compose.yml, Kubernetes manifests, service account tokens
+- Credentials and connection strings; internal hosts and ports; JWT secrets
+- **Runtime credential harvest via procfs**: code — especially an agent tool/handler — that reads `/proc/self/environ`, `/proc/<pid>/environ`, or `/proc/<pid>/cmdline`, or globs `/proc/*/`, to lift another process's environment/secrets. Distinct from path-traversal *to* `/proc` (an LFI target, see `path_traversal_lfi_rfi.md`): here the code deliberately reads process env/args to harvest credentials. Also flag dumping the full environment (`os.environ`/`process.env`) into a log or response. **Safe**: never read other processes' `/proc/*/environ`; don't echo the whole environment to logs/output.
+
+### API Schemas and Introspection
+
+- OpenAPI/Swagger: `/swagger`, `/api-docs`, `/openapi.json` — enumerate hidden/privileged operations
+- GraphQL: introspection enabled; field suggestions; error disclosure via invalid fields
+- gRPC: server reflection exposing services/messages
+
+### Client Bundles and Maps
+
+- Source maps (`.map`) reveal original sources, comments, and internal logic
+- Client env leakage: `NEXT_PUBLIC_`/`VITE_`/`REACT_APP_` variables; embedded secrets
+- `__NEXT_DATA__` and pre-fetched JSON can include internal IDs, flags, or PII
+
+### Secrets in SSR hydration / bootstrap state (server→client)
+
+Server-side rendering ships the server's precomputed state to the browser by **inlining it into the HTML** for the client to hydrate. Any authentication credential placed in that state — a session/access **JWT**, a **refresh token**, an **API key**, or a session id — is a sensitive-data-exposure sink (CWE-200): it lands in the page markup/DOM, readable by any script running in the origin.
+
+- **Sinks (grep seeds)**: an inline `<script>` assigning `window.__STATE__` / `window.__PRELOADED_STATE__` (Redux) / `window.__NUXT__` (Nuxt) / `window.__APOLLO_STATE__`; `__NEXT_DATA__` via Next.js `getServerSideProps`/`getInitialProps` returning token-bearing `props`; `serialize-javascript` or `JSON.stringify` of a store/state object that contains a credential, emitted into HTML; Angular Universal `TransferState.set(...)` / SvelteKit `load` data carrying a token.
+- **Do NOT clear this because "it's the session owner's own token" or "it's the documented way the SPA gets its token."** Unlike an `HttpOnly` cookie, a token in hydration state is readable by **any** JavaScript on the page — XSS, a compromised/third-party script, a browser extension, or a supply-chain dependency — so it is directly stealable → account takeover. It is also **cross-user stealable whenever the token-bearing page (or a suffix/error variant of it) is cacheable by a shared cache**: web cache deception serves one user's cached HTML — token included — to the attacker. `Cache-Control: private` on this one route is not sufficient (caching is frequently introduced at a CDN, on error pages, or via path/suffix confusion). Cross-ref `web_cache_deception.md` (cached token-bearing bodies) and `csrf.md` (SameSite=Lax top-level-navigation used to plant the victim's authenticated, cacheable response).
+- **SAFE**: keep session/refresh tokens in `HttpOnly; Secure; SameSite` cookies and never place them in hydration state; strip credentials from the store / `props` / `TransferState` before serialization; if the browser must call an API, rely on the same-origin cookie or mint a **short-lived, narrowly-scoped** token per request that is never embedded in cacheable markup. Non-sensitive state (public catalog, theme, feature flags) is fine to inline.
+
+### Developer comments flagging known weaknesses (CWE-546)
+
+- Security-flavored `TODO` / `FIXME` / `HACK` / `XXX` / `BUG` comments are author-confirmed leads, not noise — the developer has *already told you* where a weakness lives: `// FIXME: SQL injection here`, `# TODO: add authz check before launch`, `// HACK: skip cert validation for now`, `<!-- XXX: hardcoded creds, remove before prod -->`. Pivot to the adjacent code and confirm the *real* class (SQLi, missing authz, disabled TLS, hardcoded secret); the comment itself is CWE-546 (Suspicious Comment) but its value is as a signpost. Language-agnostic, cheap, high-signal — run it early in recon. (A comment can also leak internals directly — internal hostnames, ticket IDs, "temporary" backdoors — independent of any TODO marker.)
+- **Grep:** `rg -niE '(TODO\|FIXME\|HACK\|XXX\|BUG)\b.{0,40}(secur\|auth\|sqli?\|inject\|xss\|csrf\|vuln\|password\|secret\|token\|creds?\|bypass\|insecure\|temporar\|disable\|hardcode)'` — then read the surrounding lines, not just the comment.
+
+### Headers and Response Metadata
+
+- Fingerprinting: Server, X-Powered-By, X-AspNet-Version
+- Tracing: X-Request-Id, traceparent, Server-Timing, debug headers
+- Caching oracles: ETag/If-None-Match, Last-Modified/If-Modified-Since, Accept-Ranges/Range
+
+### Storage and Exports
+
+- Public object storage: S3/GCS/Azure blobs with world-readable ACLs or guessable keys
+- Signed URLs: long-lived, weakly scoped, re-usable across tenants
+- Export/report endpoints returning foreign data sets or unfiltered fields
+
+### Observability and Admin
+
+- Metrics: Prometheus `/metrics` exposing internal hostnames, process args
+- Health/config: `/actuator/health`, `/actuator/env`, Spring Boot info endpoints
+- Tracing UIs: Jaeger/Zipkin/Kibana/Grafana exposed without auth
+
+### Cross-Origin Signals
+
+- Referrer leakage: missing/weak referrer policy leading to path/query/token leaks to third parties. **Elevate to account-takeover (not mere disclosure) when the leaked value is a *single-use auth secret* placed in the URL** — a password-reset/email-verification/magic-link/invite token in the path or query, or an OAuth `code`/`state`. Any third-party subresource the page loads (analytics, CDN JS, fonts, images) or any followed outbound link ships that full URL in the `Referer`, so anyone with access to the third party's logs can consume the token → ATO. **Detection**: a token-shaped path/query segment on an auth/reset/verify/invite route where the response references external origins (script/img/link/style `src`/`href`) and there is **no** `Referrer-Policy: no-referrer`/`same-origin` on that route and the secret is **not** moved to a POST body. Fix: keep the secret out of the URL (POST body / short-lived cookie), and set `Referrer-Policy: no-referrer` (or a blank same-origin landing page) on token-bearing pages
+- CORS: overly permissive Access-Control-Allow-Origin/Expose-Headers revealing data cross-origin; preflight error shapes
+
+### File Metadata
+
+- EXIF, PDF/Office properties: authors, paths, software versions, timestamps, embedded objects
+
+### Cloud Storage
+
+- S3/GCS/Azure: anonymous listing disabled but object reads allowed; metadata headers leak owner/project identifiers
+- Pre-signed URLs: audience not bound; observe key scope and lifetime in URL params
+
+## Triage Rubric
+
+- **Critical**: Credentials/keys; signed URL secrets; config dumps; unrestricted admin/observability panels
+- **High**: Versions with reachable CVEs; cross-tenant data; caches serving cross-user content
+- **Medium**: Internal paths/hosts enabling LFI/SSRF pivots; source maps revealing hidden endpoints
+- **Low**: Generic headers, marketing versions, intended documentation without exploit path
+
+## Analysis Workflow
+
+1. **Build channel map** - Web, API, GraphQL, WebSocket, gRPC, mobile, background jobs, exports, CDN
+2. **Establish diff harness** - Compare owner vs non-owner vs anonymous; normalize on status/body length/ETag/headers
+3. **Trigger controlled failures** - Malformed types, boundary values, missing params, alternate content-types
+4. **Enumerate artifacts** - DVCS folders, backups, config endpoints, source maps, client bundles, API docs
+5. **Correlate to impact** - Versions→CVE, paths→LFI/RCE, keys→cloud access, schemas→auth bypass
+
+## Confirming a Finding
+
+1. Provide raw evidence (headers/body/artifact) and explain exact data revealed
+2. Determine intent: cross-check docs/UX; classify per triage rubric
+3. Attempt minimal, reversible exploitation or present a concrete step-by-step chain
+4. Show reproducibility and minimal request set
+5. Bound scope (user, tenant, environment) and data sensitivity classification
+
+## Common False Alarms
+
+- Intentional public docs or non-sensitive metadata with no exploit path
+- Generic errors with no actionable details
+- Redacted fields that do not change differential oracles
+- Version banners with no exposed vulnerable surface and no chain
+- Owner-visible-only details that do not cross identity/tenant boundaries
+- Dev/debug mode flags by themselves are not enough unless they expose concrete sensitive data, a reachable debug console, or a specific exploitation path
+- Dependency-version findings without a reachable vulnerable feature or chain should be treated as informational, not reportable disclosure
+- Bare string inventory of `pastebin` / SaaS hostnames with **no** secret/token/PII in the outbound body (Application Inspector–style fingerprint only)
+
+### Third-party paste / debug exfil (KEEP)
+
+Posting **session tokens, refresh tokens, cookies, passwords, or PII** to pastebin/gist/hastebin/ghostbin/zerobin (or similar) is `information_disclosure` / intentional exfil.
+
+| Excuse | Reality |
+|--------|---------|
+| "Constant URL → not SSRF" | Correct that it may not be SSRF; still disclosure to a third party. |
+| "`api_paste_private=1` / private paste" | Paste host, staff with the API key, and anyone with the link still see secrets. |
+| "Approved on-call / support tooling" | Policy label does not move secrets inside the app trust boundary. |
+| "Tokens belong to the same user being debugged" | The paste service is not that user; cross-org retention and link leakage apply. |
+
+## FALSE POSITIVE Rules
+
+- Do NOT emit `information_disclosure` for database credentials in config files (application.yml, application.properties, docker-compose.yml) — this is a deployment configuration issue, not an application-level info disclosure vulnerability. Tag as `default_credentials` or `weak_crypto` if appropriate.
+- Do NOT emit for verbose error messages in development/debug mode unless there is evidence this mode is reachable in production.
+- Do NOT emit for intentional vulnerability demo pages that display security-relevant information as part of their educational purpose.
+- Do NOT emit when the "disclosed" information is only accessible to authenticated/authorized users within their normal access scope **and stays inside the application/trust boundary** (same product APIs, same tenant UI). Outbound posts of secrets to **third-party** paste/SaaS hosts are **not** in-scope for this skip.
+- Only emit when sensitive data (credentials, PII, internal paths, stack traces) is exposed to UNAUTHORIZED users through a reachable endpoint **or** shipped to an external party outside the app's auth boundary (paste/gist/debug SaaS with secrets in the body).
+
+## Business Risk
+
+- Accelerated exploitation of RCE/LFI/SSRF via precise versions and paths
+- Credential/secret exposure leading to persistent external compromise
+- Cross-tenant data disclosure through exports, caches, or mis-scoped signed URLs
+- Privacy/regulatory violations and business intelligence leakage
+
+## Analyst Notes
+
+1. Start with artifacts (DVCS, backups, maps) before payloads; artifacts yield the fastest wins
+2. Normalize responses and diff by digest to reduce noise when comparing roles
+3. Hunt source maps and client data JSON; they often carry internal IDs and flags
+4. Probe caches/CDNs for identity-unaware keys; verify Vary includes Authorization/tenant
+5. Treat introspection and reflection as configuration findings across GraphQL/gRPC
+6. Mine observability endpoints last; they are noisy but high-yield in misconfigured setups
+7. Chain quickly to a concrete risk and stop—proof should be minimal and reversible
+
+## Core Principle
+
+Information disclosure is an amplifier. Convert leaks into precise, minimal exploits or clear architectural risks.
+
+## Secure Error Handling Configuration
+
+Separate **internal diagnostics** from **external responses**. Clients receive generic, stable messages; servers log full exception context for forensics.
+
+### Client-Facing Response Policy
+
+- Return generic messages (`"An error occurred, please retry"`) — never stack traces, file paths, framework versions, or SQL/ORM error text
+- Use consistent error envelopes (JSON `message` field or Problem Details `application/problem+json`) with appropriate HTTP status (4xx client, 5xx server)
+- Escape or encode error response bodies to block injection into HTML/JSON clients
+- Strip `Server`, `X-Powered-By`, and technology fingerprint headers from error responses
+
+### Production Debug & Error Pages
+
+- Disable interactive debuggers and verbose exception pages in production (`DEBUG=False`, `display_errors=0`, `customErrors mode="RemoteOnly"`)
+- Route unhandled exceptions through centralized handlers (`@RestControllerAdvice`, Express error middleware, Django `handler500`, ASP.NET Core `UseExceptionHandler`)
+- Redirect to custom generic error pages — not framework default pages with source snippets
+
+### Internal vs External Channel Split
+
+```python
+# VULN: same detail to client and logs
+except Exception as e:
+    return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
+
+# SAFE: generic client response; rich server-side log only
+except Exception as e:
+    logger.exception("order_create_failed", extra={"user_id": user_id, "order_id": order_id})
+    return jsonify({"message": "Unable to process request"}), 500
+```
+
+```java
+// VULN: exception message/stack sent to HTTP response
+catch (Exception e) {
+    e.printStackTrace(response.getWriter());
+}
+
+// SAFE: log internally; generic JSON to client
+catch (Exception e) {
+    logger.error("payment_failed", e);
+    response.setStatus(500);
+    response.getWriter().write("{\"message\":\"An error occurred, please retry\"}");
+}
+```
+
+```xml
+<!-- VULN: ASP.NET exposes detailed errors to remote clients -->
+<customErrors mode="Off" />
+
+<!-- SAFE: generic page for remote; detail only locally -->
+<customErrors mode="RemoteOnly" defaultRedirect="~/ErrorPages/Generic.aspx" />
+```
+
+### Error-Logging Boundary (Cross-Reference)
+
+Log exceptions with correlation IDs, user/session identifiers (non-PII where possible), source IP, and timestamps — but **never** passwords, tokens, recovery codes, full request bodies, or cleartext PII in error logs. Redact or hash sensitive fields before write (see `log_injection.md`).
+
+## Python/JS/PHP Source Detection Rules
+
+### Python (Flask / Django)
+- **VULN**: `app.run(debug=True)` — Werkzeug interactive debugger exposes RCE in production
+- **VULN**: `DEBUG = True` in production Django settings
+- **VULN**: `app.config['PROPAGATE_EXCEPTIONS'] = True` + traceback returned in response
+- **VULN**: `return str(e)` or `return traceback.format_exc()` inside an error handler
+- **SAFE**: `DEBUG = os.environ.get('DEBUG', 'False') == 'True'` — only safe when production env does not set `DEBUG=True`; env-dependent, not inherently safe
+
+### JavaScript (Node.js / Express)
+- **VULN**: `res.json({ error: err.stack })` — stack trace leaked to client
+- **VULN**: `res.send(err.message)` — raw error message returned
+- **VULN**: `app.use((err, req, res, next) => res.json(err))` — entire error object serialized
+- **VULN (ORM serialization-redaction bypass, CWE-200)**: sensitive-field hiding implemented **only in the serialization layer** — a Mongoose `schema.set('toJSON'|'toObject', { transform: (doc, ret) => delete ret.password })`, a getter, or a `toJSON()` method on the model — is **silently bypassed** when a code path returns the raw object instead of the hydrated document. The flagship case is Mongoose **`.lean()`**: `Model.find().lean()` (and `.findOne().lean()`) returns plain POJOs that **skip getters and `toJSON`/`toObject` transforms**, so `res.json(await Model.find().lean())` leaks every field the transform was meant to strip (`password`/`passwordHash`, tokens, `__v`, internal flags). Same leak from raw-driver access (`db.collection('users').find()`), `JSON.stringify(doc.toObject())`, or spreading a Sequelize/TypeORM instance's `.dataValues`/`._` internals. **SAFE**: enforce redaction at the **query/data layer**, not only serialization — `select: false` in the schema *plus* explicit `.select('-password')` on lean/raw reads (lean honors projection but not transforms); or map to an explicit response DTO; never `res.json` a raw ORM result. Cross-ref `privacy_data_protection.md`, `mass_assignment.md` (the write-side mirror).
+
+### PHP
+- **VULN**: `error_reporting(E_ALL); ini_set('display_errors', 1)` — all errors displayed
+- **VULN**: `phpinfo()` endpoint accessible without authentication
+- **VULN**: `die($e->getMessage())`, `echo $e->getTraceAsString()`
+- **SAFE**: `ini_set('display_errors', 0); ini_set('log_errors', 1)`
+
+### Java / Spring
+- **VULN**: `e.printStackTrace()` or `printStackTrace(response.getWriter())` — stack sent to client
+- **VULN**: `@ExceptionHandler` returning `exception.getMessage()` or full exception object in response body
+- **VULN**: Spring Boot `server.error.include-stacktrace=always` or `include-message=always` in production config
+- **SAFE**: `@RestControllerAdvice` returning generic `ProblemDetail`/`ResponseEntity` message; `include-stacktrace=never` in prod
+
+### C# / ASP.NET
+- **VULN**: `<customErrors mode="Off" />` or `app.UseDeveloperExceptionPage()` without environment guard in production
+- **VULN**: `return Json(new { error = ex.ToString() })` or `ex.StackTrace` in API error responses
+- **SAFE**: `customErrors mode="RemoteOnly"`; production `UseExceptionHandler("/error")` with generic JSON body
+
+### Ruby / Rails
+- **VULN**: beyond exception/stack-trace leakage (`render plain: e.message`, `rescue => e; render json: e`), the high-value Rails class is **denylist serialization redaction of a model with sensitive columns** — an `as_json`/`serializable_hash`/`read_attribute_for_serialization` override (or a controller call) that hides fields with a **denylist**: `def as_json(o={}) super(o.merge(except: %i[...])) end`, `render json: user.as_json(except: [...])`, `model.to_json(except: [...])`. A denylist is a latent CWE-200 that **fails open**, and both failure modes are source-detectable:
+  1. **A path skips the hook** — `@model.attributes`, `model.serializable_hash`, `.slice`, `Model.pluck(...)`, raw `ActiveRecord::Base.connection.exec_query`, or `render json: Model.all` where the override isn't reached — returns the raw column hash (the Rails sibling of the Mongoose `.lean()` bypass above).
+  2. **The denylist silently stops matching (no bypass path needed)** — the `except:` entries are **symbols** while attributes serialize as **string** keys (or vice-versa), so *nothing* is excluded; or a **Rails / `oj` / `active_model_serializers` upgrade** changes hash→JSON key handling (symbol-vs-string coercion, or emitting **duplicate keys**) and the filter quietly drops. The "safe-looking" `render json: @model` line is unchanged yet begins dumping every column. **Real-world: HackerOne #3000510 ($25k, Critical)** — a Rails 6.1→7.1 upgrade altered symbol-vs-string key serialization, so `/reports/:id.json` leaked the full `User` row (`email`, `totp_secret`, `otp_backup_codes`, `graphql_secret_token`, `account_recovery_phone_number(_token)`, `calendar_token`) with no code change.
+- **Flag the denylist redaction itself as the finding — do not clear the `render json: model.as_json(except:)` path as "secret-safe."** Set severity by the columns the model actually holds (auth secrets / MFA / tokens / PII → **Critical**), because a denylist offers no guarantee those stay excluded.
+- **SAFE**: allowlist at the boundary — a dedicated serializer (`ActiveModel::Serializers` / `jsonapi-serializer` / `blueprinter` / a JBuilder view) or `as_json(only: [:id, :username])` naming **only** public fields; keep secrets unreadable with `self.ignored_columns`/encrypted attributes where possible; never `render json:` a raw AR model, `.attributes`, or `.serializable_hash`. Cross-ref the Node/Mongoose entry above, `api_security.md` (excessive data exposure), and `mass_assignment.md` (write-side mirror).
+
+### Go
+- **VULN (marshaler-redaction bypass via pointer receiver, CWE-200)**: a redacting/masking `MarshalJSON` (or `MarshalText`, or a secret-scrubbing `String()`) defined on a **pointer receiver** — `func (c *Credential) MarshalJSON() ([]byte, error)` — is **not in the method set of the value type** `Credential`. `encoding/json` resolves `json.Marshaler` by method set, so encoding the type **by value** silently skips the custom marshaller and falls back to default field-by-field marshalling, emitting the real secret. The skip fires on any by-value encode, most easily when the type is a **value struct field** of another marshalled type — `type ServiceConfig struct { Cred Credential }` then `json.Marshal(cfg)` dumps `Cred.Secret` in clear despite `(*Credential).MarshalJSON` existing — and likewise for a `T` inside a `[]T`/`map[K]T`, or a `T` boxed into `any`/`interface{}` by value. The "safe-looking" `MarshalJSON` is present and correct, yet the redaction never runs. This is the Go sibling of the Mongoose `.lean()` and Rails `as_json` bypasses above and is routinely missed because reviewers see the masking marshaller and assume every `json.Marshal` honours it — so do **not** clear a `json.Marshal`/`Encode` sink as secret-safe just because a `MarshalJSON` exists; confirm it is on a **value** receiver *or* the type is only ever encoded via a pointer. (`json:"-"` **struct tags** are unaffected — they apply regardless of receiver; the trap is redaction logic that lives *inside* a pointer-receiver method.)
+- **VULN (hyphen-tag typo)**: only the exact tag `json:"-"` omits a field. Adding a comma changes `-` into the literal JSON field name: `json:"-,"` and `json:"-,omitempty"` can encode a non-empty secret under key `"-"` and accept an input key named `"-"` during decode. Review every supposedly hidden exported field whose tag begins `json:"-,`; do not infer omission from the leading hyphen.
+- **SAFE**: define the redacting marshaller on a **value receiver** (`func (c Credential) MarshalJSON(...)`) so both `Credential` and `*Credential` redact (a pointer's method set includes value methods, so pointer encodes stay safe too); or marshal an explicit response DTO carrying only public fields; or keep the secret in an **unexported** field (default marshalling can't reach it) with an accessor. Don't rely on a pointer-receiver marshaller while the type is stored or encoded by value. Cross-ref the Node/Mongoose and Ruby/Rails entries above, and `privacy_data_protection.md`.
+
+### Source Maps Shipped to Production (build-config class)
+Production builds that emit and deploy `.map` files (or inline maps) hand attackers the original, un-minified source — comments, internal endpoints, function names, and sometimes secrets. Detect at the **build-config** level, framework-agnostic:
+- **VULN**: `productionBrowserSourceMaps: true` in `next.config.js` — Next.js emits browser source maps in prod
+- **VULN**: webpack `devtool: 'source-map'` (or `eval-source-map`) under a production config
+- **VULN**: Vite `build: { sourcemap: true }`; Rollup `output.sourcemap: true`; esbuild `--sourcemap`
+- **VULN**: `GENERATE_SOURCEMAP=true` (CRA) or any pipeline that copies `*.map` to the public/CDN dir
+- **Note**: this is the static signature of the "reverse the bundle via the `.map`" technique; the `//# sourceMappingURL=` comment in shipped JS is the runtime tell.
+- **SAFE**: source maps disabled for prod, or uploaded to an access-controlled error-tracking service (e.g. Sentry) and **not** served publicly.
+
+## Automated Detection Patterns
+
+### Stack trace / exception exposure (CWE-209)
+
+Commonly affected languages: JavaScript, Java, Python, Go, Ruby, C#.
+
+**Sources**: exceptions, stack traces flowing from catch blocks.
+
+**Sinks**: HTTP response bodies (`res.send(err.stack)`), `sendError` with exception, error handlers returning raw exception objects.
+
+**Sanitizers**: generic error messages to client; server-only logging; debug flags off in production.
+
+**SAST indicators (error response sinks)**:
+- `debug=True`, `DEBUG = True`, `app.run(debug=True)` without environment guard
+- `printStackTrace`, `getTraceAsString`, `traceback.format_exc`, `err.stack`, `ex.ToString()`, `ex.StackTrace` flowing to HTTP response sinks
+- Error handlers returning `str(e)`, `err.message`, raw exception objects, or SQL/ORM error strings to clients
+- Production config: `include-stacktrace=always`, `customErrors mode="Off"`, `display_errors=1`, `PROPAGATE_EXCEPTIONS=True` combined with client-visible responses
+- `res.json({ error: err })`, `sendError(500, exception)`, template rendering of `{{ exception }}` in user-facing pages
+
+### Sensitive logging (CWE-312 / CWE-532)
+
+Commonly affected languages: Java, JavaScript, Python, Go, Ruby, Rust, Swift.
+
+**Sources**: credentials, tokens, PII fields marked sensitive in type/annotation models.
+
+**Sinks**: log appenders (Log4j/SLF4J), clear-text logging of passwords/tokens.
+
+**Sanitizers**: structured logging with redaction; avoid logging sensitive fields.
+
+### Sensitive data in GET query (CWE-598)
+
+Commonly affected languages: JavaScript, Ruby.
+
+**Sinks**: passwords, tokens, or PII read from GET query parameters.
+
+### Cross-window information leak (CWE-201)
+
+**JavaScript**: `postMessage(data, '*')` with unrestricted target origin.
+
+**Sanitizers**: fixed postMessage target origin.
+
+### Build artifact / file exposure (CWE-200)
+
+**JavaScript**: sensitive data in build artifacts; private file exposure; local file served over HTTP.
+
+**C#**: exposure in transmitted data (CWE-201); exposure of private information (CWE-359).
+
+**C++**: exposed system data (CWE-497).
+
+### Debug mode exposure (CWE-215 / CWE-489)
+
+**Python**: Flask app run in debug mode (`app.run(debug=True)`).
+
+**C#**: ASP.NET debug binary in production.
+
+**No automated query**: `.git`/source-map exposure (static artifact hunt). GraphQL introspection, Swagger UI exposure—not dedicated queries. Align with existing FALSE POSITIVE rules: config-file credentials → `default_credentials`, not info disclosure.
+
+### LLM/AI sensitive-data disclosure (OWASP LLM02)
+
+Generative-AI apps disclose sensitive data through model outputs: training-data memorization, secrets/PII placed in prompts or context, or over-permissive RAG retrieval that pulls documents the caller cannot read.
+
+**Sources**: PII/secrets in fine-tuning data; secrets templated into system prompts; RAG context assembled from documents without an access filter; user messages echoed back with sensitive fields.
+
+**Sinks**: the model response returned to the user; logs/telemetry capturing full prompts or completions.
+
+**Sanitizers / safe patterns**:
+- Sanitize/anonymize PII before training or fine-tuning; do not feed raw secrets into prompts (see `system_prompt_leakage.md`).
+- Apply an output filter that scans completions (and any logged prompt/completion) for secret and PII value shapes, and redacts/blocks before returning. Concrete secret value shapes:
+
+  | Secret | Regex |
+  |--------|-------|
+  | OpenAI key | `\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b` |
+  | GitHub token | `\b(?:gh[pousr]_[A-Za-z0-9]{36,}\|github_pat_[A-Za-z0-9_]{22,})\b` |
+  | AWS access key id | `\bAKIA[0-9A-Z]{16}\b` |
+  | JWT | `\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b` |
+  | Slack token | `\bxox[bpoa]-[A-Za-z0-9-]{10,}\b` |
+  | Google API key | `\bAIza[0-9A-Za-z_-]{35}\b` |
+
+  For unstructured secrets matching no known prefix, add a **high-entropy fallback**: flag a ≥40-char `[A-Za-z0-9+/=_-]` run only when its Shannon entropy clears ~4.5 bits/char (keeps random tokens, drops prose/IDs). Keep a **secret allowlist** to suppress known example/placeholder tokens. For PII value shapes (email/phone/SSN/card with Luhn validation), see `privacy_data_protection.md`.
+- Enforce permission- and tenant-scoped retrieval so context never includes unauthorized documents (see `rag_vector_security.md`).
+- Avoid logging full prompts/responses that may contain credentials or PII (see "Sensitive logging" above).
+
+**Triage**: secret/credential in model output or in a shared prompt → High; PII over-exposure via unfiltered RAG → High/Medium per data sensitivity. Cross-reference `system_prompt_leakage.md` (LLM07) for prompt-resident secrets and `rag_vector_security.md` (LLM08) for retrieval scoping.

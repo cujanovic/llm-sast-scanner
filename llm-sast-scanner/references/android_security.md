@@ -1,0 +1,1115 @@
+---
+name: android_security
+version: "0.5"
+description: Android application security — insecure data storage (SharedPreferences/SQLite/external storage/Keystore), exported component & intent injection, task hijacking / StrandHogg (launchMode singleTask/singleInstance + default taskAffinity / allowTaskReparenting), tapjacking / obscured-touch handling, deep-link/WebView RCE (addJavascriptInterface, file-URL access), insecure IPC (ContentProvider query()/openFile() path traversal, PendingIntent), crypto misuse (ECB/static IV/weak key/java.util.Random), legacy DefaultHttpClient TLS negotiation, allowBackup, clipboard/FLAG_SECURE leakage, client-only root detection, and cert-trust bypass (CWE-312/89/22/749/927/1021/327/295/757). Load when an Android project is present (*.kt/*.java + AndroidManifest.xml/build.gradle).
+---
+
+# Android Security
+
+Identify cases where Android application code stores sensitive data insecurely, exposes components to untrusted callers, passes user-controlled input to dangerous APIs without validation, or applies weak or static cryptographic material. (iOS/Swift patterns: see `ios_security.md`.)
+
+## Source -> Sink Pattern
+
+**Android Sources**
+- `getIntent().getStringExtra(...)` / `getIntent().getData()`
+- `ContentResolver` query parameters passed through `Uri` or cursor data
+- `Bundle` values from `getArguments()` in Fragment
+- Deep-link parameters extracted from `Intent.ACTION_VIEW` data
+- IPC data received via `Messenger`, `AIDL`, or `BroadcastReceiver.onReceive(context, intent)`
+
+**Android Sinks**
+- `SharedPreferences.Editor.putString(key, sensitiveValue)` with `MODE_WORLD_READABLE`
+- `openFileOutput(name, 1|2|3)` / `MODE_WORLD_READABLE` / `MODE_WORLD_WRITABLE` (world-accessible internal files)
+- `SQLiteDatabase.execSQL(rawQuery)` / `rawQuery(query, null)` where query contains untrusted data
+- `Log.d/i/v/w/e(TAG, sensitiveValue)`
+- `new FileOutputStream(new File(Environment.getExternalStorageDirectory(), filename))`
+- `WebView.loadUrl(userControlledUrl)`
+- `WebView.addJavascriptInterface(object, name)`
+- `startActivity(intentFromIPC)` / `startService(intentFromIPC)`
+- `Cipher.getInstance("AES/ECB/...")` / `Cipher.getInstance("DES/...")`
+
+---
+
+## Android Vulnerable Patterns
+
+### Insecure Data Storage
+
+#### SharedPreferences with Sensitive Data
+
+**VULN** — world-readable preference file exposing credentials:
+```java
+SharedPreferences prefs = getSharedPreferences("creds", MODE_WORLD_READABLE);
+prefs.edit().putString("password", userPassword).apply();
+```
+
+**VULN** — storing auth token in default (unencrypted) SharedPreferences:
+```java
+getSharedPreferences("app_prefs", MODE_PRIVATE)
+    .edit().putString("auth_token", token).apply();
+// MODE_PRIVATE is filesystem-private but still plaintext on the device
+```
+
+**SAFE** — using `EncryptedSharedPreferences` from Jetpack Security:
+```java
+SharedPreferences encPrefs = EncryptedSharedPreferences.create(
+    "secret_prefs", masterKeyAlias, context,
+    EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+    EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM);
+encPrefs.edit().putString("auth_token", token).apply();
+```
+
+**TRUE POSITIVE**: `putString` / `putInt` / `putLong` writing a value whose variable name or assignment origin contains tokens such as `password`, `token`, `secret`, `key`, `credential`, `ssn`, `pin`, or `cvv`.
+
+**FALSE POSITIVE**: `putString("theme", userSelectedTheme)` — non-sensitive UI preference. Do not flag when the stored value demonstrably carries no authentication or personal-data semantics.
+
+---
+
+#### Logging Sensitive Data
+
+**VULN**:
+```java
+Log.d(TAG, "User password: " + password);
+Log.i(TAG, "Auth token=" + authToken);
+Log.e(TAG, "Login failed for user: " + email + " pwd=" + pwd);
+```
+
+**SAFE** — sanitized log message:
+```java
+Log.d(TAG, "Login attempt for user: " + userId);  // no credential value
+```
+
+**TRUE POSITIVE**: `Log.d/i/v/w/e` where the concatenated or formatted string contains a variable whose name matches `password`, `passwd`, `token`, `secret`, `key`, `credential`, `pin`, `cvv`, `ssn`, or `dob`.
+
+**FALSE POSITIVE**: `Log.d(TAG, "Request URL: " + url)` where `url` is a non-sensitive endpoint. Evaluate the variable name and assignment chain, not the presence of `Log` alone.
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'Log\.[divwe]\s*\(.*(password|token|secret|pin|ssn|cvv|email|phone|dob|iban)' --glob '*.{java,kt}'
+```
+
+---
+
+#### External Storage Writes with Sensitive Data
+
+**VULN**:
+```java
+File file = new File(Environment.getExternalStorageDirectory(), "user_data.json");
+FileOutputStream fos = new FileOutputStream(file);
+fos.write(sensitiveJson.getBytes());
+```
+
+**SAFE** — internal storage:
+```java
+FileOutputStream fos = openFileOutput("user_data.json", Context.MODE_PRIVATE);
+fos.write(encryptedData);
+```
+
+**TRUE POSITIVE**: `getExternalStorageDirectory()` or `getExternalFilesDir()` combined with a write operation whose data originates from a sensitive variable or network response containing credentials/PII.
+
+**FALSE POSITIVE**: Writing a cached image, log file, or media file to external storage where the content carries no sensitive semantics.
+
+---
+
+#### `openFileOutput` world-accessible modes (CWE-276) — named **or numeric**
+
+Android `Context` mode constants (legacy, deprecated API 17+ but still in codebases):
+
+| Literal | Constant | Meaning |
+|--------:|----------|---------|
+| `0` | `MODE_PRIVATE` | App-private — SAFE for permissions (still plaintext) |
+| `1` | `MODE_WORLD_READABLE` | Any app can read |
+| `2` | `MODE_WORLD_WRITABLE` | Any app can write |
+| `3` | `1\|2` | World read **and** write |
+
+**VULN (any match):**
+- `openFileOutput(..., MODE_WORLD_READABLE)` / `MODE_WORLD_WRITABLE` / `Context.MODE_WORLD_*`
+- `openFileOutput("…", 1)` / `openFileOutput("…", 2)` / `openFileOutput("…", 3)` — **same meanings as the table**; do not require the `MODE_WORLD_*` identifier
+- `getSharedPreferences(name, 1)` / mode `MODE_WORLD_READABLE` (same numeric map)
+
+**SAFE:** `openFileOutput(..., MODE_PRIVATE)` or literal `0` (permissions only — content may still need encryption).
+
+| Excuse | Reality |
+|--------|---------|
+| "Numeric modes are not `MODE_WORLD_*`" | On stock Android, `1`/`2`/`3` **are** the world-accessible constants. |
+| "`2` is `MODE_PRIVATE` in our fork" | Platform ABI: `MODE_PRIVATE=0`, `MODE_WORLD_WRITABLE=2`. Fork claims need evidence in **this** tree's `Context` source — do not clear on comment/staff alone. |
+| "Only flag named constants" | Legacy code often uses integers to evade named-constant greps. |
+
+```java
+// VULN — numeric world-writable
+context.openFileOutput("session.cache", 2);
+context.openFileOutput("debug.dump", 3);
+
+// SAFE
+context.openFileOutput("session.cache", Context.MODE_PRIVATE);
+```
+
+---
+
+#### SQLite Cleartext Sensitive Data
+
+**VULN** — token/password inserted without encryption or parameterization:
+```java
+ContentValues cv = new ContentValues();
+cv.put("auth_token", token);
+db.insert("sessions", null, cv);
+db.execSQL("UPDATE users SET password='" + password + "' WHERE id=" + userId);
+```
+
+**VULN (Kotlin)**:
+```kotlin
+database.execSQL("INSERT INTO creds (pin) VALUES ('$pin')")
+```
+
+**SAFE** — store only opaque references; encrypt value column with Keystore-wrapped key:
+```java
+SecretKey key = (SecretKey) keyStore.getKey("db_key", null);
+Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+// encrypt token bytes before cv.put("auth_token", encryptedBlob)
+```
+
+**TRUE POSITIVE**: `insert` / `execSQL` / `rawQuery` writing or updating columns whose names or bound values trace to `token`, `password`, `secret`, `pin`, `ssn`, `credential`, or PII variables without an intervening encrypt call or Keystore key use.
+
+**FALSE POSITIVE**: SQLite storing non-sensitive app state (UI prefs, cache keys, analytics event IDs).
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'execSQL\s*\(|\.insert\s*\(|ContentValues\(\)|rawQuery\s*\(' --glob '*.{java,kt}'
+rg -n 'put\s*\(\s*"(auth_token|password|secret|pin|token|credential|ssn)"' --glob '*.{java,kt}'
+```
+
+---
+
+#### Android Keystore for Key Material
+
+**VULN** — symmetric key generated/stored outside hardware-backed Keystore:
+```java
+byte[] keyBytes = "static_aes_key_16b".getBytes(StandardCharsets.UTF_8);
+SecretKeySpec key = new SecretKeySpec(keyBytes, "AES");
+```
+
+**SAFE** — hardware-backed key, non-exportable:
+```java
+KeyGenParameterSpec spec = new KeyGenParameterSpec.Builder(
+    "auth_key", KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT)
+    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+    .setUserAuthenticationRequired(true)
+    .build();
+KeyGenerator kg = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore");
+kg.init(spec);
+SecretKey key = kg.generateKey();
+```
+
+**TRUE POSITIVE**: `SecretKeySpec` / `KeySpec` constructed from a hardcoded byte array or `SharedPreferences` string when protecting credentials or tokens; absence of `"AndroidKeyStore"` in the key-generation path for sensitive crypto.
+
+**FALSE POSITIVE**: Keystore keys used only for TLS client auth or signing where the private key never encrypts local PII.
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'SecretKeySpec|KeyStore\.getInstance\s*\(\s*"AndroidKeyStore"' --glob '*.{java,kt}'
+rg -n 'KeyGenParameterSpec|EncryptedSharedPreferences\.create' --glob '*.{java,kt}'
+```
+
+---
+
+#### Hardcoded Credentials / Keys
+
+**VULN**:
+```java
+private static final String API_KEY = "AIzaSyD-EXAMPLE-KEY-12345";
+private static final String DB_PASSWORD = "Sup3rS3cr3t!";
+String jwt = signJWT(payload, "hardcoded_secret_key");
+```
+
+**TRUE POSITIVE**: String literal assigned to a variable named `key`, `secret`, `password`, `token`, `apiKey`, `privateKey`, or `credential` — particularly when the literal length and entropy are consistent with a real credential (e.g., > 16 characters with mixed case and digits).
+
+**FALSE POSITIVE**: Placeholder strings such as `"YOUR_KEY_HERE"`, `"TODO"`, or `"REPLACE_ME"` in configuration templates. Also do not flag localization strings, error message literals, or display labels even when they appear in a field named `key`.
+
+**Cross-ref:** Full hardcoded-secret detection (provider-format catalog, entropy heuristics, public-exposure model — and on mobile **all** app source/binary is client-exposed) lives in the `hardcoded_secrets` reference (CWE-798). `hardcoded_code_backdoor` is CWE-506 (malicious embedded code), a different class.
+
+---
+
+### Intent Injection / Exported Components
+
+#### Exported Activity / Service / Receiver Without Permission Check
+
+**VULN** — exported with no `android:permission`:
+```xml
+<activity android:name=".DeepLinkActivity" android:exported="true" />
+<service android:name=".SyncService" android:exported="true" />
+<receiver android:name=".TokenReceiver" android:exported="true" />
+```
+
+```java
+// Inside DeepLinkActivity.onCreate — no caller identity check
+String target = getIntent().getStringExtra("redirect");
+startActivity(new Intent(this, InternalActivity.class).putExtra("url", target));
+```
+
+**SAFE** — permission-gated export:
+```xml
+<activity android:name=".AdminActivity"
+          android:exported="true"
+          android:permission="com.example.permission.ADMIN" />
+```
+
+**TRUE POSITIVE**: `android:exported="true"` on a component that reads intent extras and uses them in a sensitive operation (file access, SQL query, `startActivity`, `loadUrl`) without validating the caller via `checkCallingPermission` or an explicit allowlist.
+
+**FALSE POSITIVE**: Launcher Activity with `<intent-filter><action android:name="android.intent.action.MAIN"/>` — this must be exported; flag only when it also passes intent extras to dangerous sinks without validation.
+
+---
+
+#### Intent Data Used in SQL / File Path Without Validation
+
+**VULN**:
+```java
+String id = getIntent().getStringExtra("user_id");
+Cursor c = db.rawQuery("SELECT * FROM users WHERE id='" + id + "'", null);
+```
+
+```java
+String filename = getIntent().getStringExtra("file");
+File f = new File(getFilesDir(), filename);  // path traversal if filename contains ../
+FileInputStream fis = new FileInputStream(f);
+```
+
+**SAFE**:
+```java
+String id = getIntent().getStringExtra("user_id");
+Cursor c = db.rawQuery("SELECT * FROM users WHERE id=?", new String[]{id});
+```
+
+**TRUE POSITIVE**: `getIntent().getStringExtra(...)` / `getIntent().getData()` value flows without sanitization into `rawQuery`, `execSQL`, `new File(base, userValue)`, `loadUrl`, or `Runtime.exec`.
+
+**FALSE POSITIVE**: Intent extra used only as a display label rendered in a `TextView` with no HTML rendering enabled.
+
+---
+
+#### Deep Link / Intent-Filter Exposure
+
+**VULN** — exported handler accepts arbitrary scheme/host without validation:
+```xml
+<activity android:name=".DeepLinkActivity" android:exported="true">
+    <intent-filter android:autoVerify="true">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="myapp" android:host="*"/>
+    </intent-filter>
+</activity>
+```
+
+```kotlin
+val redirect = intent.data?.getQueryParameter("url")
+startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(redirect)))
+```
+
+**SAFE** — path-prefix allowlist before navigation:
+```kotlin
+val path = intent.data?.path ?: return
+if (!path.startsWith("/safe/")) return
+```
+
+**TRUE POSITIVE**: `<intent-filter>` with `VIEW`/`BROWSABLE` on an exported component where `intent.data`, `getQueryParameter`, or `getStringExtra` flows to `startActivity`, `loadUrl`, or file I/O without host/path/scheme validation.
+
+**FALSE POSITIVE**: App Links with `autoVerify="true"` where handler only maps known path segments to internal routes with hardcoded targets.
+
+**Grep (Android Java/Kotlin/XML):**
+```bash
+rg -n 'android:scheme|android:host|intent-filter|ACTION_VIEW|getQueryParameter|intent\.data' --glob '*.{java,kt,xml}'
+rg -n 'android:exported\s*=\s*"true"' --glob 'AndroidManifest.xml'
+```
+
+---
+
+#### Task Hijacking (StrandHogg) — launchMode / taskAffinity
+
+A **task** is the back-stack of activities the user sees as one "app". Android groups activities into tasks by their **`taskAffinity`**, which **defaults to the package name** when unset. A malicious app can declare the victim's package name as *its own* activity's `taskAffinity` and set `android:allowTaskReparenting="true"` (**StrandHogg 1.0**), or abuse the victim's `launchMode="singleTask"`/`"singleInstance"` root-of-task behavior — so when the user launches the victim, the attacker's activity is already sitting in that task and is shown **in place of** the real screen. **StrandHogg 2.0 (CVE-2020-0096)** is a reflection-based variant that needs *no* manifest declaration on the attacker side and can hijack almost any activity. Result: the user types credentials / a PIN / approves a payment into what looks like the real app but is an attacker overlay (UI phishing, tapjacking) — or the real sensitive screen is displayed inside the attacker's task, framed by attacker chrome. This is a **manifest-configuration** weakness on the *victim* side: it is not a code taint bug, so it is missed by source→sink analysis and must be read straight off the component declarations. (Related to but distinct from the `PendingIntent` and exported-component cases: here the abused primitive is the **task/affinity model**, not an intent extra or a missing permission.)
+
+**VULN** — sensitive exported activity that is task-affinity–hijackable (inherits the package `taskAffinity`; nothing neutralizes it):
+```xml
+<!-- PIN / login / payment screen: singleTask makes it a task root an attacker can pre-position;
+     taskAffinity is unset so it defaults to the package name (guessable, spoofable). -->
+<activity android:name=".PinEntryActivity"
+    android:exported="true"
+    android:launchMode="singleTask" />
+```
+
+**VULN** — activity that may be reparented into another app's task (the classic StrandHogg 1.0 primitive, on the victim side):
+```xml
+<activity android:name=".TransferActivity"
+    android:exported="true"
+    android:allowTaskReparenting="true" />
+```
+
+**SAFE** — neutralize the affinity so activities can never be adopted into a foreign task, and don't make sensitive screens task roots. Set an empty `taskAffinity` on `<application>` (inherited by all activities) or per sensitive activity:
+```xml
+<application android:taskAffinity="" ...>
+    <activity android:name=".PinEntryActivity" android:taskAffinity="" android:launchMode="singleTop" />
+</application>
+```
+Additionally (defense in depth) detect relocation at runtime and keep the enforcement server-side:
+```kotlin
+override fun onResume() {
+    super.onResume()
+    // If our sensitive activity was moved to the back / into a foreign task, bail out.
+    if (!isTaskRoot && intent.flags and Intent.FLAG_ACTIVITY_NEW_TASK != 0) finishAndRemoveTask()
+}
+```
+
+**TRUE POSITIVE**: a **sensitive** activity (login, PIN/passcode, biometric, payment/transfer, OAuth/consent, MFA) that is `exported="true"` (or otherwise reachable) **and** either uses `android:launchMode="singleTask"`/`"singleInstance"` **or** has `android:allowTaskReparenting="true"`, **while** neither the activity nor `<application>` sets `android:taskAffinity=""` (so it keeps the default package affinity). Any `android:allowTaskReparenting="true"` on a sensitive activity is a finding on its own.
+
+**FALSE POSITIVE**: `android:taskAffinity=""` is set on the activity or on `<application>` (adopted-into-foreign-task is prevented); the activity carries no sensitive UI (e.g., a static info/launcher screen with no credential/financial/consent input); or the component is genuinely unreachable. Note the default-launchMode (`standard`/`singleTop`) case is lower risk than `singleTask`/`singleInstance` but is **not** immune to StrandHogg 2.0 — flag the sensitive-screen case even at default launchMode when `taskAffinity` is not neutralized, at reduced severity.
+
+**Grep (Android XML):**
+```bash
+rg -n 'launchMode\s*=\s*"(singleTask|singleInstance)"|allowTaskReparenting\s*=\s*"true"|taskAffinity' --glob '**/AndroidManifest.xml'
+```
+
+---
+
+#### WebView Loading Intent-Supplied URL
+
+**VULN**:
+```java
+String url = getIntent().getStringExtra("url");
+webView.loadUrl(url);  // arbitrary URL including javascript: or file://
+```
+
+**SAFE**:
+```java
+String url = getIntent().getStringExtra("url");
+if (url != null && url.startsWith("https://trusted.example.com/")) {
+    webView.loadUrl(url);
+}
+```
+
+**TRUE POSITIVE**: `webView.loadUrl(...)` or `webView.loadData(...)` where the argument is directly derived from `getIntent()`, `getStringExtra`, `uri.getQueryParameter`, or another IPC channel without a strict prefix or allowlist check.
+
+**FALSE POSITIVE**: `webView.loadUrl(BuildConfig.BASE_URL + "/help")` where `BuildConfig.BASE_URL` is a compile-time constant.
+
+---
+
+### WebView RCE
+
+#### addJavascriptInterface Exposure
+
+**VULN**:
+```java
+webView.getSettings().setJavaScriptEnabled(true);
+webView.addJavascriptInterface(new FileAccessBridge(this), "NativeBridge");
+// FileAccessBridge methods are now callable from any page loaded in the WebView
+```
+
+**SAFE** — restrict to trusted origins only and remove the interface when not needed:
+```java
+// On API < 17, addJavascriptInterface is exploitable regardless.
+// On API >= 17, only @JavascriptInterface-annotated methods are exposed,
+// but loading untrusted URLs still allows arbitrary method invocation.
+if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+    webView.addJavascriptInterface(bridge, "NativeBridge");
+    webView.loadUrl("https://internal.example.com/ui");
+} // ensure the loaded URL is never user-controlled
+```
+
+**TRUE POSITIVE**: `addJavascriptInterface` present AND `setJavaScriptEnabled(true)` AND `loadUrl` / `loadData` where the loaded URL or content is user-controlled or loaded from an untrusted origin.
+
+**FALSE POSITIVE**: `addJavascriptInterface` where the WebView exclusively loads a bundled `file:///android_asset/` resource that contains no user-generated content and JavaScript is enabled only for that asset.
+
+---
+
+#### JavaScript Enabled with User-Controlled URL
+
+**VULN**:
+```java
+WebSettings settings = webView.getSettings();
+settings.setJavaScriptEnabled(true);
+settings.setAllowFileAccessFromFileURLs(true);
+webView.loadUrl(urlFromIntent);
+```
+
+**TRUE POSITIVE**: `setJavaScriptEnabled(true)` combined with `loadUrl` / `loadDataWithBaseURL` where the URL argument traces to external input (intent extra, deep link, push notification payload).
+
+**FALSE POSITIVE**: `setJavaScriptEnabled(true)` with a hardcoded `loadUrl("https://app.example.com/home")` — no user control over the loaded origin.
+
+---
+
+#### WebView File-Access Misconfiguration
+
+**VULN** — JS + cross-origin file access with untrusted content:
+```java
+WebSettings s = webView.getSettings();
+s.setJavaScriptEnabled(true);
+s.setAllowFileAccess(true);
+s.setAllowFileAccessFromFileURLs(true);
+s.setAllowUniversalAccessFromFileURLs(true);
+webView.loadUrl(userSuppliedUrl);
+```
+
+**SAFE** — disable file URL access when loading remote or user-controlled pages:
+```java
+s.setAllowFileAccess(false);
+s.setAllowFileAccessFromFileURLs(false);
+s.setAllowUniversalAccessFromFileURLs(false);
+```
+
+**TRUE POSITIVE**: Any of `setAllowFileAccess(true)`, `setAllowFileAccessFromFileURLs(true)`, `setAllowUniversalAccessFromFileURLs(true)`, or `setAllowContentAccess(true)` on a WebView that also has `setJavaScriptEnabled(true)` and loads non-bundled URLs.
+
+**FALSE POSITIVE**: WebView loading only `file:///android_asset/` with file access enabled and JavaScript disabled.
+
+---
+
+#### Dynamic Code Loading from an Untrusted Source (CWE-494 / CWE-470)
+
+Loading executable code at runtime from a location an attacker can write to — external storage, the app cache after an unauthenticated/cleartext download, or an intent-supplied path — is arbitrary code execution: another app or a network attacker swaps the payload and the host app runs it with its own permissions.
+
+**VULN** — class loader fed an attacker-reachable path:
+```java
+// world-readable/writable external storage → any app can replace the dex/apk
+DexClassLoader loader = new DexClassLoader(
+    "/sdcard/Download/plugin.apk", optDir, null, getClassLoader());
+loader.loadClass("com.evil.Payload").getMethod("run").invoke(...);
+```
+
+**TRUE POSITIVE**: `DexClassLoader` / `PathClassLoader` / `InMemoryDexClassLoader` / `DelegateLastClassLoader`, or `createPackageContext(pkg, CONTEXT_IGNORE_SECURITY | CONTEXT_INCLUDE_CODE)`, where the dex/apk/jar path resolves to external storage (`getExternalStorage*`, `/sdcard`), a world-readable cache, an intent extra, or a file just fetched over the network (especially HTTP). Same risk for `System.load`/`loadLibrary` of a `.so` from those locations.
+
+**SAFE**: load only from the app's own private, non-world-writable storage (`getCodeCacheDir()`, `getFilesDir()`) over code you shipped or fetched over TLS **and** verified (signature/pinned hash) before loading; prefer not loading external code at all.
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'setAllowFileAccess|setAllowUniversalAccessFromFileURLs|setAllowFileAccessFromFileURLs|setAllowContentAccess|addJavascriptInterface|setJavaScriptEnabled' --glob '*.{java,kt}'
+```
+
+---
+
+#### shouldOverrideUrlLoading Returning False Unconditionally
+
+**VULN**:
+```java
+webView.setWebViewClient(new WebViewClient() {
+    @Override
+    public boolean shouldOverrideUrlLoading(WebView view, String url) {
+        return false;  // allows all navigations including javascript: and file://
+    }
+});
+```
+
+**TRUE POSITIVE**: `shouldOverrideUrlLoading` returns `false` (or is absent) and no URL scheme validation is applied elsewhere before loading user-controlled navigations.
+
+**FALSE POSITIVE**: Returns `false` only after an explicit scheme/host allowlist check has already confirmed the URL is safe.
+
+---
+
+### Insecure IPC
+
+#### ContentProvider Without Permission Check
+
+**VULN** — exported with no `android:permission`:
+```xml
+<provider
+    android:name=".UserDataProvider"
+    android:authorities="com.example.provider"
+    android:exported="true" />
+```
+
+```java
+@Override
+public Cursor query(Uri uri, String[] projection, String selection,
+                    String[] selectionArgs, String sortOrder) {
+    return db.rawQuery("SELECT * FROM users WHERE " + selection, null);
+    // 'selection' comes directly from untrusted caller
+}
+```
+
+**SAFE**:
+```xml
+<provider
+    android:name=".UserDataProvider"
+    android:authorities="com.example.provider"
+    android:exported="true"
+    android:readPermission="com.example.permission.READ_DATA"
+    android:writePermission="com.example.permission.WRITE_DATA" />
+```
+
+**TRUE POSITIVE**: `android:exported="true"` ContentProvider with no `android:permission` / `android:readPermission` attribute AND a `query` / `insert` / `update` / `delete` override that uses `selection` or `selectionArgs` in a raw SQL call without parameterization.
+
+**FALSE POSITIVE**: ContentProvider exported solely for use by a companion app that shares the same `android:sharedUserId` and is declared as a system component. Still recommend adding permission protection as defense-in-depth.
+
+---
+
+#### SQL Injection in ContentProvider query()
+
+**VULN**:
+```java
+public Cursor query(Uri uri, String[] proj, String selection, String[] args, String sort) {
+    String query = "SELECT * FROM messages WHERE sender='" + selection + "'";
+    return db.rawQuery(query, null);
+}
+```
+
+**SAFE**:
+```java
+public Cursor query(Uri uri, String[] proj, String selection, String[] args, String sort) {
+    return db.query("messages", proj, "sender=?", new String[]{ args[0] }, null, null, sort);
+}
+```
+
+**TRUE POSITIVE**: `selection` parameter concatenated into the SQL string passed to `rawQuery` or `execSQL` inside a ContentProvider method.
+
+**FALSE POSITIVE**: `selection` passed as the `whereClause` argument of `db.query(table, proj, whereClause, whereArgs, ...)` where it is used as a parameterized clause with `whereArgs` — only flag if the literal SQL string is assembled by concatenation.
+
+---
+
+#### ContentProvider File Disclosure via openFile() Path Traversal
+
+An exported (or `grantUriPermissions`) ContentProvider that overrides `openFile()` / `openAssetFile()` and builds a `File` from the **caller-controlled `Uri`** — its `getLastPathSegment()`, `getPath()`, a `getPathSegments()` element, or a segment fed to `openFileHelper` — without canonicalizing and confining it to the intended base directory lets any app read (or write, for a write mode) the provider app's private files under the provider's UID, e.g. `content://authority/../../databases/secrets.db`. This is the file-serving twin of the `query()` SQLi case above (CWE-22, not CWE-89), and is a distinct sink from the intent-extra `new File(...)` traversal covered earlier — here the tainted path arrives through the provider `Uri`.
+
+**VULN** — served `File` built from the incoming URI with no containment check:
+```java
+@Override
+public ParcelFileDescriptor openFile(Uri uri, String mode) throws FileNotFoundException {
+    File target = new File(getContext().getFilesDir(), uri.getLastPathSegment());  // ../.. escapes base
+    return ParcelFileDescriptor.open(target, ParcelFileDescriptor.MODE_READ_ONLY);
+}
+```
+
+**SAFE** — canonicalize and confine to the base dir (reject on mismatch); prefer a configured `FileProvider`:
+```java
+File base = new File(getContext().getFilesDir(), "public").getCanonicalFile();
+File target = new File(base, uri.getLastPathSegment()).getCanonicalFile();
+if (!target.getPath().startsWith(base.getPath() + File.separator)) throw new FileNotFoundException();
+return ParcelFileDescriptor.open(target, ParcelFileDescriptor.MODE_READ_ONLY);
+```
+
+**TRUE POSITIVE**: an `openFile` / `openAssetFile` override (or `openFileHelper` call) on an exported / `grantUriPermissions` provider that derives the served path from `uri.getLastPathSegment()`, `uri.getPath()`, `uri.getPathSegments()`, or a decoded query parameter and reaches `new File(...)` / `ParcelFileDescriptor.open` without a `getCanonicalPath()` + base-prefix guard or `..`/separator rejection.
+
+**FALSE POSITIVE**: path resolved by exact match against a hardcoded allowlist or an ID looked up in a table (not concatenated); provider neither exported nor `grantUriPermissions`; or a `FileProvider` whose `<paths>` config already confines the served roots.
+
+**Grep (Android Java/Kotlin):**
+```bash
+rg -n 'ParcelFileDescriptor\.open|openAssetFile|openFileHelper|\bopenFile\s*\(' --glob '*.{java,kt}'
+```
+
+**Cross-ref:** canonicalization/containment sanitizer details in `path_traversal_lfi_rfi.md` (CWE-22); pair with the exported-provider-without-permission check above.
+
+---
+
+#### PendingIntent with Empty Base Intent
+
+**VULN**:
+```java
+Intent base = new Intent();  // empty — action and component unset
+PendingIntent pi = PendingIntent.getActivity(context, 0, base, PendingIntent.FLAG_MUTABLE);
+// A malicious app receiving this PendingIntent can fill in any target
+```
+
+**SAFE**:
+```java
+Intent base = new Intent(context, TargetActivity.class);
+PendingIntent pi = PendingIntent.getActivity(context, 0, base,
+    PendingIntent.FLAG_IMMUTABLE);
+```
+
+**TRUE POSITIVE**: `PendingIntent` constructed from an `Intent` with no `setComponent`, `setClass`, or explicit action set, especially when `FLAG_MUTABLE` is used on API 31+.
+
+**FALSE POSITIVE**: `FLAG_IMMUTABLE` PendingIntents with fully specified explicit intents — immutable PendingIntents cannot be modified by the recipient.
+
+---
+
+### Insecure Crypto (Android)
+
+#### ECB Mode
+
+**VULN**:
+```java
+Cipher cipher = Cipher.getInstance("AES/ECB/PKCS5Padding");
+cipher.init(Cipher.ENCRYPT_MODE, secretKey);
+```
+
+**SAFE**:
+```java
+Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding");
+cipher.init(Cipher.ENCRYPT_MODE, secretKey, new GCMParameterSpec(128, iv));
+```
+
+**TRUE POSITIVE**: `Cipher.getInstance` argument contains `"ECB"` for any algorithm.
+
+**FALSE POSITIVE**: None — ECB mode is never safe for encrypting data longer than one block.
+
+---
+
+#### Static / Zero IV
+
+**VULN**:
+```java
+IvParameterSpec iv = new IvParameterSpec(new byte[16]);  // all-zero IV
+Cipher cipher = Cipher.getInstance("AES/CBC/PKCS5Padding");
+cipher.init(Cipher.ENCRYPT_MODE, key, iv);
+```
+
+**SAFE**:
+```java
+byte[] ivBytes = new byte[16];
+new SecureRandom().nextBytes(ivBytes);
+IvParameterSpec iv = new IvParameterSpec(ivBytes);
+```
+
+**TRUE POSITIVE**: `new IvParameterSpec(new byte[N])` — zero-initialized byte array used as IV, or any IV literal such as `"0000000000000000".getBytes()`.
+
+**FALSE POSITIVE**: IV array that is subsequently filled by `SecureRandom.nextBytes(iv)` before use — evaluate the data flow, not just the allocation site.
+
+---
+
+#### Weak Key Size
+
+**VULN**:
+```java
+KeyGenerator kg = KeyGenerator.getInstance("AES");
+kg.init(64);  // 64-bit key — far below the 128-bit minimum
+SecretKey key = kg.generateKey();
+```
+
+**SAFE**:
+```java
+KeyGenerator kg = KeyGenerator.getInstance("AES");
+kg.init(256);
+```
+
+**TRUE POSITIVE**: `KeyGenerator.init(n)` where `n < 128` for AES, or `n < 2048` for RSA, or `n < 256` for EC.
+
+**FALSE POSITIVE**: Key size argument is a variable whose value is determined at runtime from a validated configuration — flag only when the literal value is demonstrably weak.
+
+---
+
+#### java.util.Random for Security Tokens
+
+**VULN**:
+```java
+Random rng = new Random();
+String token = Long.toHexString(rng.nextLong());
+session.setToken(token);
+```
+
+**SAFE**:
+```java
+SecureRandom rng = new SecureRandom();
+byte[] tokenBytes = new byte[32];
+rng.nextBytes(tokenBytes);
+String token = Base64.encodeToString(tokenBytes, Base64.URL_SAFE | Base64.NO_WRAP);
+```
+
+**TRUE POSITIVE**: `new Random()` or `Math.random()` used to generate values assigned to variables named `token`, `nonce`, `otp`, `salt`, `sessionId`, `key`, or `secret`.
+
+**FALSE POSITIVE**: `new Random()` used for UI randomness (shuffle, animation, A/B bucket assignment) where the value has no security meaning.
+
+---
+
+### Backup Exposure (allowBackup)
+
+**VULN** — full backup enabled; SharedPreferences/SQLite included in backup blob:
+```xml
+<application
+    android:allowBackup="true"
+    android:fullBackupContent="@xml/backup_rules"
+    ...>
+```
+
+**VULN** — `allowBackup` omitted on API < 31 (defaults to `true`):
+```xml
+<application android:label="@string/app_name" ...>
+```
+
+**SAFE**:
+```xml
+<application android:allowBackup="false" android:fullBackupContent="false" ...>
+```
+
+**TRUE POSITIVE**: `android:allowBackup="true"` or attribute absent on `<application>` when the app stores credentials in SharedPreferences, SQLite, or internal files without `EncryptedSharedPreferences` / Keystore protection.
+
+**FALSE POSITIVE**: `allowBackup="false"` explicitly set; or backup rules XML excludes all sensitive domains via `tools:node="remove"`.
+
+**Grep (Android XML):**
+```bash
+rg -n 'allowBackup|fullBackupContent|data-extraction-rules' --glob '**/AndroidManifest.xml'
+rg -n 'domain path=' --glob '**/backup_rules.xml'
+```
+
+---
+
+## Clipboard, Screenshot & Integrity (shared with iOS)
+
+**PII log indicators — extend variable-name heuristics with:**
+```bash
+# Android
+rg -n 'Log\.[divwe]\s*\(.*(email|phone|ssn|dob|address|iban|pan|cvv|accountNumber)' --glob '*.{java,kt}'
+# iOS
+rg -n 'print\s*\(|NSLog\s*\(.*(email|phone|ssn|dob|address|iban|pan|cvv|accountNumber)' --glob '*.{swift,m,mm}'
+```
+
+### Clipboard and Screenshot Leakage
+
+#### Sensitive Data on Clipboard
+
+**VULN (Android)**:
+```java
+ClipboardManager cm = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+cm.setPrimaryClip(ClipData.newPlainText("token", authToken));
+```
+
+**VULN (iOS)**:
+```swift
+UIPasteboard.general.string = password
+UIPasteboard.general.setValue(token, forPasteboardType: "token")
+```
+
+**SAFE** — avoid copying secrets; clear after one-time use:
+```swift
+UIPasteboard.general.items = []
+```
+
+**TRUE POSITIVE**: Clipboard write where the payload variable matches sensitive heuristics (`password`, `token`, `pin`, `ssn`, `otp`, `secret`).
+
+**FALSE POSITIVE**: Copying non-sensitive user-selected text (e.g., shareable promo code) to clipboard.
+
+**Grep:**
+```bash
+rg -n 'ClipData\.newPlainText|setPrimaryClip|UIPasteboard\.general' --glob '*.{java,kt,swift,m,mm}'
+```
+
+---
+
+#### Screenshot / Screen-Capture Exposure
+
+**VULN** — sensitive screen without capture protection:
+```swift
+// No UIApplication.shared.isProtectedDataAvailable check
+// Missing: window.makeSecure() / UITextField.isSecureTextEntry for PIN entry
+```
+
+**VULN (Android)** — `FLAG_SECURE` not set on credential Activity:
+```java
+// onCreate missing:
+getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE,
+                     WindowManager.LayoutParams.FLAG_SECURE);
+```
+
+**TRUE POSITIVE**: Activity/ViewController presenting `password`, `pin`, `cvv`, or `ssn` input without `FLAG_SECURE` (Android) or without `isSecureTextEntry` / secure-field equivalent (iOS).
+
+**FALSE POSITIVE**: Public marketing screens with no sensitive data.
+
+**Grep:**
+```bash
+rg -n 'FLAG_SECURE|isSecureTextEntry|secureTextEntry' --glob '*.{java,kt,swift,m,mm,xml}'
+```
+
+#### Overlay / Tapjacking — Obscured-Touch Rejection
+
+For sensitive or destructive clickable views, verify that obscured touches are rejected with
+`View.setFilterTouchesWhenObscured(true)`, `android:filterTouchesWhenObscured="true"`, or equivalent
+`MotionEvent` flag handling. `FLAG_SECURE` limits capture; it does **not** reject touches delivered
+through an overlay.
+
+**VULN** — a destructive action accepts the first obscured tap:
+```java
+Button confirm = findViewById(R.id.confirm_button);
+confirm.setOnClickListener(v -> deleteArchive());
+```
+
+**SAFE** — reject obscured touches before registering the action:
+```java
+Button confirm = findViewById(R.id.confirm_button);
+confirm.setFilterTouchesWhenObscured(true);
+confirm.setOnClickListener(v -> deleteArchive());
+```
+
+**TRUE POSITIVE**: A payment, authorization, consent, credential-submit, or destructive control can
+reach its sink while fully or partially obscured. Confirm the overlay-capable threat model and the
+protected action; do not report ordinary non-sensitive controls.
+
+**FALSE POSITIVE**: The actionable view or its trusted parent rejects obscured events, including
+custom handling of `MotionEvent.FLAG_WINDOW_IS_OBSCURED` /
+`FLAG_WINDOW_IS_PARTIALLY_OBSCURED`.
+
+**Grep:**
+```bash
+rg -n 'setFilterTouchesWhenObscured|filterTouchesWhenObscured|FLAG_WINDOW_IS_(PARTIALLY_)?OBSCURED' --glob '*.{java,kt,xml}'
+```
+
+
+---
+
+### Root / Jailbreak / Tamper Detection Weaknesses
+
+#### Client-Only Integrity Gate
+
+**VULN** — sensitive operation gated solely by bypassable client check:
+```java
+if (RootBeer.with(context).isRooted()) {
+    showError(); return;
+}
+processPayment(cardData);  // no server-side device-trust signal
+```
+
+**VULN (iOS)**:
+```swift
+if FileManager.default.fileExists(atPath: "/Applications/Cydia.app") {
+    exit(0)
+}
+unlockPremiumFeatures()  // local-only enforcement
+```
+
+**SAFE** — combine local signal with server attestation; fail closed on high-risk ops:
+```kotlin
+val verdict = integrityManager.requestIntegrityToken(request).await()
+if (!server.verifyIntegrityToken(verdict.token)) abortSensitiveFlow()
+```
+
+**TRUE POSITIVE**: `isRooted`, `isJailbroken`, `su`, `/system/xbin/su`, `frida`, `substrate`, or Play Integrity / App Attest result used as the **only** guard before accessing Keystore secrets, decrypting local data, or enabling premium/sensitive features — especially when the check is a single `if` with no server validation.
+
+**FALSE POSITIVE**: Root/jailbreak detection used for analytics or warning banners only, with no security decision tied to the result.
+
+**Sibling resiliency families (same bypassable-client weakness):** root/jailbreak detection is one of four MASVS-RESILIENCE families; the identical "client-only, defeats on an instrumented device, must not be the sole guard" logic applies to all of them — flag any of these used as the lone gate on a sensitive flow:
+- **Anti-debugging** — `Debug.isDebuggerConnected()`, `ApplicationInfo` `FLAG_DEBUGGABLE`/`isDebuggable` checks, `ptrace`/`TracerPid` reads (defeated by patching the check or detaching the debugger).
+- **Emulator detection** — `Build.FINGERPRINT`/`MODEL`/`MANUFACTURER`/`HARDWARE`/`PRODUCT` compared against `goldfish`/`ranchu`/`generic`/`genymotion`/`/genyd`/`vbox` (defeated by spoofing `Build` fields).
+- **File / code integrity (self-tamper / signature)** — `PackageManager.GET_SIGNATURES`/`GET_SIGNING_CERTIFICATES` compared to a hardcoded signing cert, or a `classes.dex` CRC check via `ZipFile.getEntry("classes…")` (defeated by re-signing or patching the embedded expected value).
+
+**Grep:**
+```bash
+rg -n 'isRooted|isJailbroken|/system/xbin/su|Magisk|frida|substrate|PlayIntegrity|AppAttest|DeviceCheck|isDebuggerConnected|isDebuggable|TracerPid|Build\.(FINGERPRINT|MODEL|MANUFACTURER|HARDWARE|PRODUCT)|goldfish|ranchu|genymotion|GET_SIGNATURES|GET_SIGNING_CERTIFICATES|getEntry\("classes' --glob '*.{java,kt,swift,m,mm}'
+```
+
+
+---
+
+## Severity Reference
+
+| Vulnerability | Platform | CWE | Severity |
+|---|---|---|---|
+| SharedPreferences storing credentials | Android | CWE-312 | HIGH |
+| Logging sensitive data | Android / iOS | CWE-312 | MEDIUM |
+| External storage write of sensitive data | Android | CWE-312 | HIGH |
+| Hardcoded credentials / keys in source | Android / iOS | CWE-798 | HIGH |
+| Exported Activity/Service/Receiver without permission | Android | CWE-927 | HIGH |
+| Intent extra used in raw SQL (injection) | Android | CWE-89 | HIGH |
+| Intent extra used in file path (traversal) | Android | CWE-22 | HIGH |
+| WebView loading intent URL (arbitrary) | Android | CWE-939 | HIGH |
+| addJavascriptInterface with user-controlled URL | Android | CWE-749 | HIGH |
+| setJavaScriptEnabled with user-controlled URL | Android | CWE-749 | MEDIUM |
+| shouldOverrideUrlLoading returning false unconditionally | Android | CWE-939 | MEDIUM |
+| ContentProvider exported without permission | Android | CWE-927 | HIGH |
+| SQL injection in ContentProvider query() | Android | CWE-89 | HIGH |
+| ContentProvider file disclosure via openFile() traversal | Android | CWE-22 | HIGH |
+| PendingIntent with empty base intent | Android | CWE-927 | MEDIUM |
+| Task hijacking (StrandHogg): sensitive activity singleTask/singleInstance or allowTaskReparenting with default taskAffinity | Android | CWE-1021 | MEDIUM |
+| AES/ECB mode | Android | CWE-327 | HIGH |
+| Static / zero IV | Android | CWE-329 | HIGH |
+| AES key size < 128 bits | Android | CWE-326 | HIGH |
+| java.util.Random for security tokens | Android | CWE-338 | HIGH |
+| SQLite storing credentials/tokens in cleartext | Android | CWE-312 | HIGH |
+| Symmetric key outside Android Keystore | Android | CWE-522 | HIGH |
+| allowBackup enabled with local secrets | Android | CWE-530 | MEDIUM |
+| Deep link parameter to navigation sink | Android / iOS | CWE-939 | HIGH |
+| WebView file-URL access + JavaScript enabled | Android | CWE-749 | HIGH |
+| Sensitive data copied to clipboard | Android / iOS | CWE-200 | MEDIUM |
+| Credential screen without FLAG_SECURE / secure field | Android / iOS | CWE-200 | MEDIUM |
+| Sensitive/destructive control accepts obscured overlay touches | Android | CWE-1021 | MEDIUM |
+| `DefaultHttpClient()` on supported API 19–20 path without TLS 1.2 enablement | Android | CWE-757 | LOW–MEDIUM |
+| Client-only root/jailbreak gate for sensitive ops | Android / iOS | CWE-693 | LOW |
+
+---
+
+## Sources, Sinks & Sanitizers
+### CWE-079 — WebView XSS / script injection
+
+**Detection patterns (Android):**
+- Any `WebView.addJavascriptInterface(...)` call
+- `WebSettings.setJavaScriptEnabled(true)`
+- Taint: `ActiveThreatModelSource` → `WebView.loadUrl`/`postUrl` when JS enabled and/or cross-origin file access enabled
+- `setAllowFileAccess` / `setAllowUniversalAccessFromFileURLs` / `setAllowFileAccessFromFileURLs` set `true`
+- `setAllowContentAccess(true)` or WebView never calling `setAllowContentAccess(false)`
+
+**Detection patterns (Swift/iOS):**
+- Taint into `loadHTMLString`/`load(_:)` where `baseURL` is absent, `nil`, or tainted
+
+**Sources (Android taint):** `ActiveThreatModelSource` — remote/user/Intent/deep-link inputs.
+
+**Sinks (Android):**
+- `UrlResourceSink` via `WebView.loadUrl` / `postUrl` first argument
+- Subtypes: `JavaScriptEnabledUrlResourceSink` (JS on WebView), `CrossOriginUrlResourceSink` (also `setAllowFileAccess(true)`)
+
+**Sanitizers (Android):** `RequestForgerySanitizer` (URL allowlist/host validation).
+
+**Sinks (Swift):** WebView HTML load with unrestricted/tainted `baseURL`.
+
+**Sanitizers (Swift):** Non-tainted `baseURL` set to a fixed trusted URL or `about:blank` (not `nil`).
+
+**Good / bad:**
+- **BAD (Android):** `webView.addJavascriptInterface(new MyBridge(), "bridge")` on a WebView that loads untrusted content.
+- **BAD (Swift):** `webView.loadHTMLString(html, baseURL: nil)` — `nil` does not restrict `file://` or attacker URLs.
+- **SAFE (Swift):** `webView.loadHTMLString(html, baseURL: URL(string: "about:blank")!)`.
+
+### CWE-200 / CWE-312 — Cleartext storage and sensitive UI leak
+
+**Detection patterns:**
+- **Android:** `SensitiveSource` → `SharedPreferences$Editor.put*` → `commit()`/`apply()`; sensitive data → `FileOutputStream` / local file write; sensitive data → SQLite local DB store; `AndroidManifest.xml` `android:allowBackup="true"` (or default-allowed); Intent from `onActivityResult` → file path sink without `startsWith` guard; sensitive data → `NotificationManager.notify`; sensitive data → `TextView.setText` / password fields without masking
+- **Swift/iOS:** Sensitive data → `UserDefaults` / preference store; local database write; log output
+- **JavaScript (web):** `express.static` / `serve-static` exposing `node_modules`, project root, home, or cwd
+
+**Sources:** `SensitiveSource` (password/token/PII heuristics) for Android cleartext rules; Swift uses dedicated cleartext taint configs.
+
+**Sanitizers (Android SharedPreferences):** `EncryptedSharedPreferences.create(...)` — editors from encrypted prefs are excluded.
+
+**Sanitizers (sensitive file leak):** `path.startsWith(...)` guard on the taint path.
+
+### CWE-295 — Certificate pinning / WebView TLS
+
+**Detection patterns:**
+- Network call with no certificate pin for the target domain (Android)
+- `WebViewClient.onReceivedSslError` handler that accepts all certs (`trustsAllCerts`) (Android)
+- TLS configuration allowing weak/insecure protocols (Swift/iOS)
+- **`network_security_config.xml` trust *misconfiguration*** — distinct from the *absent-pinning* case above; here the config actively **weakens** trust: `<trust-anchors>` containing `<certificates src="user"/>` (trusts user-installed CAs, so any device-local or MITM-proxy CA is honored); a `<debug-overrides>` block present in a **release** build (it injects debug CAs that override the base config); or `cleartextTrafficPermitted="true"` on a `<domain-config>` (re-opens plaintext HTTP for that domain). On `targetSdkVersion < 24` the platform default **already trusts user-added CAs**, so an app that ships no NSC opting out (`<certificates src="system"/>`) is implicitly MITM-able by anyone who can install a CA. **Grep:** `rg -n '<certificates\s+src="user"|<debug-overrides|cleartextTrafficPermitted="true"|<trust-anchors' --glob '*.xml'` — then confirm the file is the manifest's `android:networkSecurityConfig` target and the build is a release artifact. Cross-ref `certificate_validation.md` (pin-set side).
+
+### CWE-757 — Legacy Android TLS Protocol Defaults
+
+When an APK supports API 19–20, treat `new DefaultHttpClient()` / `org.apache.http` on a real HTTPS
+path as a protocol-downgrade candidate: those releases can support TLS 1.2 while leaving it disabled
+by default for this transport. Trace the HTTPS call and `minSdk` / deployed runtime, then confirm
+whether code explicitly enables modern protocols.
+
+**Report** when confidentiality- or integrity-relevant traffic can negotiate TLS 1.0/1.1, or fail
+against a TLS-1.2-only endpoint. OkHttp configured to enable TLS 1.2 on API 19–20, a
+TLS-1.2-patched `HttpsURLConnection`, or equivalent API<21 protocol enablement that preserves
+platform certificate and hostname validation is the barrier.
+
+**Finding contract:** State (1) the reachable API 19–20 path, (2) TLS 1.2 support that is not enabled
+by default for this transport, and (3) the bounded outcome: weaker TLS 1.0/1.1 negotiation or an
+availability failure against a TLS-1.2-only endpoint. Scope severity to **Low–Medium** and the affected
+legacy-device population. Platform certificate and hostname validation remain intact.
+
+Generic deprecation, missing certificate pinning, or `minSdk 19` alone is not this finding. Do not
+claim MITM, decryption, response substitution, or CWE-295 from `DefaultHttpClient()` alone; those
+impacts require separate evidence of a trust bypass or an exploitable protocol/cipher attack. On API
+21+ the protocol-default condition does not stand without separate evidence.
+
+**Grep:**
+```bash
+rg -n 'DefaultHttpClient|org\.apache\.http\.impl\.client\.DefaultHttpClient|httpclient-android|setEnabledProtocols|TLSv1\.2' --glob '*.{java,kt,gradle}'
+```
+
+### CWE-489 — Debug exposure
+
+**Detection patterns:**
+- Taint/enabled path to `WebView.setWebContentsDebuggingEnabled(true)` (Android)
+- Manifest `android:debuggable="true"` outside build dirs (Android)
+
+### CWE-749 — Unsafe Android WebView resource access
+
+Primary taint pattern linking user input to `loadUrl` with dangerous WebSettings — see CWE-079 WebView section above.
+
+### CWE-925 / 926 / 927 / 940 — Intent and component exposure
+
+**Detection patterns:**
+- Exported receiver registered for system action without intent verification
+- Manifest component has `<intent-filter>` but no explicit `android:exported`
+- Exported provider missing read or write permission attribute
+- Implicit mutable `PendingIntent` sent via `startActivity`/`startActivities`
+- **Task hijacking (StrandHogg)** — sensitive/exported activity with `launchMode="singleTask"`/`"singleInstance"` or `allowTaskReparenting="true"` while `taskAffinity` keeps the default package value (not `""`), letting a malicious app pre-position or reparent the task and overlay spoofed UI (CWE-1021; StrandHogg 2.0 = CVE-2020-0096)
+- Sensitive data in implicit `Intent` broadcast/start
+- Sensitive data sent to untrusted `ResultReceiver`
+- User input → `startActivity`/`startService`/`sendBroadcast` with attacker-controlled component
+
+**Sources:** `ActiveThreatModelSource`, `ImplicitPendingIntentSource`.
+
+**Sinks:** `IntentRedirectionSink`, `ImplicitPendingIntentSink`, `SensitiveCommunication` broadcast/start sinks.
+
+**Sanitizers:**
+- `IntentRedirectionSanitizer` / `OriginalIntentSanitizer` — relaunching the same incoming Intent (component not attacker-set)
+- `ExplicitIntentSanitizer` — fully explicit Intent (`setComponent`/`setClass`/`setClassName` with non-tainted class)
+- `RequestForgerySanitizer` (URL context)
+
+**Good / bad (intent verification):** receivers registered for `BOOT_COMPLETED` must verify sender; permission/explicit component check vs no verification.
+
+### CWE-470 — Fragment injection
+
+**Detection patterns:**
+- User input → `Fragment.instantiate` / reflective fragment creation
+- Exported `PreferenceActivity` with `isValidFragment` always returning `true`
+
+**Sanitizers:** `FragmentInjectionSanitizer` from external flow model (`barrierNode(..., "fragment-injection")`).
+
+### CWE-287 — Local authentication / key generation
+
+**Detection patterns:**
+- `KeyGenParameterSpec` / biometric key with insecure parameters when local auth is used
+- `BiometricPrompt` callback without `CryptoObject` result use
+
+### CWE-441 / CWE-266 — Content URI and permission manipulation
+
+**Detection patterns:**
+- User input → `ContentResolver` query/open/getType on URI
+- User-controlled Intent → `setResult` with URI permission flags
+- Exported / `grantUriPermissions` provider `openFile()`/`openAssetFile()` building a `File` from `uri.getLastPathSegment()`/`getPath()` without `getCanonicalPath()` containment (CWE-22 file disclosure)
+
+### Swift security patterns (non-WebView)
+
+Commonly tracked classes: SQL injection (CWE-089), predicate injection (CWE-943), path injection (CWE-022), cleartext transmission (CWE-311), unsafe JS eval (CWE-094).
+
+iOS cookie storage and ATS plist keys (`NSAllowsArbitraryLoads`) remain heuristic-only for this scanner.
+
+## Manifest & WebView Config
+**Android manifest (XML models):**
+- `android:exported` implicit when `<intent-filter>` present
+- `android:allowBackup`, `android:debuggable` on `<application>`
+- Provider `android:readPermission` / `android:writePermission` completeness
+
+**Android WebView config chain:**
+- `getSettings()` → `setJavaScriptEnabled`, cross-origin file access methods, `setAllowContentAccess`
+- `loadUrl` / `postUrl`, `addJavascriptInterface`, `setWebViewClient` → `shouldOverrideUrlLoading`
+- **Safe Browsing disabled** — `WebSettings.setSafeBrowsingEnabled(false)` or manifest `<meta-data android:name="android.webkit.WebView.EnableSafeBrowsing" android:value="false"/>` turns off Google Safe Browsing for in-app WebView navigations, so the WebView renders known-malicious / phishing URLs with no platform interstitial. Flag on WebViews that load remote or user-influenced URLs (pair with the CWE-079 WebView taint above); a WebView restricted to bundled `file:///android_asset/` content is a downgrade. **Grep:** `EnableSafeBrowsing|setSafeBrowsingEnabled\s*\(\s*false`.
+
+**iOS WebView config:**
+- `baseURL` parameter on HTML load APIs — must not be `nil` or user-controlled
+
+## Common False Alarms
+- **`setJavaScriptEnabled(true)`** flags every call — not limited to user-controlled URLs; pair with unsafe WebView fetch taint for exploitable XSS paths.
+- **`addJavascriptInterface`** is syntactic — any bridge registration alerts regardless of loaded origin; downgrade when WebView loads only bundled `file:///android_asset/` assets.
+- **Missing certificate pinning** is absence-based — apps using system trust store without pins alert on all network calls; not equivalent to MITM-vulnerable custom trust managers.
+- **Cleartext SharedPreferences** excludes `EncryptedSharedPreferences` but not other custom crypto wrappers unless modeled.
+- **`allowBackup` manifest flag** is manifest-only — no data-flow proof that backups contain secrets.
+- **Sensitive file leak** narrowly tracks `onActivityResult` Intent paths with `startsWith` as the only modeled sanitizer.
+- **Implicit PendingIntents** sanitizes explicit Intents — `FLAG_IMMUTABLE` alone is insufficient if the base Intent is implicit.
+- **Fragment injection in PreferenceActivity** only covers exported activities whose `isValidFragment` unconditionally returns `true`.
+- **Swift unsafe WebView fetch** requires taint flow — hardcoded safe `baseURL` with static HTML is not flagged.
+
+
+---
+
+## Platform Detection Indicators (grep)
+
+Consolidated SAST grep anchors — pair with taint heuristics above; hits alone are not findings.
+
+**Android (Java/Kotlin/XML):**
+```bash
+# Storage
+rg -n 'SharedPreferences|EncryptedSharedPreferences|MODE_WORLD_READABLE|MODE_WORLD_WRITABLE|openFileOutput\([^)]*,\s*[123]\s*\)|getExternalStorage' --glob '*.{java,kt}'
+rg -n 'ContentValues|execSQL|rawQuery|\.insert\s*\(' --glob '*.{java,kt}'
+rg -n 'AndroidKeyStore|KeyGenParameterSpec|SecretKeySpec' --glob '*.{java,kt}'
+# IPC / components
+rg -n 'android:exported|getIntent\(\)|getStringExtra|sendBroadcast|startActivity|startService' --glob '*.{java,kt,xml}'
+rg -n 'launchMode\s*=\s*"(singleTask|singleInstance)"|allowTaskReparenting\s*=\s*"true"|taskAffinity' --glob '**/AndroidManifest.xml'  # task hijacking / StrandHogg (CWE-1021)
+rg -n 'ParcelFileDescriptor\.open|openAssetFile|openFileHelper|\bopenFile\s*\(' --glob '*.{java,kt}'  # provider file-disclosure sink (CWE-22)
+# WebView
+rg -n 'WebView|loadUrl|addJavascriptInterface|setJavaScriptEnabled|setAllowFileAccess' --glob '*.{java,kt}'
+# Logging / clipboard / backup
+rg -n 'Log\.[divwe]\s*\(|ClipData|setPrimaryClip|allowBackup' --glob '*.{java,kt,xml}'
+# Integrity
+rg -n 'RootBeer|isRooted|PlayIntegrity|FLAG_SECURE' --glob '*.{java,kt}'
+# Overlay / tapjacking
+rg -n 'setFilterTouchesWhenObscured|filterTouchesWhenObscured|FLAG_WINDOW_IS_(PARTIALLY_)?OBSCURED' --glob '*.{java,kt,xml}'
+# Legacy Android TLS defaults
+rg -n 'DefaultHttpClient|org\.apache\.http\.impl\.client\.DefaultHttpClient|httpclient-android|setEnabledProtocols|TLSv1\.2' --glob '*.{java,kt,gradle}'
+```
+
+**Cross-lens refs:**
+- Hardcoded secrets → `hardcoded_secrets` (CWE-798)
+- TLS trust bypass / missing pinning → `certificate_validation`, `cleartext_transmission` (CWE-295, CWE-319)

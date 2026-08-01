@@ -1,0 +1,20 @@
+# Editor swap/backup files — vim swap headers embed the username, hostname,
+# and absolute path of the machine that wrote them. Never commit them.
+*.swp
+*.swo
+*.swn
+.*.sw[a-p]
+*~
+*.bak
+.#*
+\#*#
+
+# OS metadata
+.DS_Store
+._*
+Thumbs.db
+desktop.ini
+
+# Scanner working artifacts (when this repo is itself a scan target)
+.llm-sast-scanner-cache/
+sast_report-*.md

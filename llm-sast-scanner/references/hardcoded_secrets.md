@@ -1,0 +1,193 @@
+---
+name: hardcoded_secrets
+version: "0.3"
+description: Detect hardcoded secrets at rest in source/config/build artifacts (CWE-798/259/321) — API keys, access tokens, signing/JWT secrets, Rails `secret_token` / `secret_key_base` literals, private keys, OAuth client secrets, and connection strings carrying embedded passwords, assigned as string literals. Severity is driven by the public-exposure question — can an external attacker extract this secret from the deployed artifact (client bundle, mobile binary, public asset) without server access? Distinct from default_credentials (reachable login PAIRS), weak_crypto (algorithm strength), and information_disclosure (runtime leakage).
+---
+
+# Hardcoded Secrets (CWE-798 / CWE-259 / CWE-321)
+
+A hardcoded secret is a credential — an API key, access/refresh token, signing or JWT secret, private key, OAuth client secret, or a connection string carrying an embedded password — written **directly as a string literal** in source, config, or a build artifact. It is committed to version control, visible to everyone with repo (or artifact) access, survives in git history after "removal", and cannot be rotated without a code change and redeploy.
+
+This is the home for **secret literals at rest**. It is distinct from its neighbors — pick the narrowest:
+
+- **`default_credentials`** — a hardcoded *username/password login PAIR* (e.g. `admin`/`admin`) reachable through an auth endpoint. That is an access-control bug; this class is about secret *material* leaking from the artifact. See `default_credentials.md`.
+- **`weak_crypto_hash`** — the *algorithm/key strength* is the defect (MD5, DES, 16-byte AES key). When the problem is that the key is *hardcoded and extractable* (not that it's weak), report **here**. See `weak_crypto_hash.md`.
+- **`information_disclosure`** — a secret leaked at *runtime* via logs, error bodies, debug endpoints, or HTTP responses. This class is about secrets sitting in code/artifacts at rest. See `information_disclosure.md`.
+
+## Core question: can an external attacker extract it?
+
+Severity is governed by **reachability of the artifact**, not just the presence of a literal:
+
+> **Can an external attacker obtain this secret from the deployed application without server access?**
+
+- **YES — client-exposed** (bundled into frontend JS, mobile binary, source map, or a public static asset): an attacker extracts it with browser DevTools or by decompiling the app. → **High / Critical** (Critical if it's a live, high-privilege secret: cloud key, server-side API key, signing key).
+- **NO — backend-only** (server source never shipped to clients): still a real finding — VCS exposure, no rotation, blast radius on repo compromise, lateral movement. → **Medium** (Low only for low-value/scoped secrets). **Do not silently drop backend secrets** — "bad practice but not externally reachable" is a *Medium*, not a non-finding.
+
+This is the key addition over naive secret-grepping: a publishable client key (Stripe `pk_live_`) is **not** a finding, while the *same shape* server secret (`sk_live_`) shipped into a client bundle is **Critical**.
+
+## Client vs backend routing (where does this file ship?)
+
+Decide whether the file reaches a client. Treat as **publicly accessible** when in doubt — if it *could* be bundled for the client, it is exposed.
+
+| Stack | Public (shipped to client) | Backend-only |
+|-------|----------------------------|--------------|
+| **Next.js** | `NEXT_PUBLIC_*` env (inlined into bundle), files imported from a `"use client"` component, `pages/` client code | `app/api/`, `"use server"` actions, server components not importing the secret |
+| **Nuxt** | `pages/`, `components/`, anything under client runtime | `server/`, `nitro` handlers |
+| **CRA / Vite / Angular / Vue** | **all of `src/`** is bundled; `REACT_APP_*`, `VITE_*`, `NG_*`, `VUE_APP_*` are inlined | server code in a separate backend project |
+| **Mobile (iOS/Android/RN/Flutter)** | **ALL source is public** — APK/IPA decompile, RN/Hermes JS bundles, `strings` on binaries | none — there is no "backend-only" inside the app |
+| **Electron** | renderer code, `app.asar` (just an archive — `npx asar extract`) | main-process code is still on disk, treat as low-trust |
+| **Rails / Ruby** | rarely shipped to browsers; treat `config/initializers/secret_token.rb`, committed `config/secrets.yml` / `credentials.yml.enc` **master.key**, and `database.yml` passwords as **backend-only Medium** (VCS forever) unless the same literal is also bundled client-side | same files — still report |
+| **Static / SSG** | `public/`, `static/`, `assets/`, `www/`, `dist/`, source maps (`.map`), `__NEXT_DATA__` | — |
+
+**Import-chain method:** (1) is the literal in a path that bundles to the client? (2) is the defining module transitively imported from a client entry point? (3) is there a `"use server"` / `app/api/` boundary that keeps it server-side? (4) cross-check `architecture-threat-model.md`. If a client import path exists, classify **client-exposed**.
+
+## What it IS / IS NOT
+
+**IS:** an API key / token / signing or JWT secret / private key / OAuth client secret / connection string with an embedded password, present as a **real, high-entropy literal** (matches a provider format or ≥20 random chars) in source, config, or a build artifact.
+
+**IS NOT (do not flag):**
+- **Env-var reads** — `process.env.X`, `os.environ[...]`, `System.getenv(...)`, `ENV[...]`, `Deno.env.get(...)`, secrets-manager/Key-Vault fetches (AWS Secrets Manager, GCP Secret Manager, Azure Key Vault, HashiCorp Vault).
+- **Placeholders** — `"your-api-key-here"`, `"INSERT_KEY"`, `"changeme"`, `"REPLACE_ME"`, `"<api_key>"`, `"xxxxxxxx"`, `"sample"`, `"dummy"`, `"test"`, empty string.
+- **Publishable-by-design keys** — Stripe `pk_live_*`/`pk_test_*`, Firebase **client** `apiKey` (it's an identifier; admin/service keys are NOT this), Google Maps browser keys, Sentry public DSN, Algolia search-only key, Mapbox `pk.*`, PostHog/Mixpanel project tokens. These are meant to be public.
+- **Test/sandbox keys** — `sk_test_*`, keys in `tests/`, `__mocks__/`, `*_test.go`, fixtures (note as Info only if they could ship to clients).
+- **Public keys / certs** — RSA/EC **public** keys, `authorized_keys`, `.crt`/`.pub` — designed to be shared.
+- **Type defs / docs / examples** — `interface Config { apiKey: string }`, doc comments, `.env.example` (template; only a finding if a matching real `.env` is committed or the value is real), hash checksums, build IDs, commit SHAs.
+- **`process.env` references with no literal** — a `NEXT_PUBLIC_*` *name* is only a finding when a real value is hardcoded in source, not when read from a gitignored env.
+
+## Adjacent case: secret with a weak fallback (default-on-unset)
+
+The "skip `process.env.*`" rule has **one exception**: a secret-named env read with a **string-literal fallback** — `process.env.JWT_SECRET || "dev-secret"`, `?? "changeme"`, Python `os.getenv("SECRET_KEY", "dev")`, Lua `os.getenv("KEY") or "..."`, Ruby `ENV["X"] || "..."`. The literal is **not** a placeholder to ignore: it is the value the process actually runs on **whenever the env var is unset**, so a missing secret in production silently falls back to a guessable, source-visible default → forgeable JWTs/sessions, fail-open auth.
+
+- **Flag the fallback literal regardless of length or "placeholder" wording.** `"changeme"` / `"dev-secret"` in the *fallback position* **are** the live secret when the env is unset, so the normal placeholder and `{16,}`-length suppressions do **not** apply here.
+- This is a **config-failure backdoor**, distinct from a literal assigned directly: the literal activates only on the unset path. Fix = **fail closed** — read with no literal default and throw on absence (`const s = process.env.JWT_SECRET; if (!s) throw …`), never `|| "<literal>"`.
+- Recon: `rg -n "(SECRET|TOKEN|KEY|PASSWORD|CREDENTIAL|AUTH)\w*\s*(\|\||\?\?)\s*['\"]|getenv\([^)]*(SECRET|TOKEN|KEY|PASSWORD)[^)]*,\s*['\"]"`.
+- The non-secret analogue — a *security control* gated on a truthy env flag (`if (process.env.DISABLE_AUTH)`) — is in `environment_variable_injection.md`.
+
+## Recon Indicators
+
+Grep for provider formats and secret-named assignments, then resolve the client/backend routing above.
+
+**High-confidence provider regexes** (canonical catalog — `default_credentials.md` defers here):
+
+| Secret Type | Pattern |
+|---|---|
+| AWS Access Key ID | `AKIA[0-9A-Z]{16}` (40-char base64 secret nearby), `ASIA[0-9A-Z]{16}` (temp) |
+| Google API Key | `AIza[0-9A-Za-z\-_]{35}` |
+| Google OAuth Client Secret | `GOCSPX-[0-9A-Za-z\-_]{28}` |
+| GCP Service Account JSON | `"type"\s*:\s*"service_account"` with `"private_key"` / `"private_key_id"` |
+| GitHub PAT / tokens | `ghp_[0-9A-Za-z]{36}`, `github_pat_[0-9A-Za-z_]{82}`, `gho_`/`ghs_`/`ghr_` + `[0-9A-Za-z]{36}` |
+| GitLab PAT | `glpat-[0-9A-Za-z\-_]{20}` |
+| Slack | token `xox[bpars]-...`; webhook `hooks.slack.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[A-Za-z0-9]+` |
+| Stripe **secret** | `sk_live_`, `sk_test_`, `rk_live_` (restricted), `whsec_[A-Za-z0-9]{32,}` (webhook signing secret — the HMAC passed to `constructEvent`, frequently a **bare positional arg** with no secret-named var). `pk_*` are **publishable — not a finding** |
+| Square | `sq0atp-[0-9A-Za-z\-_]{22}` (access token), `sq0csp-[0-9A-Za-z\-_]{43}` (OAuth app secret) |
+| Twilio | `AC[0-9a-f]{32}` (SID, auth token nearby), `SK[0-9a-fA-F]{32}` (API key) |
+| SendGrid | `SG\.[0-9A-Za-z\-_]{22}\.[0-9A-Za-z\-_]{43}` |
+| Mailgun | `key-[0-9a-zA-Z]{32}` |
+| OpenAI | `sk-[A-Za-z0-9]{48}`, `sk-proj-[A-Za-z0-9\-_]{100,}` |
+| Anthropic | `sk-ant-[A-Za-z0-9\-_]{90,}` |
+| xAI (Grok) | `xai-[A-Za-z0-9]{80,}` |
+| Azure Storage | `AccountKey=` + ~88-char base64; `DefaultEndpointsProtocol=...;AccountName=...;AccountKey=` |
+| Azure SAS token | a signed-URL query string carrying `sig=<url-encoded base64 HMAC>` alongside `sv=` (api-version) and `sp=`/`ss=`/`srt=`/`se=` (permissions/expiry) — e.g. `...blob.core.windows.net/...?sv=2022-11-02&ss=b&srt=co&sp=rwdlac&se=...&sig=...`. A bare SAS grants whatever `sp` allows until `se`; flag the whole token, not just `sig=` |
+| Azure DevOps / VSTS PAT | 52-char `[A-Za-z0-9]{52}` literal assigned near `pat`/`token`/`AccessToken`, or embedded in a clone URL (`https://anything:<pat>@dev.azure.com/...`) or `AZURE_DEVOPS_EXT_PAT`/`System.AccessToken` written to config |
+| Azure publish profile (`.publishsettings`/`.pubxml`) | `userPWD="<~60-char base64>"` / `<publishProfile ... userPWD=...>` — Web Deploy password (and often an embedded management certificate); the file itself committed is the finding |
+| Ansible Vault blob | a file/value beginning `$ANSIBLE_VAULT;1.1;AES256` — an encrypted-secret blob committed to the repo; recoverable offline if the vault password is weak/also committed (cross-ref `iac_security.md` Ansible) |
+| HashiCorp Vault | `hvs\.`, `hvb\.`, `hvr\.` + `[A-Za-z0-9_\-]{24,}` |
+| Terraform Cloud/Enterprise token | `[A-Za-z0-9]{14}\.atlasv1\.[A-Za-z0-9_\-]{60,}` — the `.atlasv1.` infix is the tell (grants remote state / workspace / run access) |
+| DigitalOcean | `dop_v1_`, `doo_v1_`, `dor_v1_` + `[a-f0-9]{64}` |
+| Alibaba Cloud AccessKey | `LTAI[0-9A-Za-z]{12,20}` (AccessKey ID; ~30-char secret nearby) — major cloud provider missing from most naive catalogs |
+| Shopify | `shpat_`, `shpss_`, `shppa_`, `shpca_` + `[a-fA-F0-9]{32}` |
+| npm | `npm_[A-Za-z0-9]{36}` |
+| Telegram Bot | `[0-9]{8,10}:AA[A-Za-z0-9_\-]{33}` |
+| Discord webhook | `discord(?:app)?\.com/api/webhooks/[0-9]{17,19}/[A-Za-z0-9_\-]{60,68}` |
+| Firebase (admin/server) | `firebase-adminsdk` service-account JSON, `FIREBASE_*` private key (client `apiKey` is NOT this) |
+| Cloudinary URL | `cloudinary://<api_key>:<api_secret>@<cloud_name>` — carries an embedded API secret, but it is **not** a DB scheme (so the connection-string regex below misses it) and is canonically stored as `CLOUDINARY_URL` (no `key`/`secret`/`token` in the name, so the secret-named-assignment heuristic misses it too). Match the `cloudinary://` scheme itself |
+| JWT (already-issued) | `eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+` (a baked-in long-lived token) |
+| Private Key | `-----BEGIN (RSA \|EC \|OPENSSH \|DSA \|PGP )?PRIVATE KEY-----` |
+| DB connection string | `(postgresql\|mysql\|mongodb(\+srv)?\|redis\|amqp)://[^:/@]+:[^@]+@` (user:pass@host) |
+| DB-CLI inline credentials (arg form, not URI) | `sqlplus\s+.*\w+/\w+@`, `mysql\b.*-p\S`, `mongosh?\b.*--password\s+\S`, `redis-cli\b.*-a\s+\S`, `PGPASSWORD=\S`, `psql\b.*-W` with a literal — a password passed as a **command-line argument** to a DB client in a script/`Dockerfile`/CI yaml/Makefile (distinct from the `user:pass@host` URI above, which the connection-string regex catches). Doubly bad: CLI args are also visible in process listings (`ps`)/shell history/CI logs at runtime (cross-ref `information_disclosure.md`). |
+
+**Generic / entropy heuristics** (no provider prefix):
+- Long random literals — **≥32 alphanumeric chars**, or **≥64 hex chars**, or base64 blobs assigned in an auth/crypto context. **Entropy is necessary, not sufficient**: long natural-language prose, UUIDs, commit hashes, and base64-of-text are all high-entropy too. Before flagging a prefix-less literal, confirm it does *not* decompose into dictionary words / common subword tokens — a string that tokenizes into few, *rare* tokens (high per-character rarity) is credential-like; one that splits into many common words/tokens is human text or structured data, not a secret. This rarity check is what keeps the generic catch-all from drowning in false positives.
+- UUID used *as an API key* (in an auth header / SDK init).
+- Secret-named assignments: `*api_key*`, `*apikey*`, `*secret*`, `*token*`, `*password*`, `*passwd*`, `*private_key*`, `*signing_key*`, `*client_secret*`, `*access_key*`, `*connection_string*`, `DATABASE_URL` = string literal.
+- Sinks that consume it: SDK init (`new Stripe("...")`, `new S3Client({credentials:{...}})`), `Authorization: Bearer <literal>`, `jwt.sign(payload, "<literal>")`, ORM/DB connect with inline `user:pass@`.
+- **Encoded at rest (decode-then-rescan).** A real secret may be wrapped in one or more reversible encoding layers to dodge naive scanners: base64, hex, URL/percent (`%xx`), or `\uXXXX` / `U+XXXX` unicode escapes. Decode each detected encoded segment **in place and re-scan** the decoded text for provider formats and high-entropy literals, **recursing a bounded depth** for nested chains (base64-of-hex, double-base64, base64-of-gzip — combine the encoding tags). A match found *only* inside a decoded layer is still a finding — record the encoding kind and decode depth so the literal can be located in the raw file. (Distinct from `prompt_injection.md`'s decode family, which decodes *untrusted input* to catch injected keywords; here you decode *source/config at rest* to catch a hidden credential.)
+
+```bash
+# provider-prefixed literals (highest confidence)
+rg -n "AKIA[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|gh[posr]_[0-9A-Za-z]{36}|sk_live_|sk-ant-|xox[bpars]-|glpat-|LTAI[0-9A-Za-z]{12,20}|whsec_[A-Za-z0-9]{32,}|sq0(atp|csp)-|\.atlasv1\.|cloudinary://|-----BEGIN [A-Z ]*PRIVATE KEY-----"
+# embedded creds in connection strings
+rg -n "(postgresql|mysql|mongodb(\+srv)?|redis|amqp)://[^:/@\"' ]+:[^@\"' ]+@"
+# Azure / Azure DevOps ecosystem secrets
+rg -n "AccountKey=[A-Za-z0-9+/]{86,}==|[?&]sig=[A-Za-z0-9%]+&?.*[?&]sv=|@dev\.azure\.com|AZURE_DEVOPS_EXT_PAT|userPWD=\"[A-Za-z0-9+/]{50,}\"|\\\$ANSIBLE_VAULT;"
+# secret-named assignment to a literal (then check client/backend routing + entropy)
+rg -ni "(api[_-]?key|secret|token|client[_-]?secret|signing[_-]?key|private[_-]?key|access[_-]?key)['\"]?\s*[:=]\s*['\"][^'\"]{16,}" --glob '!**/*.example' --glob '!**/test*'
+# Rails session / credential material at rest
+rg -n "secret_token\s*=|secret_key_base:|config\.secret_key_base|Rails\.application\.credentials" --glob '*.rb' --glob '*.yml'
+rg -n "config/master\.key|config/initializers/secret_token" .gitignore || true
+# client-exposure amplifiers
+rg -n "NEXT_PUBLIC_|REACT_APP_|VITE_|VUE_APP_|NG_APP_"
+# encoded-at-rest candidates → decode each hit and re-scan (recurse nested layers): long base64 blobs, percent-runs, \uXXXX runs
+rg -n "[A-Za-z0-9+/]{40,}={0,2}|(%[0-9A-Fa-f]{2}){8,}|(\\\\u[0-9A-Fa-f]{4}){6,}"
+```
+
+**Skip during recon:** `node_modules/`, `dist/`/`build/` *vendor* output (but DO inspect first-party bundles for client exposure), `.git/` blobs, `process.env.*` / `os.environ` / `System.getenv` (**except** when followed by a `||` / `??` / `or` string-literal fallback — see *Adjacent case* above), obvious placeholders, public keys, `*.lock` hashes.
+
+## Verify (two questions)
+
+1. **Is it a real secret?** Entropy + provider-format check; reject placeholders, test/sandbox keys, publishable-by-design keys, type defs.
+2. **Is it publicly accessible?** Walk the import chain / file routing above. Client-exposed → High/Critical; backend-only → Medium.
+
+## Finding fields (this class)
+
+- **Exposure path** — *how* an attacker reaches it. e.g. "inlined into client bundle via Vite, visible in DevTools → Sources"; "`npx asar extract app.asar`"; "`apktool d app.apk` then `grep AKIA`"; or "backend source only — VCS / repo-compromise exposure" for Medium cases.
+- **Verification steps** — concrete extraction (DevTools search for `AKIA`/`sk_live_`; ASAR extract; APK decompile). Optional authorized validity probe against the provider's identity endpoint (200 = live).
+- **Redaction (mandatory)** — never write the full secret in results. Mask: `AKIA****WXYZ`, `sk_live_****6789`. Record **class + `file:line` + masked value + type**.
+
+## Examples
+
+**VULN (Critical) — server secret shipped to the client bundle:**
+```javascript
+// src/lib/stripe.ts — imported by a "use client" component (Next.js)
+export const stripe = new Stripe("sk_live_EXAMPLEFAKE0123456789abcdef"); // extractable from bundle
+```
+
+**VULN (Medium) — backend-only, still a finding (VCS exposure, no rotation):**
+```python
+# app/server/config.py — never shipped to clients
+JWT_SECRET = "EXAMPLEFAKE-signing-key-9f8a7b6c5d4e"
+DB_URL = "postgresql://app:EXAMPLEFAKEpw@db.internal:5432/prod"
+```
+
+**VULN (Medium) — Rails session signing secret committed (`secret_token` / `secret_key_base`):**
+```ruby
+# config/initializers/secret_token.rb — NOT a harmless template when a real hex literal is committed
+MyApp::Application.config.secret_token = 'a1b2c3d4e5f6…'  # masks in report
+# also: config/secrets.yml → secret_key_base: "<long hex>"
+# also: config/master.key checked into git beside credentials.yml.enc
+```
+**Do not CLOSE** because staff say “every Rails app has secret_token.rb.” The *file* is expected; a **literal** signing/encryption secret in VCS is CWE-798. Prefer `ENV["SECRET_KEY_BASE"]` / credentials not committed / secret manager. Ensure `.gitignore` covers `config/master.key`, `config/credentials/*.key`, and local `database.yml` with passwords (cross-ref supply-chain / repo hygiene).
+
+**SAFE — env/secret-manager; client calls a backend proxy:**
+```javascript
+const stripe = new Stripe(process.env.STRIPE_SECRET_KEY); // server-only route; client → /api/charge
+```
+
+**NOT A FINDING — publishable-by-design client key:**
+```javascript
+const stripePub = "pk_live_EXAMPLEpublishable"; // publishable key, meant to be public
+const firebase = { apiKey: "AIzaSyEXAMPLEclientApiKey" }; // Firebase client apiKey is an identifier
+```
+
+## Cross-References
+
+- Reachable hardcoded login *pairs* (`admin`/`admin`): `default_credentials.md`.
+- Weak/short key *material* (algorithm strength, IV reuse): `weak_crypto_hash.md`.
+- Runtime secret leakage (logs/errors/responses/source maps served live): `information_disclosure.md`.
+- Client-shipped admin/service keys for BaaS: `baas_security.md`.
+- Secrets in IaC/CI/containers: `iac_security.md`, `cicd_container_security.md`.
+- Mobile artifact secrets: `android_security.md` / `ios_security.md`.
+
+## Core Principle
+
+Secrets belong in environment variables or a secrets manager, never in source. The severity is set by **who can reach the artifact**: a client-exposed live secret is Critical; a backend-only literal is still Medium because it lives in version control forever and cannot be rotated cleanly. Never report the raw value — mask it.

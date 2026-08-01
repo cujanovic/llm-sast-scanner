@@ -1,0 +1,391 @@
+---
+name: api_security
+version: "0.3"
+description: API/REST/web-service layer detection — excessive data exposure, missing rate limits, endpoint inventory gaps, transport and content negotiation misconfig, absent response schema filtering, signed-request canonicalization flaws, and server-side parameter pollution
+---
+
+# API / REST / Web-Service Security
+
+API-layer weaknesses live in route registration, request/response handlers, serializers, and middleware — not in generic auth or injection sinks alone. Static analysis should trace from HTTP entrypoints through serialization and response construction to what leaves the wire.
+
+*The core pattern: an API handler accepts or returns more than the contract requires — whole internal objects, unbounded payloads, debug routes, or mis-negotiated content — without transport hardening, throttling, or output filtering at the boundary.*
+
+## What It Is (and Is Not)
+
+**What it IS**
+- **Excessive data exposure**: returning ORM entities, full `User`/`Account` objects, or nested relations when the client contract needs a DTO subset (password hashes, internal IDs, tokens, PII fields in JSON)
+- **Missing output schema filtering**: no response DTO, serializer field list, or `@JsonIgnore`/`hidden`/`select`/`only()` before `res.json()` / `return entity`
+- **Missing rate limiting / resource consumption**: state-changing or expensive read endpoints with no per-IP/user/client throttle, body-size cap, pagination default, or timeout
+- **Improper endpoint inventory**: unversioned breaking routes, `/debug`, `/test`, `/internal`, deprecated handlers still mounted, management/actuator routes on the same host/port as public API
+- **Verbose API errors**: stack traces, SQL fragments, validation internals, or framework hints returned in JSON/XML error bodies (API-specific; see also `information_disclosure.md`)
+- **Missing TLS**: HTTP listeners, `http://` base URLs, TLS disabled in server config, or reverse-proxy forwarding cleartext for API traffic
+- **Content-Type / Accept mishandling**: accepting any body without validating `Content-Type`; echoing `Accept` into `Content-Type`; no 415/406 on unsupported media types
+- **JSON / AJAX response weaknesses**: top-level JSON arrays (legacy hijacking surface), string-concatenated JSON, missing `Content-Type: application/json`, sensitive fields in query strings on GET API routes
+- **HTTP verb handling gaps**: routes registered without method allowlist; handlers that ignore `req.method`; method-override headers processed without guard (see `http_method_tamper.md` for CSRF overlap)
+- **Server-side parameter pollution (argument injection into internal calls)**: user input concatenated into a server-side request to an *internal/upstream* API (query string, form body, REST path, or JSON/XML) without URL-encoding/validation, letting an attacker inject delimiters (`&`, `#`, `=`, `/`) to append, override, truncate, or re-route the internal request (CWE-88)
+- **Signed-request context gaps**: an HMAC/API signature covers only the body or selected parameters while the verifier separately trusts an unsigned method, path, timestamp, nonce, key/client identity, or content digest
+- **API security misconfiguration**: missing `Cache-Control: no-store` on sensitive JSON; absent HSTS on HTTPS API; debug/swagger/openapi UI enabled in production router
+- **SOAP / XML engine admin & auto-type surfaces**: remote admin / WSDD deploy flags and unrestricted SOAP `xsi:type` / auto class-load in shipped engine config (see *SOAP engine admin & auto-type* below)
+
+**What it is NOT**
+- **Object-level authorization (BOLA/IDOR)** — see `idor.md`; flag here only when the handler returns extra fields *after* auth passes
+- **Missing function-level auth or admin-only route without checks** — see `privilege_escalation.md`
+- **Mass assignment via request binding** — see `mass_assignment.md`
+- **SQL/command/template injection in handlers** — see `sql_injection.md`, `rce.md`
+- **CORS origin misconfiguration** — see `cors_misconfiguration.md`; mention only when reviewing API middleware holistically
+- **JWT/OAuth/API-key validation flaws** — see `authentication_jwt.md`
+- **GraphQL depth/complexity limits** — see `graphql_injection.md`
+- **SSRF in outbound webhook/callback helpers** — see `ssrf.md`
+- **SOAP engine factory login pairs** (`admin`/`axis2`) — see `default_credentials.md`
+- **WS-Addressing ReplyTo SSRF / JMS-EPR JNDI** — see `ssrf.md` / `jndi_injection.md`
+
+## Recon Indicators
+
+### Route / handler registration
+
+| Signal | Grep / structural targets |
+|--------|----------------------------|
+| Route tables | `@app.route`, `@GetMapping`, `@PostMapping`, `router.(get\|post\|put\|delete\|patch\|all)`, `app\.(get\|post\|use)`, `urlpatterns`, `Route::`, `gin\.(GET\|POST)` |
+| Catch-all / any method | `methods=\['GET','POST'\]` on mutation paths, `router.all\(`, `@RequestMapping` without `method =`, `app.use('/api', handler)` with no verb check |
+| Debug / internal | `/debug`, `/test`, `/dev`, `/internal`, `/admin`, `/actuator`, `/swagger`, `/openapi`, `/api-docs`, `/graphql-playground`, `/_`, `/health` with env dump |
+| Versioning gaps | `/api/users` with no `/v1/` prefix; parallel unversioned and versioned mounts; `@Deprecated` handlers still registered |
+| Management on public port | `management\.endpoints\.web\.exposure`, `spring\.boot\.admin`, `django-debug-toolbar` middleware in prod settings |
+| SOAP engine admin / auto-type | `enableRemoteAdmin`, `axis\.doAutoTypes`, `AdminService`, `SOAPMonitor`, `server-config\.wsdd`, `axis2\.xml` admin UI mounts, `services\.list` / happyaxis-style diagnostics |
+
+### Serializer / response construction
+
+| Signal | Grep / structural targets |
+|--------|----------------------------|
+| Whole-object return | `return user`, `res.json(user)`, `Response(entity)`, `to_dict()` without field filter, `ModelSerializer` with `fields = '__all__'`, `serialize.*User` |
+| Missing DTO layer | Direct ORM/document model in handler return; `jsonify(request.user.__dict__)`; `c.JSON(user)` in Go without struct tags |
+| Sensitive field leaks | `password`, `password_hash`, `hashed_password`, `salt`, `secret`, `api_key`, `ssn`, `internal_notes` in response dict keys or serializer `fields` |
+| String-built JSON | `'{"' +`, `"{\"name\":\"" +`, template literals assembling JSON from unescaped variables |
+| Top-level array | `res.json([`, `return json.dumps(rows)` where root is `[` (not wrapped in object) |
+
+### Transport, headers, content negotiation
+
+| Signal | Grep / structural targets |
+|--------|----------------------------|
+| Cleartext | `app.run.*ssl_context=None`, `http://` in `BASE_URL`, `secure:\s*false`, `ssl\.?enabled\s*=\s*false`, `listen.*:80` without TLS redirect |
+| Content-Type | Missing check of `Content-Type` / `request.is_json` before body parse; `res.setHeader('Content-Type', req.headers.accept)` |
+| Accept handling | No branch on `Accept` header; always returns JSON regardless of `Accept: text/html` |
+| Error verbosity | `res.status(500).json({ error: err.stack })`, `return str(e)`, `detail: exception`, `errors: err` in global exception handler |
+| Rate / size limits | Absence of `rateLimit`, `throttle`, `Limiter`, `slowapi`, `@ratelimit`, `express-rate-limit`, `max_request_body_size`, `413` handling |
+
+### Example grep one-liners
+
+```bash
+rg -n "res\.json\(|jsonify\(|return.*\.to_dict\(|fields\s*=\s*['\"]__all__['\"]" --glob '*.{py,js,ts,java,go,rb,php}'
+rg -n "/debug|/swagger|/openapi|/actuator|graphql-playground|management\.endpoints" .
+rg -n "rateLimit|Limiter|@ratelimit|slowapi|express-rate-limit" --glob '*.{py,js,ts,java}'  # absence on hot routes is manual follow-up
+rg -n "Content-Type.*accept|req\.headers\.accept|http://|ssl_context=None|secure:\s*false" .
+rg -n "hmac\.new|createHmac|Mac\.getInstance|X-(Signature|Timestamp)|canonical(Request|String)" --glob '*.{py,js,ts,java,go,rb,php,cs}'
+```
+
+## Vulnerable Conditions
+
+- Handler returns persistence model or ORM entity without serializer/DTO that excludes sensitive columns
+- List/detail endpoints embed nested relations (`include`, `populate`, `select_related`) with no field allowlist on nested objects
+- `ModelSerializer` / `@JsonAutoDetect` / `Gson` with default visibility exposes all fields including write-only secrets
+- No default pagination or `limit` cap on collection endpoints; client controls `page_size`/`limit`/`per_page` without server maximum
+- Expensive handler (aggregation, full-table scan, external call loop) reachable without rate limit or timeout middleware
+- `/v1/` and unversioned route both active with different auth or response shapes
+- Debug, swagger UI, actuator env/config, or test-only routes registered in production app factory or main router
+- Global exception handler serializes `err.stack`, `err.message`, SQL state, or validation object keys to API clients
+- Server listens on HTTP for externally reachable API or constructs callback URLs with `http://`
+- POST/PUT/PATCH parses body without verifying `Content-Type` is in supported set (`application/json`, etc.)
+- Response sets `Content-Type` from client `Accept` header instead of fixed intended type
+- Unsupported `Accept` or `Content-Type` accepted silently or returns 200 with wrong representation
+- JSON built via string concatenation/interpolation instead of `JSON.stringify` / `json.dumps` / marshaller
+- GET API routes place tokens, passwords, or PII in query string (`?api_key=`, `?password=`)
+- Route accepts all HTTP methods or handler omits method guard before mutation logic
+- Sensitive JSON responses omit `Cache-Control: no-store` and are cacheable by shared proxies
+- No request body size limit; large JSON/XML uploads parsed fully into memory
+
+## SOAP engine admin & auto-type (Axis-class XML stacks)
+
+SOAP engines shipped inside apps often expose **admin deploy** and **dynamic typing** switches in WSDD / `axis2.xml` / `services.xml`. These are API-inventory / misconfiguration findings when present in a deployable tree:
+
+| Parameter / surface | Risk | Report when |
+|---------------------|------|-------------|
+| `enableRemoteAdmin=true` (Axis 1.x WSDD / globalConfiguration) | Unauthenticated or weakly gated AdminService can accept **WSDD deploy** → load attacker classes / services | Flag in packaged `*.wsdd` / server config that ships with the app; CONFIRM if AdminService remains mounted |
+| `axis.doAutoTypes=true` (or equivalent unrestricted SOAP type mapping) | Inbound `xsi:type` / type-table entries drive **Class.forName / bean construction** without an allowlist | Flag when auto-types is enabled **or** custom code mirrors unrestricted `xsi:type` → `Class.forName` / `BeanUtil`-style instantiation |
+| SOAP monitor / debug TCP listeners wrapping `ObjectInputStream` on accept | Network-reachable Java deserialization | Route primary tag to `insecure_deserialization.md`; note here as debug surface still mounted in prod |
+| Diagnostic pages (`happyaxis`, services list with classpath / env dump) | Information disclosure + attack-surface map | Prefer `information_disclosure.md` when only info leaks; keep here when the page also enables admin actions |
+
+**Do not CLOSE** as "EOL framework noise" or "known CVE, Informational only" when the **application still packages** these flags/listeners — the defect is the shipped configuration in *this* tree.
+
+**Cross-class routing**: factory `admin`/`axis2` pairs → `default_credentials.md`; ReplyTo callback fetch → `ssrf.md`; JMS EPR → `InitialContext(env)` → `jndi_injection.md`.
+
+## Signed API Request Integrity (HMAC Canonicalization)
+
+A valid MAC authenticates **only the bytes included in it**. Audit the verifier by writing the exact canonical string and comparing it with every request field used for routing, authorization, freshness, and execution.
+
+**Required signed context:** protocol/version separator, HTTP method, normalized route/path, canonical query/body (or body digest), signer/key/client identity, and every freshness value the verifier trusts (`timestamp`/expiry and nonce or request ID). Reject duplicate security-relevant parameters unless their ordered multi-value representation is defined identically by signer and verifier.
+
+- **CONFIRM — unsigned freshness field:** code checks `abs(now - timestamp) <= TTL` but computes `HMAC(secret, body)` without `timestamp`. A captured old `(body, signature)` can be replayed forever by attaching a fresh attacker-chosen timestamp; the TTL is cosmetic because freshness itself is unauthenticated.
+- **CONFIRM — body-only/context-free signature:** method and normalized path are absent from the MAC. The same signed body is portable to another method or endpoint that shares the key and accepts that body shape. Establish the overlapping verifier/route before claiming cross-endpoint impact, but still report the context-binding defect.
+- **Required evidence for cross-context impact:** name the source operation, target operation, shared key/scope, exact identical signed bytes, and the target's successful privileged behavior. A target that verifies the MAC but then rejects the body for missing/wrong fields is **not** a demonstrated cross-endpoint exploit; neither is a target whose downstream action/data loader is an unimplemented or throwing stub (`NotImplementedError`, abstract method) or otherwise unknown. Do not invent the stub's return or side effects—report only the context-binding weakness until successful privileged behavior is visible.
+- **SAFE:** the verifier reconstructs one deterministic canonical string containing the method, normalized path, timestamp/nonce, identity/key ID, and exact body/query representation; verifies the MAC before use; enforces a short clock window; and atomically rejects reused nonces/request IDs.
+
+```python
+# VULN — timestamp gates freshness but is not authenticated
+if abs(time.time() - int(timestamp)) > 300:
+    reject()
+expected = hmac.new(secret, canonical_body.encode(), hashlib.sha256).hexdigest()
+
+# SAFE — freshness and request context are inside the signed bytes
+body_hash = hashlib.sha256(raw_body).hexdigest()
+signed = "\n".join(["v1", method.upper(), normalized_path, timestamp, nonce, key_id, body_hash])
+verify_hmac(secret, signed, signature)
+enforce_timestamp_window(timestamp)
+consume_nonce_once(key_id, nonce)
+```
+
+## Server-Side Parameter Pollution (Argument Injection into Internal Requests)
+
+Distinct from *Server-Side **Prototype** Pollution* (`server_side_prototype_pollution.md`). Here the front-end/public endpoint takes user input and **builds a server-side request to an internal or upstream API** by string concatenation, without encoding the value. Because the value lands inside a structured target (query string, form body, REST path, or serialized JSON/XML), an attacker who supplies the syntax delimiters of that target can change the internal request:
+
+- **Append a parameter** — inject `&` (`%26`) to add an unintended field: `name=peter%26role=admin` → internal `…/search?name=peter&role=admin`.
+- **Override a parameter** — inject a duplicate key and rely on last/first-wins parsing differences between the edge and the internal service (`name=peter%26name=admin`); see `idor.md` for precedence-based bypass.
+- **Truncate the request** — inject `#` (`%23`) to drop the parameters the server appends after the injection point: `username=administrator%23` → internal `…?username=administrator` (the trailing `&publicProfile=true` etc. is cut off).
+- **Re-route a REST path** — when input is placed in a path segment, inject encoded `/..` (`%2f%2e%2e%2f`) to traverse to a different internal endpoint/field: `user/alice%2f..%2fadmin` → `…/user/admin`.
+- **Break out of JSON/XML** — when input is interpolated into a serialized body, inject the structural characters (`","field":"` for JSON, a new element for XML) to add fields to the internal call.
+
+**SAST signal:** an outbound/internal request URL, path, or body assembled from user input via concatenation/interpolation instead of a structured client API (params dict, encoded path segment, real serializer). The bug is *encoding/validation missing at the trust boundary between the public handler and the internal service* — independent of whether the public input itself looked validated.
+
+```python
+# VULN — user input concatenated into an internal API query string (no encoding)
+#   attacker: name = "x%23"  -> truncates;  name = "x%26admin=true" -> injects param
+def public_search(name):
+    r = requests.get(f"http://internal-api/users/search?name={name}&publicProfile=true")
+    return r.json()
+
+# VULN — user input placed in an internal REST path (path traversal re-routes the call)
+def get_field(username, field):
+    return requests.get(f"http://internal-api/v1/users/{username}/field/{field}").json()
+
+# SAFE — pass values as structured params; the client library encodes them,
+#        so '&', '#', '/', '=' are escaped and cannot change the request shape
+def public_search(name):
+    r = requests.get("http://internal-api/users/search",
+                     params={"name": name, "publicProfile": "true"})
+    return r.json()
+
+# SAFE — validate/allowlist path segments, then percent-encode each one
+def get_field(username, field):
+    if field not in ALLOWED_FIELDS:
+        raise ValueError("bad field")
+    seg = urllib.parse.quote(username, safe="")
+    return requests.get(f"http://internal-api/v1/users/{seg}/field/{field}").json()
+```
+
+```javascript
+// VULN — building the upstream URL by interpolation; `req.query.name` can carry `&`/`#`
+const url = `http://internal-api/users/search?name=${req.query.name}&publicProfile=true`;
+await fetch(url);
+
+// SAFE — URLSearchParams encodes the value; delimiters can't leak into the query
+const u = new URL("http://internal-api/users/search");
+u.search = new URLSearchParams({ name: req.query.name, publicProfile: "true" }).toString();
+await fetch(u);
+```
+
+```bash
+# Internal/upstream request URLs/paths built from user input by concatenation
+rg -n "(requests\.(get|post)|fetch|http\.(Get|NewRequest)|HttpClient|RestTemplate|axios)\s*\(\s*[\"'\`][^\"'\`]*\$?\{?[^\"'\`]*(req\.|request\.|params|args|input)" --glob '*.{py,js,ts,java,go,rb,php}'
+# f-string / template-literal URLs with a query string or path interpolated from input
+rg -n "[\"'\`]https?://[^\"'\`]*(\?[^\"'\`]*=)?\$\{|f[\"']https?://[^\"']*\{" --glob '*.{py,js,ts}'
+```
+
+## Unsafe Consumption of APIs (OWASP API10:2023)
+
+The inverse direction of Server-Side Parameter Pollution above. SSPP is about the request you **build** from user input; this is about the response you **consume**. **A field from a third-party / upstream API response is exactly as untrusted as user input** — if an attacker compromises (or simply operates) the upstream service, they control that field. Treat any `resp.json()[...]` / `response.data.*` value that flows into a dangerous sink (SQL, shell, file path, redirect, SSRF, HTML, deserialization) as tainted.
+
+- **Default exploitability is `reachable`**, not theoretical: under a supply-chain threat model the upstream is assumed attacker-influencable. Downgrade to `conditional` only when architecture shows the service is same-trust-boundary (VPC + mTLS + same deploy unit). **Ambiguous boundary → treat as third-party and flag.**
+- **Validation must sit BETWEEN the response extraction and the sink.** Validating *other* fields, or validating *after* the sink call, does not count. The taint path is: `response.json()` → (no validation) → sink.
+- **Typed deserialization is implicit validation; untyped is not.** Java `objectMapper.readValue(body, OrderDto.class)` (typed POJO) constrains the shape → safe-ish; `readValue(body, Map.class)` / `Dictionary<string,object>` / Go `json.Unmarshal(body, &map)` keeps it free-form → still tainted. A numeric cast (`int(field)`) only neutralizes injection if the result reaches a **parameterized** placeholder, not string concatenation.
+- **Second-order variant**: an upstream field stored to DB/cache/file unvalidated, then later read into a sink — trace write→read→sink (e.g. caching an upstream `callback_url`, later `POST`ing to it = SSRF).
+
+**VULN**: `data = requests.get(partner_url).json(); db.execute("... status='" + data["status"] + "'")` — upstream field straight into SQL with nothing in between.
+**SAFE**: validate/normalize the extracted field against an expected schema/enum *before* the sink (`OrderResp.model_validate(resp.json())`, typed POJO, allowlist/regex on the specific field), and bind via parameterized queries. Cross-ref the sink's own class (`sql_injection.md`, `rce.md`, `ssrf.md`, `path_traversal_lfi_rfi.md`, `xss.md`, `insecure_deserialization.md`).
+
+## OpenAPI / JSON-Schema Contract Audit (secure-by-schema)
+
+When the repo ships an **OpenAPI/Swagger** spec or JSON-Schema definitions (`openapi.yaml`/`swagger.json`/`*.openapi.*`, FastAPI/NestJS/`springdoc` generated specs, `components/schemas`), the contract itself is a **high-signal static artifact**: a schema that omits bounds accepts **unbounded, open-ended input**, and the runtime validator (which is generated *from* the schema) then enforces nothing. Audit every request body/parameter schema for these — each missing constraint is a finding tied to a concrete class:
+
+- **Unbounded strings** — a non-`enum` `type: string` with **no `maxLength`** (and ideally no `pattern`). Accepts arbitrary-size input → memory/CPU blowup, log/storage flooding, and a larger surface for injection/ReDoS. → DoS (`denial_of_service.md`).
+- **Unbounded arrays** — `type: array` with **no `maxItems`** (and no `minItems`). A client sends a million-element array → resource exhaustion, amplification of any per-item work (N+1 DB, N outbound calls). → DoS.
+- **Unbounded numbers** — `type: number`/`integer` with **no `minimum`/`maximum`**. Enables out-of-range values, overflow, negative quantities/amounts driving business-logic abuse. → DoS / `business_logic.md`.
+- **Open objects (over-posting / mass assignment)** — object schema that does **not** set `additionalProperties: false` (or bound it with `maxProperties`). The validator accepts *extra* fields the client invents, which a permissive binder then maps onto internal model attributes → **mass assignment** (`mass_assignment.md`). `additionalProperties: true` or omitted = open.
+- **Operation without auth** — an operation (especially unsafe `post`/`put`/`patch`/`delete`) with **no `security` requirement** and no global `security` covering it → unauthenticated state change (`privilege_escalation.md` / `authentication_jwt.md`).
+- **Insecure security scheme** — `securitySchemes` using HTTP **Basic**, an **API key in `query`** (leaks via logs/Referer/history) or in a **cookie** (CSRF-prone), or OAuth/OIDC flows whose `tokenUrl`/`authorizationUrl` are `http://`. Cross-ref `insecure_cookie.md`, `cleartext_transmission.md`.
+
+**Why it's worth flagging at the contract layer:** for spec-first / generated-validation stacks the schema *is* the input filter — a missing `maxLength`/`additionalProperties:false` is the actual vulnerability, not a style nit. **Grep seeds:** `rg -n "type:\s*string" **/*openapi* **/*swagger*` then check each lacks `maxLength`; `rg -n "additionalProperties:\s*true|^\s*type:\s*object" <spec>` (objects without `additionalProperties: false`); `rg -n "in:\s*query|type:\s*http\b|scheme:\s*basic" <spec>` (key-in-query / Basic). **False alarms:** enum-constrained strings, fixed-shape internal-only specs behind strict mTLS, and `additionalProperties` deliberately typed (`additionalProperties: {type: string}`) for a map — confirm the binder doesn't over-map.
+
+## Safe Patterns
+
+**Response shaping**
+- Return DTOs/view models with explicit field allowlists; never serialize password hashes, refresh tokens, or internal flags
+- Use framework serializers with `fields = (...)` / `@JsonView` / `@JsonIgnore` / `hidden=True` on sensitive model attrs
+- Paginate collections by default; cap `limit` server-side; return metadata `{ items, next_cursor, total_cap }`
+
+**Throttling and limits**
+- Apply rate limits at gateway and handler layer for auth, search, export, and write endpoints
+- Enforce `max_content_length`, `413 Payload Too Large`, request timeouts, and circuit breakers on downstream calls
+
+**Endpoint hygiene**
+- Version all public routes (`/api/v1/...`); remove or gate deprecated handlers behind feature flags
+- Mount management, swagger, and debug UIs on separate host/port or require strong auth; disable in prod config profiles
+- Maintain machine-readable contract (OpenAPI/JSON Schema) and reject unknown request fields
+
+**Internal/upstream request construction**
+- Pass user values as structured parameters (`params=`/`URLSearchParams`/query builders) so the HTTP client percent-encodes delimiters; never concatenate raw input into a query string, REST path, or serialized body
+- Allowlist and individually encode path segments; build internal JSON/XML with a real serializer, not string templates
+
+**Transport and negotiation**
+- HTTPS-only external API; HSTS on TLS responses; redirect HTTP→HTTPS at edge
+- Validate `Content-Type` before parse; return `415 Unsupported Media Type` for wrong type
+- Honor `Accept` with explicit supported set; return `406 Not Acceptable` when no match
+- Set response `Content-Type` from server contract, never copied from request `Accept`
+
+**Errors and caching**
+- Generic error envelope to clients; log details server-side only
+- `Cache-Control: no-store` on authenticated or sensitive JSON; correct status codes (`429` for throttle)
+
+```python
+# SAFE — DTO with explicit fields, pagination cap, generic errors
+@router.get("/api/v1/users/{user_id}")
+@limiter.limit("60/minute")
+def get_user(user_id: int):
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="Not found")
+    return UserPublic(id=user.id, name=user.name, email=user.email)
+
+@app.exception_handler(Exception)
+def handle_error(request, exc):
+    logger.exception("api_error")
+    return JSONResponse(status_code=500, content={"error": "Internal server error"})
+```
+
+```typescript
+// SAFE — method allowlist, content-type check, shaped response
+app.post('/api/v1/orders', rateLimit({ max: 30 }), async (req, res) => {
+  if (req.headers['content-type']?.split(';')[0] !== 'application/json') {
+    return res.status(415).json({ error: 'Unsupported media type' });
+  }
+  const order = await createOrder(req.body);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ id: order.id, status: order.status, total: order.total });
+});
+```
+
+```java
+// SAFE — versioned controller, DTO mapping, no entity leak
+@RestController
+@RequestMapping("/api/v1/accounts")
+public class AccountController {
+    @GetMapping("/{id}")
+    public AccountResponse get(@PathVariable UUID id) {
+        Account a = service.find(id);
+        return AccountResponse.from(a); // excludes passwordHash, internalFlags
+    }
+}
+```
+
+## Language / Framework Examples
+
+### Python (Flask / FastAPI / Django REST)
+
+```python
+# VULN — whole SQLAlchemy model serialized
+@app.get("/api/users/<id>")
+def user_detail(id):
+    return jsonify(User.query.get(id).__dict__)
+
+# VULN — DRF serializer exposes all model fields
+class UserSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = User
+        fields = '__all__'
+
+# VULN — no rate limit on expensive endpoint
+@app.get("/api/search")
+def search():
+    return jsonify(run_full_table_scan(request.args.get('q')))
+```
+
+### JavaScript / Node (Express / Fastify)
+
+```javascript
+// VULN — string-built JSON
+app.get('/api/profile', (req, res) => {
+  res.send('{"name":"' + req.query.name + '"}');
+});
+
+// VULN — top-level JSON array response
+app.get('/api/transactions', (req, res) => {
+  res.json(transactions.map(t => t.toJSON()));
+});
+
+// VULN — verbose error to API client
+app.use((err, req, res, next) => res.status(500).json({ stack: err.stack }));
+```
+
+### Java (Spring)
+
+```java
+// VULN — entity returned directly with lazy relations
+@GetMapping("/api/v1/users/{id}")
+public User getUser(@PathVariable Long id) {
+    return userRepository.findById(id).orElseThrow();
+}
+
+// VULN — actuator exposed on same application
+management.endpoints.web.exposure.include=*
+// High-impact endpoints to flag specifically: /actuator/heapdump (full memory dump → tokens,
+// credentials, secrets), /actuator/env & /actuator/configprops (config + secrets),
+// /actuator/jolokia (MBean access → RCE), /actuator/threaddump, /actuator/mappings (route inventory)
+```
+
+### Go
+
+```go
+// VULN — struct tags expose secret fields
+type User struct {
+    ID       int    `json:"id"`
+    Email    string `json:"email"`
+    Password string `json:"password"`
+}
+c.JSON(http.StatusOK, user)
+
+// VULN — no TLS on public listener
+http.ListenAndServe(":8080", router)
+```
+
+### PHP (Laravel)
+
+```php
+// VULN — API resource returns entire model
+return response()->json($user);
+
+// VULN — route accepts any method
+Route::any('/api/delete/{id}', [ItemController::class, 'destroy']);
+```
+
+## Common False Alarms
+
+- Public read-only catalog endpoints intentionally returning full product records without auth — not excessive exposure unless hidden cost/wholesale fields leak
+- Internal admin API behind VPN/mTLS returning rich objects to authenticated operators within scope — verify network boundary before downgrading
+- `fields = '__all__'` on a model with no sensitive columns and explicit `@api_view` auth — still prefer explicit fields but may be low impact
+- Rate limiting enforced at API gateway/WAF documented in infra but absent in app source — verify deployment; do not assume safe
+- Swagger/OpenAPI UI disabled in prod via env flag though route exists in code — configuration finding depends on prod profile evidence
+- HTTP listener on localhost-only bind (`127.0.0.1`) for dev tooling — transport finding does not apply externally
+- Generic `{ "error": "Bad Request" }` without stack trace — not verbose error disclosure
+- REST handler correctly using PUT/DELETE with auth — not HTTP verb tampering; see `http_method_tamper.md` only when GET mutates or override headers are trusted
+- CORS `*` on anonymous public read API with no credentials — cross-ref `cors_misconfiguration.md`; not an API inventory issue
+- Pagination optional on small fixed-size collections (enum lists, config keys) — DoS class requires unbounded user-driven growth
+- User input forwarded to an internal API but already passed through a structured client (`params=`, `URLSearchParams`, prepared path-segment encoding) — the delimiters are escaped, so it is not server-side parameter pollution
+- Value interpolated into a URL after strict allowlist/format validation (e.g. numeric ID, enum) that cannot contain `&`/`#`/`/` — note the fragility but lower priority than raw string concatenation
+- A signed request whose method/path, timestamp, nonce, signer identity, and body digest are all inside the verified canonical string, with nonce replay prevention — do not report merely because the field values are also passed separately to framework helpers

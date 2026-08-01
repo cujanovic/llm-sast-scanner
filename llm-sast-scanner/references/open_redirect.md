@@ -1,0 +1,245 @@
+---
+name: open_redirect
+version: "0.3"
+description: Open redirect and unvalidated forward detection (CWE-601), including Salesforce Apex PageReference, and allowlist/parser-confusion bypasses — protocol-relative, multiple slashes, backslash, userinfo @, encoded host, IDN/Unicode homoglyph, and bidi code-point evasions
+---
+
+# Open Redirect (CWE-601)
+
+Identify cases where user-controlled input reaches a redirect or forward target without adequate validation or restriction.
+
+## Source -> Sink Pattern
+
+**Sources**: Query parameters (`url`, `redirect`, `next`, `return`, `returnTo`), POST body fields, path variables, and headers such as `Referer` that reach redirect/forward targets.
+
+**Sinks (`url-redirection` kind)**:
+- `response.sendRedirect(userInput)`
+- `response.setHeader("Location", userInput)`
+- `response.setStatus(302); response.setHeader("Location", userInput)`
+- Spring: `return "redirect:" + userInput`
+- `RequestDispatcher.forward(userInput)`
+- `ModelAndView("redirect:" + userInput)`
+- JavaScript server-side: `res.redirect(userUrl)`, `Location` response header writes
+- JavaScript client-side: `window.location`, `location.href`, `location.assign` (browser redirect)
+- Python: Flask `redirect()`, Django `HttpResponseRedirect`
+- Go: `http.Redirect`, `Header().Set("Location", ...)`; web-framework redirect helpers — Echo `c.Redirect(code, userURL)`, fasthttp `RequestCtx.Redirect`, Beego `Controller.Redirect`, Revel `Controller.Redirect`, Gin `c.Redirect`
+- Ruby: Rails redirect helpers with user-controlled target
+- C#: MVC `Redirect()`, `RedirectToAction` with tainted URL
+- Java forward (CWE-552): `RequestDispatcher.forward(userInput)` — server-side forward, not browser redirect
+- **Salesforce Apex `PageReference`**: `new PageReference(ApexPages.currentPage().getParameters().get('…'))` / `new PageReference(urlParam)` — **is** an open redirect (CWE-601). Salesforce navigates the browser to that URL; absolute/`http(s):`/`//` values leave the org. **Do not CLOSE** because staff say “typed navigation API, not Location header.”
+
+**Sanitizers**: Hostname-sanitizing prefix, `contains` allowlist guard, `URI.getHost().equals(...)`, regexp check; Go additionally flags **insufficient** checks when validation is prefix-only `/` without rejecting `//` or `/\`. Same redirect guards as SSRF analysis; host comparison and allowlist membership where modeled.
+
+Commonly affected languages: Java, JavaScript, Python, Go, Ruby, C#, **Salesforce Apex**.
+
+## Vulnerable Conditions
+- User-supplied input flows directly into the redirect destination without transformation
+- Validation only examines the prefix (e.g., `url.startsWith("/")`) — can be bypassed using `//evil.com` or `/\evil.com`
+- Blocking-based (denylist) validation that attackers can route around
+
+## Safe Patterns
+- The redirect target is a hardcoded constant with no user input involved
+- An allowlist explicitly enumerates every permitted redirect destination
+- Relative paths are validated server-side and then prepended with a known base URL
+- The URL is fully parsed and both scheme and host are verified against an approved list
+- Java: validate against known fixed string before redirect
+- Java: parse URL and verify host is same as current page or on allowlist
+- Go: extend prefix check to reject second character `/` or `\` after leading slash
+- **Indirection mapping**: user supplies opaque id/token/name; server resolves to a fixed URL from a static map — raw URL strings never accepted
+
+```java
+String dest = ALLOWED_REDIRECTS.get(request.getParameter("pageId"));
+if (dest != null) response.sendRedirect(dest);
+```
+
+- **Reject absolute/external targets**: after parse, reject any value with scheme, authority/host, or protocol-relative prefix before issuing redirect
+
+```python
+parsed = urlparse(url)
+if parsed.scheme or parsed.netloc or url.startswith("//"):
+    abort(400)
+return redirect(url)
+```
+
+- **Exact host match**: allowlist compares parsed host to full hostname — never suffix/substring/`endsWith`/`contains` on the raw string
+- **Normalize before comparing**: decode percent-encoding, **strip leading/trailing whitespace** (space, tab, `%20`, `+` as space, NBSP `%a0`, and other LWS), IDNA/punycode-normalize the host, and reject backslashes, multiple leading slashes, and control/non-ASCII bytes **before** the host/prefix check — so `///`, `\`, `%2e`, `。`/`｡`, leading `%20`/`+`, and bidi/RTL code points cannot move the effective host past the allowlist or dodge a raw `startswith("//")` / `startswith("http")` denylist
+- **Authorization gate**: verify the authenticated subject may reach the mapped or allowlisted destination (forward/redirect)
+- **Trustworthy allowlist source**: an exact-match allowlist is only as safe as *what populates it*. Flag allowlists built from **attacker-registerable** entries (self-service **custom domains**, user-chosen tenant hostnames, "verified" org domains) or from a **verify-once ownership check that is never re-validated** — a domain whose ownership was confirmed at registration can later be **DNS-rebound** to an attacker's IP (TOCTOU on ownership), and a user-registered domain is attacker-controlled from the start. Multi-tenant platforms that route by the `Host` header and auto-forward the session cookie / auth `code`/token (via a `next`-style redirect) to any registered custom domain hand the victim's credentials to whoever controls that domain. **SAFE**: re-verify domain ownership at use time (live TXT/DNS probe) or bind the redirect/cookie to the *specific* authenticated tenant; never forward auth tokens/cookies to an allowlisted-but-attacker-influenced host; scope session cookies narrowly (not a broad parent `Domain=.platform.tld`). Cross-ref `subdomain_takeover.md` (ownership verification), `ssrf.md` (DNS-rebinding TOCTOU), `host_header_poisoning.md` (Host-based tenant routing).
+- **External interstitial**: off-domain targets pass through a confirmation page; `Location` only set after explicit user consent
+- **PHP**: always `exit`/`die` immediately after `header("Location: ...")` to prevent post-redirect logic execution
+
+## Evasion Patterns
+- `//evil.com` — protocol-relative URL that satisfies a `startsWith("/")` check
+- `/\evil.com` — backslash parsed as a path separator by certain browsers
+- `/%09/evil.com` — tab character inserted to break naive pattern matching
+- **Leading whitespace before protocol-relative / absolute**: `%20//evil.com`, `+//evil.com`, ` //evil.com`, `%20https://evil.com`, `%09//evil.com` — a denylist that only checks `startswith("//")` / `startswith("http")` (and maybe literal `\`) on the **raw** string treats a leading space/tab as “not absolute.” Browsers **trim leading whitespace** before URL parsing, then resolve `//evil.com` off-site. **Do not CLOSE** because staff say “leading spaces are cosmetic” or “we already reject `//` and `http`.” Without strip+decode **before** the prefix check, that denylist is bypassable. Same class as `/\/\/evil.com` / `//%5Cevil.com` (backslash↔slash after decode) when validation runs on the undecoded form and the sink/browser normalizes later.
+- `https://trusted.com@evil.com` — attacker host hidden in the authority/userinfo section
+- URL encoding: `%2F%2Fevil.com`
+- Go partial check bypass: `strings.HasPrefix(redir, "/")` passes for `//evil.com` and `/\evil.com` — weak prefix-only validation
+- **Scheme-relative variants**: `//evil.com/path`, `/%2f%2fevil.com`, `\evil.com` (leading backslash)
+- **Allowlist substring tricks**: `contains("trusted.com")` passes `https://evil.com/?x=trusted.com`; `endsWith(".trusted.com")` passes `evil-trusted.com`; `startsWith("https://trusted.com")` passes `https://trusted.com.evil.com`
+- **Userinfo @ variants**: `https://trusted.com@evil.com`, `//trusted.com@evil.com`, `/trusted.com@evil.com`
+- **CRLF in redirect value**: `%0d%0a` or literal `\r\n` embedded in param — flag taint reaching `Location`; classify as `http_response_splitting` only when CR/LF breaks header structure
+- **Multi-layer encoding**: `%252f%252fevil.com` (double-encoded `//`), `\u002f\u002fevil.com`, `%5c%65vil.com` (encoded `\e`)
+- **Mixed separators**: `/\/evil.com`, `//evil.com%2f@trusted.com` — parser/normalizer divergence vs naive prefix checks
+- **Multiple leading slashes**: `///evil.com`, `////evil.com`, `/////evil.com` — browsers collapse the extra slashes and treat the value as protocol-relative, while a guard that inspects only the first one or two characters (`startsWith("/")` and `!startsWith("//")`) passes it
+- **Backslash as authority separator**: browsers normalize `\` to `/`, so `\\evil.com`, `\/\/evil.com`, `/\/evil.com`, `/\/\/\evil.com`, `//\/evil.com`, and encoded forms `//%5Cevil.com` / `/%5Cevil.com` all resolve to an off-site protocol-relative target that slash-only or “literal `\` only” checks miss when they do not decode first
+- **Parser-confusion via userinfo delimiters**: the validator and the browser disagree on where the host ends. `https://trusted.com#@evil.com`, `https://trusted.com?@evil.com`, `https://trusted.com:80#@evil.com`, `https://trusted.com;@evil.com`, a bare leading `@evil.com`, multiple `@` (`a@trusted.com@evil.com`), and encoded forms (`%40`, `%23`, `%3F`, Unicode small semicolon `﹔`) move the real host past a prefix/`contains` allowlist
+- **Encoded host metacharacters**: `%2e` / double-encoded `%252e` for the dot (`trusted.com%2eevil.com`), `%2f`/`%5c` inside the host, and `%40` for `@` — decode server-side to push the effective host outside an allowlisted prefix
+- **Scheme obfuscation**: colon-only scheme with no slashes (`https:evil.com`, `http:evil.com`), encoded scheme colon (`https%3A/evil.com`), and `javascript:`/`data:` schemes hidden via HTML entities (`javascript&#58;`, `&colon;`, `&Tab;`/`&NewLine;`), `\xNN`/`\uNNNN`/octal `\NNN` escapes, or embedded newlines/tabs (`java%0ascript:`, `java%09script:`) — bypass denylists matching the literal scheme string
+- **IDN / Unicode host homoglyphs**: full-width or alternative code points that a parser maps back to ASCII — e.g. ideographic full stop `。` (`%E3%80%82`) or half-width `｡` used as the dot, full-width letters, and homoglyph domains — defeat an exact-string host compare unless the host is IDNA/punycode-normalized first
+- **Bidi / line-separator code points**: right-to-left override `%E2%80%AE`, line/paragraph separators `%E2%80%A8` / `%E2%80%A9`, plus `%a0` / `%19` / `%01` control bytes inserted into the scheme or userinfo to spoof the visible host or break a `javascript:` filter
+- **Control / invalid bytes in host**: `%00`, `%FF`, raw tab/newline (`%09`/`%0a`/`%0d`), and unpaired surrogates around the `@` — exploited where the validator stops at the byte but the browser's parser does not
+- **IP-address host encodings** (when the allowlist is IP-based): decimal (`http://3627734734`), hex (`http://0xd8.0x3a.0xd6.0xce`), octal (`http://0330.072.0326.0316`), and IPv6-mapped (`http://[::ffff:127.0.0.1]`) forms — see `ssrf.md` for the full IP-encoding matrix
+- **Validate-then-decode-again (double-decode ordering bug)**: the validator parses/checks the value at decode-level *N*, but the code path that issues the redirect performs **one more decode** before writing `Location` (e.g. validate with `parse_url($next)` on the raw string, then `header("Location: ".urldecode($next))`). A double-encoded metacharacter survives the first decode as a harmless literal and is decoded into an active delimiter at redirect time. Canonical payload: `https://trusted.com%2523%40evil.com/path` → validation sees `https://trusted.com%23@evil.com` (the `%23` reads as a literal in the userinfo, host = `trusted.com`, **passes**) → the extra decode turns `%23` into `#`, yielding `https://trusted.com#@evil.com/...` so everything after `#` becomes a fragment and the browser navigates to `evil.com`. Same shape with `%252f`→`/`, `%255c`→`\`, `%2540`→`@`. Indicator: a `decode`/`unquote`/`urldecode` call between the validation point and the `Location`/`redirect()` sink, or validation on `request.GET['x']` while the framework decodes again downstream.
+
+**SAST principle for all of the above**: any allowlist/denylist applied to the **raw string** (prefix, suffix, `contains`, regex) is bypassable because the validator and the browser's URL parser disagree on scheme/host boundaries — **or because a second decode happens after validation**. Safe validation fully decodes/canonicalizes **first**, parses the value with a spec-compliant parser (WHATWG URL / `java.net.URI` / `urlparse`), **IDNA/punycode-normalizes the host**, compares the parsed host against an exact allowlist, rejects any non-`http(s)` scheme, backslash, or control character, and ensures **no further decoding occurs between validation and the redirect sink**.
+
+## Detection Indicators (grep)
+
+Token-aware sink hunts — trace matched identifiers back to request/query/body/header sources.
+
+### Redirect sinks
+```text
+sendRedirect\s*\(
+\.redirect\s*\(
+redirect:\s*["']?\s*\+
+ModelAndView\s*\(\s*["']redirect:
+setHeader\s*\(\s*["']Location["']
+headers\.setLocation\s*\(
+HttpResponseRedirect\s*\(
+redirect\s*\(
+http\.Redirect\s*\(
+header\s*\(\s*["']Location:
+Response\.Redirect\s*\(
+RedirectToAction\s*\(
+redirect_to\s
+location\.(href|assign|replace)\s*=
+window\.location\s*=
+res\.writeHead\s*\([^)]*Location
+```
+
+### Forward sinks (CWE-552)
+```text
+getRequestDispatcher\s*\(
+RequestDispatcher\.forward\s*\(
+\.forward\s*\(
+dispatch\s*\(
+include\s*\(
+```
+
+### Common source parameter names
+```text
+(url|redirect|next|return|returnTo|returnUrl|goto|destination|target|continue|redir|forward|fwd|callback|RelayState)
+```
+
+### Weak-validation signals (pair with sinks)
+```text
+startsWith\s*\(\s*["']/["']
+HasPrefix\s*\([^,]+,\s*["']/["']
+indexOf\s*\(\s*["']trusted
+endsWith\s*\(\s*["']\.trusted
+\.contains\s*\(\s*["']trusted
+match\s*\(\s*["']\^/
+```
+
+### High-confidence taint chains
+- Sink argument is `request.getParameter`, `req.query`, `req.body`, `request.GET`, `$_GET`, `params[`, `QueryString[`, `c.Query(`, `Referer` header — no parse/allowlist between source and sink
+- `redirect:` / `Location` value built via string concat (`+`, `fmt.Sprintf`, template literal) with user-controlled fragment
+
+### Chain pivots (an open redirect is rarely the terminal impact)
+- **Open redirect → OAuth token theft**: a redirect endpoint reachable as — or chained into — an OAuth/OIDC `redirect_uri` (or via a loose `redirect_uri` allowlist that permits this host/path) leaks the authorization `code`/token to the attacker → account takeover (see `oauth_oidc_misconfiguration.md`).
+- **Open redirect → SSRF allowlist bypass**: an allowlisted host that 30x-redirects to an internal target defeats SSRF validation that only checks the *first* URL — the redirect endpoint becomes an SSRF filter-bypass primitive (see `ssrf.md`, "SSRF via Redirect Chain (30x Bypass)").
+- **Open redirect → XSS**: a `javascript:`/`data:` destination executed on navigation is XSS, not just redirection — flag these scheme values as XSS sinks too (see `xss.md`).
+
+- `return "redirect:" + target`, `new ModelAndView("redirect:" + target)`, `response.sendRedirect(target)`, `headers.setLocation(URI.create(target))`, and `response.setHeader("Location", target)` are all open-redirect sinks when `target` is user-controlled.
+- Do not relabel a plain attacker-chosen redirect destination as `http_response_splitting` unless the evidence shows CR/LF injection into the header value; without header-breaking characters it remains `open_redirect`.
+- On repeat benchmark runs, keep `open_redirect` for a reachable user-controlled redirect target even when the same flow also writes a `Location` header or participates in a login redirect chain; only add or replace it with `http_response_splitting` when the evidence contains actual CR/LF header breaking.
+
+## Python/JS/PHP Source Detection Rules
+
+### Python (Flask / Django)
+- **VULN**: `return redirect(request.args.get('next'))` — user-controlled redirect target
+- **VULN**: `return redirect(request.args.get('url'))` without URL validation
+- **VULN (Django)**: `return HttpResponseRedirect(request.GET.get('redirect'))` — no validation
+- **SAFE**: `if url_has_allowed_host_and_scheme(url, allowed_hosts={'example.com'}): return redirect(url)`
+- **SAFE**: `return redirect(url_for('dashboard'))` — framework-generated internal URL
+
+### JavaScript (Express / Node.js)
+- **VULN**: `res.redirect(req.query.url)` — user-controlled redirect
+- **VULN**: `res.redirect(req.body.returnTo)` — POST body controls destination
+- **VULN**: `res.set('Location', req.query.next); res.status(302).end()`
+- **SAFE**: URL parsed and host validated against allowlist before redirect
+- **SAFE**: `res.redirect('/dashboard')` — hardcoded path
+
+### PHP
+- **VULN**: `header("Location: " . $_GET['url'])` — user-controlled redirect
+- **VULN**: `header("Location: " . $_POST['redirect'])` — POST parameter controls destination
+- **SAFE**: `if (in_array($_GET['url'], $allowedUrls)) header("Location: " . $_GET['url'])`
+- **SAFE**: `header("Location: /dashboard")` — hardcoded
+
+## Dynamic Test / PoC
+
+Replace `PARAM` with the discovered redirect parameter (`url`, `redirect`, `next`, `returnTo`, `redirect_uri`, …). Inspect `Location` in response headers (`curl -s -D-`).
+
+```bash
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=//evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https%3A%2F%2Fevil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com%40TARGET'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET%40evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET.evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com%23.TARGET'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://%65%76%69%6c.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://evil.com%00.TARGET'
+curl -s -D- 'https://TARGET/redirect?PARAM=%0d%0aLocation:%20https://evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=javascript:alert(document.domain)'
+curl -s -D- 'https://TARGET/redirect?PARAM=data:text/html,<script>alert(1)</script>'
+```
+
+**Scheme/parser bypasses** when host allowlist blocks bare `https://evil.com`:
+
+```bash
+curl -s -D- 'https://TARGET/redirect?PARAM=https:evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=/\evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=/\/\/\evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=//%5Cevil.com/'
+curl -s -D- 'https://TARGET/redirect?PARAM=%20//evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=+%2F%2Fevil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=%20//%5Cevil.com/'
+curl -s -D- 'https://TARGET/redirect?PARAM=///evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET#@evil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=https://TARGET%2eevil.com'
+curl -s -D- 'https://TARGET/redirect?PARAM=//evil%E3%80%82com'
+curl -s -D- 'https://TARGET/redirect?PARAM=//trusted.example/path/../@evil.com'
+```
+
+Confirmed when `Location` (or meta-refresh / client `location.assign`) resolves off-origin to an attacker-controlled host.
+
+## Common False Alarms
+
+- Redirect target is a hardcoded constant or framework-generated route (e.g., `url_for()`, `redirect('/')')
+- URL is fully parsed and both scheme and host are verified against an explicit allowlist before the redirect
+- Redirect is to a relative path that is prepended with a known base URL server-side
+- Login redirect that only accepts relative paths starting with `/` AND rejects protocol-relative URLs (`//evil.com`) **after** strip+decode (a raw `startswith("//")` denylist alone is **not** SAFE — see leading-whitespace evasion)
+- Internal forward/dispatch that does not result in an HTTP redirect response to the client
+- **Apex `PageReference` with a hardcoded relative path** (`new PageReference('/apex/Home')`) — not a finding; user-controlled constructor arg **is**
+- Go weak-prefix validation on intentionally permissive relative-only redirects that also block `//` and `/\` elsewhere **after** normalize/strip
+- Client-side redirect sinks when the finding scope is server-side open redirect testing only
+
+## Business Risk
+- Phishing attacks that exploit a trusted domain's reputation
+- OAuth token theft through manipulation of the `redirect_uri` parameter
+- Session fixation when the redirect is embedded within login or authentication flows
+- **Salesforce**: phishing off a `*.salesforce.com` / Experience Cloud host via `PageReference` fed from `getParameters()`
+
+## Core Principle
+
+Never pass remote input directly into a redirect or forward destination. Maintain a server-side allowlist of permitted targets, or parse the URL and verify scheme and host against approved values before issuing `Location`, framework redirect responses, or Apex `PageReference` navigation.
+
+## Analyst Notes
+
+- Distinguish `open_redirect` from `http_response_splitting`: only escalate to header splitting when CR/LF characters are present in the tainted redirect value
+- Spring `redirect:` view prefix patterns beyond servlet APIs are in scope for open-redirect analysis
+- Client-side redirect sinks apply when tainted data reaches browser navigation APIs — relevant for SPA phishing, not server `Location` headers
+- CWE-552 forward is information-disclosure class (server-side forward), not browser redirect — still tag when user input selects internal resources

@@ -1,0 +1,364 @@
+---
+name: ssti
+version: "0.2"
+description: Detect Server-Side Template Injection where user input controls the template string itself, not just template variables.
+---
+
+# Server-Side Template Injection (SSTI)
+
+SSTI arises when an application passes user-supplied data into a template engine as the raw template source rather than as a value to be rendered within a fixed template. The engine then evaluates whatever the attacker submits, making arbitrary server-side code execution possible.
+
+The core pattern: *unvalidated user input is used as the template string passed to a template engine's render/compile/evaluate function.*
+
+## Key Distinction
+
+- **SAFE**: `render_template('page.html', name=user_input)` — user input fills a variable slot; the template engine escapes it.
+- **VULN**: `render_template_string(user_input)` — user input *is* the template; the engine evaluates it.
+- **VULN (template name)**: `render_template(user_input)` or `res.render(req.query.template)` where the template *name/path* is user-controlled and not allowlisted — path traversal or arbitrary file resolution.
+
+## Vulnerable Conditions
+
+### Trigger Conditions
+1. User-supplied data becomes the template **string** itself rather than a variable inserted into a pre-existing template.
+2. The template engine is invoked against that attacker-controlled string.
+3. User input constructs a dynamic view/template name without strict allowlist validation (Thymeleaf view names, Flask template paths).
+
+**Source param-name hints (prioritization only — never a standalone finding).** Params whose *name* suggests their value may be rendered or used as a template/view selector — high-priority to trace to a template-string or dynamic-view sink (conditions above). Customizable content (email/notification/report bodies, themes, signatures) is the common SSTI carrier. Match case-insensitively, tokenizing compounds: `template`, `tpl`, `view`, `theme`, `layout`, `page`, `preview`, `render`, `body`, `content`, `message`, `subject`, `email_body`, `notification`, `report`, `format`, `pattern`, `expression`, `activity`, `redirect`. A name match means *trace it* — confirm SSTI only when the value reaches the engine as the template itself or an unvalidated view name.
+
+### Second-order & cross-service-boundary SSTI (the "already-safe" trap)
+
+The render sink is often in a **different component/process** than where the data entered, so a taint trace confined to the request handler misses it. User input crosses a boundary — persisted to a **DB/config**, pushed to a **queue/message bus**, written to **object storage**, or passed to another **service/API** — and a downstream consumer template-renders it later: **email/notification workers, PDF/report/document generators, background/scheduled jobs**. Each side assumes the other sanitized ("it's already stored, so it's safe"), so nothing escapes it.
+
+Hunt **both ends**: (1) find where user-controlled `content`/`body`/`template`/`subject`/`report` values are **persisted or enqueued** (frequently with no render nearby — the producing endpoint looks inert), then (2) grep the **worker / generator / notification** code for the template-*source* sinks in this file applied to those stored values. A stored value reaching a template-source sink is SSTI even though the endpoint that accepted it looked safe — the analogue of second-order SQLi / stored XSS.
+
+**Document & PDF/report generators are template sinks too**: HTML built by a full engine *before* PDF conversion (WeasyPrint, `xhtml2pdf`, `pdfkit`/`wkhtmltopdf`, Puppeteer `page.setContent`), and office-doc templating (`docxtpl` — Jinja2 under the hood; `python-pptx`/`openpyxl` merge fields). User data that becomes part of the template *source* (a user-uploaded `.docx` template, or a stored body compiled by the engine) is SSTI exactly like `render_template_string` — not a bound, escaped variable in a fixed template.
+
+### Test Payloads
+Confirm execution with a math probe before escalating to RCE:
+
+| Engine | Probe | Expected signal |
+|--------|-------|-----------------|
+| Jinja2 / Twig / Nunjucks | `{{7*7}}` | `49` in response body |
+| Mako | `${7*7}` | `49` |
+| Smarty | `{7*7}` | `49` |
+| EJS / ERB | `<%= 7*7 %>` | `49` |
+| FreeMarker | `${7*7}` | `49` |
+| Velocity | `#set($x=7*7)${x}` | `49` |
+| Go text/template | `{{printf "%d" (mul 7 7)}}` or `{{7}}` variants | depends on func map |
+| Mojolicious EP (Perl) | `<%= 7*7 %>` | `49` — VULN when `$c->render(inline => $userinput)` (user-controlled inline template) or a user-controlled template name; `<%== %>` is **unescaped** output (also XSS). Embedded Perl in EP templates means SSTI here is direct RCE |
+| Handlebars | `{{#with "s"}}{{/with}}` then gadget chains | engine-specific |
+| Jinja2 (string mult) | `{{7*'7'}}` | `7777777` (distinguishes Jinja2 from Twig) |
+| Thymeleaf | `#{7*7}` | `49` |
+
+### Dynamic Verification
+1. Inject math probe into the suspected template-string parameter.
+2. If output contains computed result (not literal `{{7*7}}`), SSTI is confirmed.
+3. Fingerprint engine before RCE — e.g. `{{config.items()}}` (Jinja2/Flask), `${T(java.lang.Runtime)}` (Spring EL), `<#assign x=1>${x}` (FreeMarker), `{{_self.env.getFilter('id')}}` (Twig).
+4. Escalate with engine-specific RCE only after confirmation.
+
+## Exploitation Chain
+
+Always confirm evaluation with `{{7*7}}` → `49` (or engine-equivalent) before RCE.
+
+**Chain pivots** (a confirmed SSTI is rarely terminal — check the reachable adjacent class):
+- **SSTI → SSRF**: most engines expose URL/HTTP helpers or object-navigation that issue server-side requests *before* a full RCE gadget is reachable — treat a confirmed SSTI as an SSRF primitive even when RCE is blocked (see `ssrf.md`).
+- **SSTI → RCE**: the typical terminal impact; report RCE severity once an engine-specific gadget is reachable (see `rce.md`).
+- **Prototype pollution → SSTI gadget**: a polluted template option (`outputFunctionName`, `sourceURL`, etc.) reaches a template-compile sink, turning pollution into template injection (see `server_side_prototype_pollution.md`).
+
+**Jinja2 (Python/Flask)**
+```
+{{config.__class__.__init__.__globals__['os'].popen('id').read()}}
+{{ ''.__class__.__mro__[1].__subclasses__()[XXX]('id',shell=True,stdout=-1).communicate() }}
+```
+
+**FreeMarker (Java)**
+```
+${"freemarker.template.utility.Execute"?new()("id")}
+```
+
+**Twig (PHP)**
+```
+{{_self.env.registerUndefinedFilterCallback('system')}}{{_self.env.getFilter('id')}}
+{{['id']|map('system')|join(',')}}          # map/filter/sort/reduce take an arbitrary PHP callable as arg
+{{['id',0]|reduce('system')}}   {{['id']|filter('system')|join}}   {{['cat /etc/passwd']|sort('system')}}
+```
+The `map`/`filter`/`sort`/`reduce` filters accept a **callable argument**, so any one runs an arbitrary PHP function on attacker data — this works even when `_self` / `registerUndefinedFilterCallback` is blocked, and is often the only path that survives a `SandboxExtension` `SecurityPolicy` (flag a policy that allows these filters; `attribute(_self, 'env')` is the sandbox-escape equivalent of bare `_self`).
+
+**ERB (Ruby)**
+```
+<%= `id` %>
+<%= system('id') %>
+```
+
+## Common False Alarms
+
+- `render_template('fixed_name.html', var=user_input)` — safe; template path is hardcoded.
+- `Environment().get_template('report.html').render(data=row)` — safe; template is loaded from disk.
+- Only flag cases where the template **content string** itself originates from user-controlled input.
+- User input bound as a template *variable* (`render('page.html', name=user)`) — not a sink.
+- **XSS via template output**: unsanitized user data rendered in a browser is XSS, not SSTI.
+- **Allowlisted template names**: user picks a name but it is validated against a hardcoded set — not SSTI.
+- **Logic-less engines** (Mustache, Liquid with safe config): arbitrary code execution is typically impossible even if the template string is user-supplied — lower risk; flag for manual review unless engine config is confirmed logic-less.
+- Java numeric/boolean template arguments — simple-type sanitizers treat these as safe.
+- Ruby/Python string compared to a constant or allowlisted set before template construction.
+- Express `res.render()` with user-controlled *template object* only fires when the router uses a known vulnerable view engine configuration (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, or `whiskers`).
+- **Second-order SSTI**: user-submitted template stored in DB/config and later rendered server-side — trace write path, still flag if unsandboxed.
+
+---
+
+## Python Source Detection Rules
+
+### Flask / Jinja2
+- **SINK grep**: `render_template_string(`, `from_string(`, `jinja2.Template(`, `Template(` (jinja2 import) — flag when first arg is non-literal
+- **VULN**: `render_template_string(request.args.get('tmpl'))` — template body from query param
+- **VULN**: `render_template_string(request.form['content'])` — template body from POST
+- **VULN**: `render_template_string(request.json['template'])` — template body from JSON
+- **VULN**: `Template(user_input).render()` — raw Jinja2 Template from user input
+- **VULN**: `Environment().from_string(user_input).render()` — Environment.from_string with user input
+- **VULN**: `render_template(request.args.get('tmpl'))` — dynamic template name without allowlist
+- **SAFE**: `render_template('page.html', content=user_input)` — fixed template name
+
+```python
+# VULN: user input is the template string
+return render_template_string(f"<h1>Hello {request.args.get('name')}!</h1>")  # ?name={{7*7}}
+
+# SECURE: static template, user input in context only
+return render_template("greet.html", name=request.args.get("name"))
+```
+
+### Mako
+- **SINK grep**: `mako.template.Template(`, `Template(` (mako import) — non-literal first arg
+- **VULN**: `Template(user_input).render()` — user string passed as Mako template source
+- **VULN**: `mako.template.Template(request.form['t']).render_unicode()`
+
+### Source identifiers
+`request.args.get`, `request.form.get`, `request.form[`, `request.json`, `request.data`, `request.values`
+
+---
+
+## JavaScript Source Detection Rules
+
+### Pug (Jade)
+- **SINK grep**: `pug.render(`, `pug.compile(` — non-literal first arg
+- **VULN**: `pug.render(req.body.template)` — template source from request body
+- **VULN**: `pug.compile(req.query.tmpl)(locals)` — compile from user input
+
+### Handlebars
+- **SINK grep**: `Handlebars.compile(`, `handlebars.compile(` — non-literal argument
+- **VULN**: `Handlebars.compile(req.body.template)(context)` — template string from user
+- **VULN**: `handlebars.compile(userInput)()` — any user-controlled compile argument
+
+```javascript
+// VULN
+const template = Handlebars.compile(req.query.tmpl);
+res.send(template({ user: req.user }));
+
+// SECURE: compile static file once; user data in context
+const template = Handlebars.compile(fs.readFileSync('email.hbs', 'utf8'));
+res.send(template({ name: req.query.name }));
+```
+
+### EJS
+- **SINK grep**: `ejs.render(`, `ejs.renderFile(` — non-literal first arg
+- **VULN**: `ejs.render(req.body.template, data)` — template string from user
+
+```javascript
+// VULN — payload: ?template=<%- global.process.mainModule.require('child_process').execSync('id') %>
+res.send(ejs.render(req.query.template, { user: req.user }));
+
+// SECURE
+res.render('report', { content: req.query.content });
+```
+
+### Nunjucks
+- **SINK grep**: `nunjucks.renderString(`, `env.renderString(` — non-literal first arg
+- **VULN**: `nunjucks.renderString(req.body.tmpl, ctx)` — user-controlled template string
+
+### Lodash / Underscore
+- **SINK grep**: `_.template(` — non-literal argument
+- **VULN**: `_.template(req.body.tmpl)(ctx)` — user string compiled as template
+
+### Source identifiers
+`req.body`, `req.query`, `req.params`
+
+---
+
+## PHP Source Detection Rules
+
+### Twig
+- **SINK grep**: `createTemplate(`, `$twig->render(` — non-literal first arg when inline template
+- **VULN**: `$twig->render($userInput, $vars)` — template name or string from user
+- **VULN**: `$twig->createTemplate($userInput)->render($vars)` — inline template from user
+- **SAFE**: `$twig->render('emails/welcome.html', $vars)` — hardcoded template name
+
+```php
+// VULN — payload: {{7*7}} or Twig RCE gadget chains
+return $twig->createTemplate($request->query->get('template'))->render([]);
+
+// SECURE
+return $twig->render('profile.html.twig', ['name' => $request->query->get('name')]);
+```
+
+### Smarty
+- **SINK grep**: `fetch("string:"`, `display("string:"`, `fetch($var)` with dynamic arg
+- **VULN**: `$smarty->fetch($userInput)` — template name/string from user
+- **VULN**: `$smarty->display($userInput)`
+- **VULN**: `$smarty->fetch("string:" . $_GET['tmpl'])` — inline template from user
+
+```php
+// SECURE
+$smarty->assign('name', $_GET['name']);
+$smarty->display('profile.tpl');
+```
+
+### Raw PHP eval
+- **VULN**: `eval("?>" . $userInput)` — PHP template injection via eval
+- **VULN**: `eval($userInput)` — direct eval of user input
+
+### Source identifiers
+`$_GET`, `$_POST`, `$_REQUEST`, `$_COOKIE`, `file_get_contents('php://input')`
+- Spring `SpelExpressionParser`, `parseExpression`, `#{...}`, `${...}`, or expression-evaluated Thymeleaf content should be reported as `spel_injection`, not generic `ssti` or `rce`.
+- In `JavaSecLab`, user-controlled view names like `return "vul/ssti/" + para;` still count as template-side injection coverage and should preserve project tag `ssti`.
+- In `SecExample`, dedicated `/spel` demo routes/templates should keep `spel_injection` even if the downstream effect looks like command execution.
+- In benchmark/demo projects, dedicated SpEL routes or templates such as `/speloutput`, `templates/spel/*`, or view names containing `spel` should preserve `spel_injection` even when the parser helper is indirect or not colocated in the controller file.
+- In `SecExample`, if the visible source snapshot still contains `templates/spel/spel.html`, `templates/spel/speloutput.html`, and an explicit SpEL payload hint, preserve `spel_injection` as at least `LIKELY` even when the controller or parser helper is missing from the checked-in Java sources.
+- In benchmark/demo repositories, once a dedicated template or expression-injection module has been confirmed from a reachable route plus checked-in template evidence, do not drop the benchmark tag on a later rerun solely because the parser helper is indirect, relocated, or outside the smaller file subset reviewed in that pass.
+- In `JavaSecLab`, `SSTIController.vul1` returning `"vul/ssti/" + para` or similar user-controlled view names should preserve project tag `ssti`, while explicit `parseExpression(...)` or SpEL execution should stay under `spel_injection`.
+
+---
+
+## Ruby Source Detection Rules
+
+### ERB
+- **SINK grep**: `ERB.new(` — non-literal first arg
+- **VULN**: `ERB.new(params[:template]).result(binding)` — user string evaluated as ERB
+- **SAFE**: `@name = params[:name]; erb :profile` — static template file, user data in binding
+
+```ruby
+# VULN — payload: <%= `id` %>
+ERB.new(params[:template]).result(binding)
+
+# SECURE
+@name = params[:name]
+erb :profile
+```
+
+### Liquid
+- **SINK grep**: `Liquid::Template.parse(` — non-literal argument
+- **VULN**: `Liquid::Template.parse(user_input).render(ctx)` — logic-less but flag for data leakage; manual review unless tags restricted
+
+---
+
+## Java Source Detection Rules
+
+### FreeMarker
+- **SINK grep**: `new Template(`, `StringReader(` as template source — non-literal body
+- **VULN**: `new Template("x", new StringReader(tmplStr), cfg).process(...)` — user string as template
+- **SAFE**: `cfg.getTemplate("report.ftl")` — load from trusted path; user data in model only
+
+```java
+// VULN — payload: <#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}
+Template t = new Template("preview", new StringReader(tmplStr), cfg);
+
+// SECURE
+return "report";  // resolves to templates/report.ftl; model holds user data
+```
+
+### Velocity
+- **SINK grep**: `Velocity.evaluate(`, `ve.evaluate(` — non-literal template string arg
+- **VULN**: `Velocity.evaluate(ctx, sw, "tag", userTemplate)` — user input evaluated as template
+- **SAFE**: `Velocity.getTemplate("report.vm").merge(ctx, sw)`
+
+### Thymeleaf
+- **SINK grep**: controller `return "prefix/" + var + "/suffix"`, `templateEngine.process(` with non-literal name
+- **VULN**: `return "user/" + lang + "/welcome"` — user-controlled view name may embed Spring EL
+- **SAFE**: validate `lang` against `Set.of("en", "fr", "de")` before building view name
+
+### StringTemplate (ST4)
+- **SINK grep**: `new ST(` — non-literal argument
+- **VULN**: `new ST(userInput).render()`
+
+### Pebble
+- **SINK grep**: `getLiteralTemplate(`, `Template.fromString(`
+- **VULN**: `Template.fromString(userInput).render(ctx)`
+
+---
+
+## Go Source Detection Rules
+
+### text/template / html/template
+- **SINK grep**: `.Parse(`, `.ParseFiles(` — non-literal argument to Parse
+- **VULN**: `template.New("x").Parse(r.URL.Query().Get("tmpl"))` — user string parsed as template
+- **SAFE**: `template.ParseFiles("tmpl/page.html")` with user input only in Execute data map
+- Note: `html/template` auto-escapes output but is still vulnerable to SSTI when user input reaches `.Parse()`.
+
+```go
+// VULN
+t, _ := template.New("x").Parse(r.URL.Query().Get("tmpl"))
+t.Execute(w, data)
+
+// SECURE
+t := template.Must(template.ParseFiles("tmpl/page.html"))
+t.Execute(w, map[string]string{"Name": r.URL.Query().Get("name")})
+```
+
+---
+
+## Source → Sink Pattern
+
+**Sources**: remote user input — HTTP params, body, headers, cookies, uploaded file content, and stored values originally from user input (second-order).
+
+**Sinks** (template *source string*, not variable slot):
+- **Java**: Velocity `RuntimeServices.evaluate` / `parse`, `VelocityEngine.evaluate` / `mergeTemplate`; FreeMarker `Template` constructors and `StringTemplateLoader.putTemplate`; Pebble `getTemplate` / `getLiteralTemplate` / `Template.fromString`; Jinjava `render` / `renderForResult`; Thymeleaf `ITemplateEngine.process` / `processThrottled`; StringTemplate `new ST(var)`.
+- **Python**: Jinja2 `Template` / `Environment.from_string`, Flask `render_template_string`, Mako `Template`, Django/Bottle/Genshi/Chameleon/Chevron/Airspeed/TRender template constructors; document/PDF generators — `docxtpl.DocxTemplate(user_path).render(...)` (Jinja2 inside; user-uploaded `.docx` = template source) and any full-engine HTML render (`from_string`/`render_template_string`) whose output is fed to WeasyPrint/`xhtml2pdf`/`pdfkit`/`wkhtmltopdf`.
+- **Ruby**: ERB `ERB.new(var).result`, Liquid `Template.parse(var)`.
+- **JavaScript**: `ejs.render`, `nunjucks.renderString`, `Handlebars.compile` / `Handlebars.precompile`, `pug.render` / `pug.compile`, `_.template`, Swig `swig.render(var)`, Twig.js `twig({ data: var })`, **doT `doT.compile(var)` / `doT.template(var)`** (compiles the template string into a `Function` → RCE-by-design); user-controlled *template object* passed to Express `res.render()` on vulnerable engines (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, `whiskers`, `dot`).
+- **PHP**: Twig `createTemplate`, Smarty `fetch("string:" . $var)`, Laravel `Blade::render($var)` / `View::make($var)` with a non-literal template name.
+- **Go**: `template.New(name).Parse(var)`.
+- **C#/.NET**: Scriban `Template.Parse(var)`, Handlebars.Net `Handlebars.Compile(var)`, DotLiquid `DotLiquid.Template.Parse(var)`, Fluid `FluidParser.TryParse(var, ...)`.
+- **Java (additional)**: StringTemplate `new STGroup(var, ...)` / `new STGroupString(var)` with a non-literal group source (alongside `new ST(var)`).
+
+**Sanitizers / barriers**:
+- Java: simple/numeric/boolean types not treated as template code.
+- Python/Ruby: comparison against constant; Ruby also allowlist of template names.
+- Blocklist filtering of `{{`, `}}`, `<%` is **not** reliable — do not downgrade findings based on filters alone.
+
+Commonly affected languages: Java, Python, Ruby, JavaScript, PHP, Go, C#. Related Spring view/SpEL paths should be tagged `spel_injection`, not `ssti`.
+
+## Engine risk tier (drives severity / verification effort)
+
+The engine determines whether template control yields **RCE** (Critical) or only data/markup injection (lower). Tier the finding by the engine, then verify the actual sink:
+
+| Tier | Engines | Default impact |
+|------|---------|----------------|
+| **Critical — RCE-by-design** | Jinja2, Mako (Python); Twig (PHP); FreeMarker, Velocity, Pebble, Jinjava (Java); ERB, Slim, Haml (Ruby); EJS, `_.template` (Lodash), Swig, Pug, `eta`, `squirrelly`, `haml-coffee` (JS); Go `text/template`→method calls; Smarty, Blade (PHP); Scriban-unsandboxed (.NET) | Server-side template control → **RCE** |
+| **High — sandboxed but escapable / object-graph reachable** | Handlebars(+helpers), Nunjucks, Thymeleaf (non-SpEL), DotLiquid, Fluid, Handlebars.Net | Data exfil / SSRF / partial RCE via helpers or `constructor` chains; treat as RCE candidate until disproven |
+| **Medium — logic-less / strongly sandboxed** | Mustache, Liquid (Shopify), Go `html/template` (autoescape) | Stored/reflected data injection, XSS, info leak — not RCE absent an escape |
+
+Notes: a Critical/High engine plus a *template-string* sink (not a variable slot) = report **Critical/High**; a Medium engine still warrants an XSS/info-leak check. Sandbox/allowlist that the version genuinely enforces can downgrade — blocklist filtering of `{{`/`<%` cannot (see barriers above).
+
+## Safe Patterns
+
+- Fixed template path/name with user data only in the render context map.
+- **Allowlist validation** for dynamic template names:
+
+```python
+ALLOWED = {"invoice.html", "receipt.html"}
+tmpl = request.args.get("tmpl", "invoice.html")
+if tmpl not in ALLOWED:
+    abort(400)
+return render_template(tmpl)
+```
+
+- Jinja2: `SandboxedEnvironment` for unavoidable dynamic templates.
+- Spring: `@ResponseBody` / `@RestController` so return value is not interpreted as a view name.
+- Express: avoid passing user objects as the template argument to `res.render()` on vulnerable engines.
+- Logic-less engines (Mustache): lower RCE risk but still review for sensitive data exposure.
+
+## Business Risk
+
+Attacker-controlled template syntax yields server-side code execution (Jinja2/Mako/Velocity/FreeMarker/Twig/ERB) or, on Express misconfiguration, local file read and RCE via template object injection.
+
+## Core Principle
+
+Never pass untrusted data as the template *source*; only as escaped data bound into a fixed template. Separate Spring view-name manipulation and SpEL from generic SSTI tagging.
