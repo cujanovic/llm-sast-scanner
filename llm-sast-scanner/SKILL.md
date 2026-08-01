@@ -4,7 +4,7 @@ description: >
   Use when reviewing source code for vulnerabilities, auditing a repository or component, tracing a specific
   vulnerability class, performing a SAST scan, or producing a security assessment for any language or framework.
 metadata:
-  version: "3.0.0"
+  version: "1.51.39"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -142,62 +142,14 @@ deliberately to share memory across developers).
 
 ## Workflow
 
-### Step 1: Understand Scope — Build the Denominators
+### Step 1: Understand Scope
 
 Determine:
 - Target: single file, directory, API endpoint, module, or full repo
 - Language(s) and framework(s) in use
 - User's goal: quick scan, deep audit, specific vuln class, or full report
 - Enumerate the `context/` directory: any `*.md` files there are **external context** describing out-of-repo systems the code interacts with, and are **always loaded** (see Step 2 → "External Context"). An empty `context/` is a no-op.
-- **Exclude the scanner's own artifacts from scope** — they are tool output, not code under review: the `.llm-sast-scanner-cache/` directory (architecture-threat-model.md, project-memory.md, `*-results.md`, final-report.md, worklists) and any `sast_report-*.md` reports. On a git target these are normally git-ignored; on a **non-git** target nothing hides them, so drop them explicitly or they get read back in as "source".
-
-Then build the three worklists that every later class verdict is measured against. **Build them before any
-analysis** — a denominator derived after you have opinions is a summary of your opinions.
-
-**File list.** `git ls-files` on a git target (the repo's own definition of what is source), or a find over the
-tree otherwise. Drop binaries, vendored trees, build output, lock files, and the scanner's own artifacts.
-
-**W1 — Attack surface inventory** (`.llm-sast-scanner-cache/surface.tsv`). One row per externally-reachable
-operation, with its guards transcribed verbatim:
-
-```
-kind <TAB> file:line <TAB> operation <TAB> guards-verbatim <TAB> input-type
-```
-
-Write an enumeration command for the target's framework and **paste its raw output** — do not hand-curate the
-list. What counts as an operation: HTTP routes/handlers, GraphQL resolvers (queries, mutations, field
-resolvers), RPC/gRPC methods, CLI subcommands, scheduled jobs, queue/topic consumers, webhook receivers, and
-exported library entry points. Guards = the full decorator / middleware / filter chain as written in source,
-copied character-for-character.
-
-**Validate the enumeration on two axes — row count and column shape.** A worklist with the right number of
-rows and a corrupt column is worse than no worklist: it looks complete and it sorts wrong.
-
-*Rows.* If your enumeration finds zero operations in a repo that plainly serves traffic, the command is wrong.
-Compare the row count against a raw count of the framework's operation marker and account for every row of the
-difference by name — markers inside comments are not operations; declaration shapes the command mishandles
-(multi-line decorators, a comment or blank line between decorator and signature, wrapped registrations,
-inherited routes) are operations and must be recovered.
-
-*Columns.* The guard cell holds a declaration chain and nothing else. Reject the enumeration when any cell
-carries function-body tokens (braces, semicolons, `return`, assignment keywords) or runs past a couple of
-hundred characters — both mean the extractor ran past the declaration and swallowed neighbouring code. Then
-open three rows at random, read the cited `file:line` in the source, and confirm each cell matches what is
-written there. A guard column that has absorbed an adjacent handler makes an unguarded operation read as a
-guarded one, which is the exact error the sort exists to prevent.
-
-Paths are **target-relative** (`src/…`, never `/home/…` or `/Users/…`). Absolute paths embed the operator's
-username and machine layout into an artifact that gets read, quoted into findings, and often committed.
-
-**W2 — Sink sweep ledger** (`.llm-sast-scanner-cache/sweeps.tsv`). Per class, the structural-shape sweep command
-and every hit: `class <TAB> command <TAB> file:line`. Sweeps match the sink's *shape*, not a library name.
-
-**W3 — Asset inventory** (`.llm-sast-scanner-cache/assets.tsv`). Per asset-bound class, the glob and every
-matching file: `class <TAB> glob <TAB> file`.
-
-**Sorting the surface is the analysis.** Once W1 exists, sort it by the guard column. Operations that share a
-purpose but not a guard chain line up next to each other, and the outlier is visible without insight — that is
-the point of building it. Do this before reading any handler body.
+- **Exclude the scanner's own artifacts from scope** — they are tool output, not code under review: the `.llm-sast-scanner-cache/` directory (architecture-threat-model.md, project-memory.md, scope-manifest.txt, `*-results.md`, final-report.md) and any `sast_report-*.md` reports. On a git target these are normally git-ignored; on a **non-git** target nothing hides them, so drop them explicitly or the sweep will read its own memory/results/reports back in as "source" and inflate the coverage denominator.
 
 ### Step 2: Load Relevant References
 
@@ -398,155 +350,34 @@ favored few:
   string concatenation", or "that stack isn't present" is NEVER sufficient to clear the class — read the value
   construction and trace the input first.
 
-### Triage, then Depth — the output format
+**Clearance Record — clearing a class is a claim that MUST show its work.** The rule above ("never clear on a
+missing keyword") only holds if a negative verdict is *evidence-bearing*. Therefore, whenever you rule a class
+**SAFE / absent / not-applicable / excluded**, you MUST record a **Clearance Record** — NOT a one-line
+`SAFE (no <library>)`. A Clearance Record has three parts:
+1. **Surface** — the behavioral sink *family* for this class (e.g. "dynamic-key object write", "query/command
+   assembled from input", "user-influenced path / template / format / regex", "deserialization of external
+   bytes") and whether that *behavior* is present in the repo.
+2. **Structural sweep(s) run** — the *shape-based* sweep(s) you ran to find that behavior (NOT a library-name
+   grep), with hit counts. Shape sweeps match the sink *form* (`obj[k][k2]=`, `.split('.')`, a string/`${}`
+   built into a query/path/command, `compile(` / `render(` / `eval` / `new Function`, `parse(` on external
+   bytes, …), so they catch the bespoke and in-house sinks a library name would miss.
+3. **Hits → disposition** — for each structural hit: `file:line` + its taint disposition — either a reported
+   finding, or **safe-because** a named, effective guard you actually read (`<guard>@file:line`), or
+   **not-reachable** because the value provably has no source→sink path (state why).
 
-**Enumerate everything. Group by control. Go deep on what stands out.**
-
-The enumeration exists so nothing is unseen. It does not follow that every item deserves equal analysis: a
-surface of 200 operations against 15 classes is 3,000 cells, and a budget spread that thin produces 3,000
-uninformed verdicts. Depth is finite — spend it where the surface is irregular, and account for the regular
-parts as groups.
-
-Your output for each denominator is two artifacts:
-
-1. **A triage table** — every enumerated item, grouped by its control signature, with each group's disposition.
-2. **A dossier per flagged item** — the real analysis, on the small set triage selected.
-
-Both are required. The triage table is why nothing is unseen; the dossiers are where the work happens.
-
-**If you find yourself writing a script to emit dispositions, stop.** That impulse is a correct reading of a
-wrong instruction: you have been asked for more cells than judgement can fill, and generating them produces one
-judgement per archetype wearing the costume of many. Triage instead — a script cannot tell you which operation
-is anomalous, which is the entire question.
-
-Which denominator a class uses is fixed by its **binding** (Step 1 builds all three):
-
-| Binding | Denominator | Classes bound to it |
-|---------|-------------|---------------------|
-| **Surface-bound** | `W1` — every externally-reachable operation (route / handler / mutation / query / CLI command / job / consumer) | missing auth (BFLA), IDOR, privilege escalation, CSRF, brute force, verification code abuse, mass assignment, HTTP method tampering, business logic, improper input validation, session handling, excessive agency |
-| **Sink-bound** | `W2` — every hit of the class's structural-shape sweep | SQLi, NoSQLi, XSS, SSTI, RCE/command injection, path traversal, SSRF, deserialization, SSPP, prototype pollution, ReDoS, log injection, format string, open redirect, XXE, LDAP/XPath |
-| **Asset-bound** | `W3` — every file matching the class's asset shape | hardcoded secrets, IaC, Kubernetes, CI/CD & container, dependency confusion, supply chain, cookie flags, CSP, file permissions, nginx/web-server config |
-
-**The item set is fixed before you analyze.** You enumerate first, paste the enumeration's raw output into the
-artifact, and only then triage. You cannot triage fewer items than the enumeration emitted, because the
-enumeration output sits in the artifact next to your table.
-
-#### Artifact 1 — the triage table
-
-Group the denominator by **control signature**: the verbatim guard chain for surface items, the sink expression
-shape for sink items, the file role for asset items. Group by the exact string — not by what you think the
-strings mean. Two operations whose guard chains differ by one entry are two groups.
-
-```
-### <denominator>
-Enumeration: <N items> — from <W1 | the sweep command, verbatim | the asset glob, verbatim>
-
-| group | control signature (verbatim) | members | disposition |
-|-------|------------------------------|---------|-------------|
-| G1 | @A, @B | 41 | GROUP-SAFE — <what the shared control enforces>, read at <guard>@file:line |
-| G2 | @A | 1 | FLAGGED — singleton against G1's 41 members |
-...
-Groups: N. Flagged for dossier: M. Enumerated: N items, all assigned to a group.
-```
-
-**Flag an item for a dossier when any of these hold** — these are observable properties, not judgement calls:
-
-- Its group has **fewer than three members**. A near-unique control signature is the definition of an outlier.
-- Its control signature is a **strict subset** of another group's whose members do comparable work. Fewer
-  controls for the same kind of operation is the shape of nearly every access-control bug.
-- Its name or arguments indicate a **sensitive capability**: credentials, tokens, verification codes, payment,
-  export, impersonation, administration, or another user's identifier as a parameter.
-- It has **no control signature at all**.
-
-Everything else is accounted for by its group's disposition. **A group disposition is honest exactly when the
-group is homogeneous** — same control chain, comparable operations — and the grouping key guarantees the first
-half. State what the shared control enforces and cite where you read it, once, for the group.
-
-#### Artifact 2 — a dossier per flagged item
-
-This is the analysis. One per flagged item, and small enough sets that you can write them by hand:
-
-```
-#### <item file:line + name>  [flagged: <which trigger>]
-Control:  <verbatim signature>  |  peers: <the group it differs from, and how>
-Read:     <file.ext:START-END, ...>  — every range opened, through callees, to the decision point
-Does:     <what the operation actually does, from the code you read — not from its name>
-Attacker: <what an attacker controls, and what they get>
-Verdict:  FINDING VULN-nnn (severity + one-line rationale) | SAFE — <guard>@file:line | NOT-REACHABLE — <absent>, per file:START-END
-```
-
-**`Read:` holds every line range you opened to reach the decision** — comma-separated when the trail crosses
-files. A dossier whose `Read:` is one short range for an item that calls into project code is unfinished.
-
-**Read to the decision point, not to the end of the body.** The decision point is the code that actually
-implements the behavior you are dispositioning, or that actually establishes its absence. For a class like
-"does this operation accept a verification code it did not receive from the user", the decision point is
-wherever that check is performed or skipped — which is usually *not* the handler.
-
-**A handler that delegates has not answered anything.** When the range you read contains a call into project
-code, you have found a signpost, not a decision: the behavior lives at the other end of that call. Open the
-callee, add its range to the `read` cell, and continue until you reach code that implements or refuses the
-behavior. Thin handlers that validate nothing and forward everything to a service are the normal shape of most
-web, RPC, and GraphQL codebases — in those, *every* disposition that stops at the handler is uninformed.
-
-**Never infer a callee's behavior from its name.** `verifySomething`, `checkAccess`, `safeParse`, and
-`validateInput` are hypotheses about what code does. Names are chosen by the same developer who wrote the bug.
-Citing a call as the reason a row is safe — "SAFE-because it calls the verify method" — is the single
-highest-yield way to miss a real finding, because the vulnerable path is very often the one whose name says it
-is fine.
-
-**Arguments at the call site are evidence and belong in the disposition.** A literal passed into the callee —
-a boolean flag, a mode string, an options object — frequently *is* the vulnerability, because it selects which
-branch of the callee runs. When the read range shows a call with literal arguments, name them in the
-disposition and say which branch they select. "The handler passes a flag whose meaning I did not check" is an
-open row, not a clearance.
-
-Three verdict values in a dossier, and only these three. **Every one carries a citation:**
-
-- **FINDING** — cite the `VULN-nnn` id, its severity, and one line of severity rationale.
-- **SAFE** — a named, effective guard **you read**, cited as `<guard>@file:line`. The guard must be on *this*
-  item's path, not a peer's.
-- **NOT-REACHABLE** — name what is absent **and cite the range you read to establish the absence**, as
-  `NOT-REACHABLE — no <behavior> in body or callees, per file.ext:START-END`. Absence is a claim about code,
-  so it cites the code. An uncited absence is not a verdict.
-
-**Control signatures are transcribed, not summarized.** The signature holds the actual guard chain or sink
-expression copied character-for-character from source. A one-guard chain and a three-guard chain are different
-strings, and grouping depends on that difference — collapsing both to "auth present" merges the outlier into
-the group and is exactly how these bugs survive. Transcribe, then group, then triage.
-
-**A signature tells you what was declared, never what the code does.** Grouping runs on signatures because
-signatures are cheap and comparable. Verdicts run on bodies. A dossier that reasons from the control chain
-without reading the body has skipped the analysis and kept the paperwork.
-
-**A class with no denominator is NOT-YET-EVALUATED, not cleared.** If a class's sweep returns zero hits, run a
-second sweep of a different shape before recording zero — and record both commands. Zero-hit sink classes still
-need the asset/surface check that would reveal a bespoke implementation.
+A negative verdict whose justification is *only* a missing library / keyword / driver name, "it's a safe
+builder not string concatenation", "the grep returned nothing", or "another lens / area owns it" is **INVALID**
+— the class is **NOT-YET-EVALUATED**, not cleared. This requirement **overrides the read-budget / "grep is a
+prioritizer only" guidance**: if a structural sweep produces hits, those files MUST be opened and taint-traced
+even when a keyword grep looked clean and even if doing so exceeds the ~1x read budget.
 
 | Rationalization (do NOT accept as a clearance) | Reality |
 |-----------------------------------------------|---------|
-| "No `lodash.merge` / `child_process` / `node-serialize` → SAFE" | Library absence ≠ behavior absence. Sweep by shape, enumerate the hits, disposition every row. |
-| "It uses a safe builder, not string concatenation" | A builder fed tainted input stays a sink until read + trace prove it cannot carry metacharacters/operators/keys to the engine. That proof is one row's disposition, not the class's. |
+| "No `lodash.merge` / `child_process` / `node-serialize` → SAFE" | Library absence ≠ behavior absence. Run the shape sweep, open every hit, trace to source. |
+| "It uses a safe builder, not string concatenation" | A builder fed tainted input stays a sink until read + trace prove it cannot carry metacharacters/operators/keys to the engine. |
 | "The grep for `__proto__` (or `<keyword>`) found nothing" | Sinks are *shapes* (e.g. `obj[k][k2]=` from input-derived keys), not literals. |
-| "That's the other lens's / another area's job" | A shared behavioral primitive is dispositioned by whoever sees it — never by deferral. |
-| "The guarded ones are representative, the rest follow the same pattern" | Then writing their rows costs you nothing. The outlier is *why* you enumerate — it is invisible until every sibling is on one page. |
-| "I sampled the sensitive ones" | Sampling selects for what you already suspect. The denominator is every item, not the ones that looked interesting. |
-| "N rows is too many to write out" | A denominator too large to disposition is a shard boundary, not a license to summarize. Split the work; keep the rows. |
-| "This class obviously doesn't apply to most of these operations" | Then each row costs seconds and cites a short range. "Obviously" is the feeling that precedes an uncited row, not evidence. |
-| "The same reason genuinely is true for 100 operations" | Each of those 100 has its own body at its own line range, so each row cites its own range. Identical reason strings mean one judgement was made and copied 100 times. |
-| "The guard chain already tells me this operation is safe" | A declaration chain says what was declared, never what the body does. Behavioral classes are dispositioned from the body or not at all. |
-| "Writing `NOT-REACHABLE` with no reason is fine when nothing is there" | Then the range you read to establish that is one cell away. A bare verdict is indistinguishable from a skipped row, so it is scored as one. |
-| "No such behavior in the handler body" | A handler that forwards to a service contains no behavior at all. That sentence is true of every thin resolver and clears nothing. Follow the call. |
-| "It calls the verify/validate/check method, so it is handled" | That is a name, not a behavior. Open it. The vulnerable path is disproportionately the one whose name promises it is safe. |
-| "The callee is shared and used everywhere, so it must be correct" | Shared callees take arguments. This caller may select a branch no other caller selects — that is precisely how one operation differs from its siblings. |
-| "Following every call would never terminate" | You are not following every call. You are following the calls that could implement the class you are dispositioning, until you reach the code that implements or refuses it. Then you stop. |
-| "I'll write a script to generate the dispositions" | A script assigns one judgement per archetype and copies it. It cannot tell you which item is anomalous, and that is the whole question. Triage by control signature instead. |
-| "Every item needs its own verdict for every class" | That is thousands of cells and it buys uniformly shallow ones. Group the regular items by control signature; spend the depth on the ones that stand out. |
-| "This group of 40 is obviously fine, and so is this singleton next to it" | The group is fine because 40 items share a control chain. The singleton shares it with nobody — that is the reason it gets a dossier, not a reason to wave it through. |
-
-**Why the table and not a paragraph:** a prose clearance can describe three items and imply the rest. A table
-cannot — its row count is checkable arithmetic. Every historical miss of this system's has the same shape: a
-true sentence about *some* items, read as a verdict about *all* of them.
+| "That's the other lens's / another area's job" | A shared behavioral primitive is cleared by whoever sees it, WITH a Clearance Record — never by deferral. |
+| "Peer routes have reCAPTCHA / CSRF / rate limits → class SAFE" | Peer controls prove nothing about unlisted siblings. Pass 3 differential analysis MUST enumerate every structural-sweep hit with its own `file:line` guard or absence — plural `SAFE-because … on sensitive flows` without per-hit proof is INVALID. |
 
 For each loaded vulnerability class, perform taint analysis:
 
@@ -892,22 +723,6 @@ On any mismatch: correct the citation if the real evidence is found, or **downgr
 | **Low** | Information disclosure, open redirect, weak crypto, insecure cookie, improper input validation (semantic-type mismatch / missing format validation, CWE-20 — see `input_validation.md`) |
 | **Informational** | Missing security headers, verbose errors, defense-in-depth gaps |
 
-#### Severity is derived, not defaulted
-
-**Every finding states its severity and one line of rationale naming the criterion it met.** Start from the
-Severity Classification row its class matches, then move it only for a stated reason — a cap below, a
-guardrail, or a concrete fact about reachability or blast radius that you read. "Low" is a conclusion you reach
-about a specific finding, never the value a finding carries because nobody assessed it.
-
-**Authentication bypass and account takeover are Critical by criterion.** When an attacker reaches another
-user's account, session, or credentials, the row is Critical regardless of how ordinary the code looked or how
-briefly the finding is described. Length of write-up is not evidence of impact.
-
-**A degenerate severity distribution is a defect in the report, not a property of the codebase.** Before
-finalizing, look at the counts per severity. If every finding landed in one bucket — most often all Low — the
-severities were defaulted rather than derived. Re-derive each one from its class criterion and its stated
-impact. A real codebase produces a spread; a single bucket means the step was skipped.
-
 #### Standalone-Weak Cap (no severity inflation)
 
 Quota pressure, "report everything", or "security will downgrade later" does **not** raise severity. When the **only** evidence is one of the rows below — with **no** chained token/session/credential exfil, authz bypass, or sensitive data read — apply the **max disposition** in that row. Never ship **Medium+ CONFIRMED** for these alone.
@@ -1032,23 +847,6 @@ Analyzer: llm-sast-scanner v<version>
 
 ## Positive Patterns (what the codebase does well)
 <concrete controls observed working: parameterized queries throughout, output auto-escaping, centralized authz, per-request client scoping, etc. — calibrates trust in the findings and helps the team prioritize; omit only if nothing notable>
-
-## Coverage Ledger
-<one row per denominator; every integer comes from the triage tables, not from a claim>
-
-| Denominator | Binding | Enumerated | Groups | Flagged | Dossiers | Findings |
-|-------------|---------|------------|--------|---------|----------|----------|
-| <W1/W2/W3> | surface/sink/asset | <N> | <N> | <N> | <N> | <n> |
-
-**Unassigned items:** <items in no group — must be 0>
-**Flagged without a dossier:** <count — must be 0>
-**Uncited verdicts:** <dossier verdicts carrying no file:line — must be 0>
-**Severity spread:** <count per severity>
-
-<Any denominator with unassigned items or missing dossiers is INCOMPLETE — name it here. A report that
-lists an incomplete denominator without flagging it presents a partial audit as a finished one. A severity
-spread concentrated in one bucket means severity was defaulted rather than derived — re-derive before
-publishing.>
 
 ## Remediation Priority
 <ordered fix list>

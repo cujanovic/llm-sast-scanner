@@ -75,36 +75,38 @@ can choose another subject and complete a sensitive transition without controlli
 channel. If the mode is provably reachable only from a separately authenticated, target-bound recovery
 ceremony, cite that positive guard and clear it.
 
-**This class is surface-bound.** Its denominator is `W1` — every externally-reachable operation that reads or
-writes credential, verification, or session state. Not the operations that looked interesting; all of them.
-Build the row set from the surface inventory, transcribe each operation's guard chain verbatim, then sort by
-that column. The operations that share a purpose but not a guard chain land next to each other, and the one
-missing a challenge control is visible without insight.
+**Peer-control differential (mandatory before clearing this class):** credential and verification endpoints are
+rarely guarded uniformly. When one operation on a module carries an anti-automation control — a captcha
+middleware, a rate limiter, an attempt cap — and a sibling operation does not, you MUST enumerate and
+disposition **every** credential/verification operation on that module, not only the guarded ones. A
+class-level clearance citing a control seen on peers is **INVALID** unless the Clearance Record lists each
+operation's `file:line` with the specific guard present or absent on that exact entry point.
 
-A verdict that names a control appearing on *some* of those operations and clears the class is invalid — not
-because of how it is worded, but because the class's output is a table with one row per operation, and a
-sentence cannot fill it. See the base skill's **Disposition Ledger**.
+The operation that lacks its siblings' control is the finding. It is invisible until every sibling is listed
+together, which is why the enumeration is mandatory rather than advisory.
 
-**What to look for in each row — the behavior, not a name.** A server-assisted verification bypass is any path
-where the **server** obtains, generates, or accepts the value that is supposed to prove the claimant controls
-the out-of-band channel. It appears in three shapes:
+**Structural-shape sweeps (server-assisted verification bypass).** Sweep by shape, then read; the identifiers
+below are illustrative of the *form*, not a list to match:
 
-- **A flag that makes verification automatic** — a caller-supplied or hardcoded parameter that switches the
-  handler from "require the claimant's code" to "proceed without it".
-- **A server-side fetch of the code** — the backend calls an internal API, invitation service, or admin
-  endpoint that *returns* the challenge value to the server, which then consumes it on the user's behalf.
-- **A branch that substitutes a server value** — a conditional that selects between the user-supplied code and
-  one the server computed, on any condition the attacker can reach.
+```bash
+# 1. Flags that switch verification from claimant-supplied to server-completed.
+#    Any boolean/mode parameter on a credential or verification call is a candidate.
+rg -n '(auto|skip|bypass|internal|trusted|force)[A-Z_]?\w*(Verif|Validat|Challeng|Otp|Code)' --glob '*.{js,ts,py,java,go,php,rb,cs}'
 
-Trace each shape forward through OTP fetch/consume into the sensitive transition — password set, credential
-link, verified-state write, or session mint — and backward from every verification helper to all callers that
-can reach its automatic/skip branch. Such a chain is a bypass even when the code's randomness, expiry, and
-single-use properties are all correct: the control being defeated is *proof of channel possession*, and none of
-those properties supply it.
+# 2. Backend calls that RETURN the challenge value to the server rather than
+#    delivering it out-of-band to the user.
+rg -n '=\s*await\s+\w+\.(invite|provision|issue|generate|fetch|get)\w*\(' --glob '*.{js,ts,py,java,go,php,rb,cs}'
 
-Do not treat "the server generated or fetched a valid code" as a sanitizer. Clear the row only if the automatic
-mode is provably reachable only from a separately authenticated, target-bound ceremony — and cite that guard at
-`file:line` on that row's own path.
+# 3. The peer list: every credential/verification entry point on the module, with
+#    its full guard chain, so guarded and unguarded siblings sit side by side.
+#    Adapt the decorator/middleware/annotation pattern to the framework in use.
+```
+
+Open every hit. Trace each flag through the verification helper into whatever it gates — password set,
+credential link, authenticator enrollment, verified-state write, or session mint. **A chain where the backend
+obtains the proof and then consumes it on the user's behalf is a bypass even when randomness, expiry, and
+single-use are all correct**, because the property being defeated is possession of the out-of-band channel, and
+none of those three supply it.
 
 ## OTP / reset-token disclosure in responses
 
