@@ -10,7 +10,7 @@ description: >
   With mode=single it runs the same procedure in one context.
 disable-model-invocation: true
 metadata:
-  version: "2.0.1"
+  version: "2.1.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -28,7 +28,10 @@ then requiring a disposition for every enumerated item.
 - Coverage is `rows dispositioned / rows enumerated` — two integers from a pasted command output, never a claim.
 - Three denominators, built before analysis: `W1` attack surface, `W2` sink sweep hits, `W3` asset files.
 - Every class verdict is a table with one row per denominator item. A class verdict is never a sentence.
-- Every row carries FINDING / SAFE-because `<guard>@file:line` / NOT-REACHABLE, and evidence transcribed verbatim.
+- Every row carries evidence transcribed verbatim, the `read` line range actually opened, and a cited
+  disposition: FINDING `VULN-nnn` / SAFE-because `<guard>@file:line` / NOT-REACHABLE `— <absent>, per file:START-END`.
+- Behavioral classes are dispositioned from the body, never from the declaration chain. No two rows share a
+  disposition string.
 - The run is done when every row of every applicable denominator is dispositioned and the challenge pass over
   `SAFE` rows on mixed-guard surfaces has run.
 - A denominator too large for one context is a shard boundary. It is never a licence to summarize.
@@ -161,6 +164,10 @@ Ensure `.llm-sast-scanner-cache/` is in the target `.gitignore`. Then, following
    declaration shapes the command mishandles (multi-line decorators, a comment or blank line between decorator
    and signature, wrapped registrations, inherited routes) are operations and must be recovered. Fix the command
    and re-run until the difference is fully explained before continuing.
+   Validate the columns as well as the count: the guard cell holds a declaration chain and nothing else, so
+   reject any cell carrying function-body tokens or running past a couple of hundred characters, then confirm
+   three random rows against the source at their cited `file:line`. Record paths **target-relative** — absolute
+   paths embed the operator's username and machine layout.
 4. **Build `W3` (`assets.tsv`)** — per asset-bound class, the glob and its matching files.
 5. **Write `architecture-threat-model.md`** — languages & frameworks, entry points, trust boundaries, authN/authZ
    model, data stores, outbound calls, detected stack, the applicable-class set, and `base-sha`.
@@ -307,7 +314,20 @@ Load references for your assigned classes, gated on the stack actually present. 
 ### DISPOSITION DISCIPLINE
 
 Every class you own produces a **Disposition Ledger** in the base skill's format: binding, denominator,
-enumeration output, one row per item, and `Dispositioned: N/N`. Beyond that format:
+enumeration output, one row per item carrying evidence, a `read` range, and a cited disposition, then
+`Dispositioned: N/N`. Beyond that format:
+
+- **Open the body before you disposition it.** The `read` cell holds the line range you actually opened for
+  that item. Behavioral classes — whether an operation touches credentials, verification codes, other users'
+  records, or shared state — are answered by the handler and its callees, never by the declaration chain. An
+  operation whose decorators look routine and whose body performs the behavior is the single most common miss,
+  and it is only visible from the body.
+- **Every disposition cites.** `SAFE-because <guard>@file:line`; `NOT-REACHABLE — <what is absent>, per
+  file.ext:START-END`; `FINDING VULN-nnn`. A bare verdict, or an absence with no range behind it, is a skipped
+  row with a table cell around it.
+- **No two rows share a disposition string.** Each item's body is at its own line range, so genuine per-row
+  work produces distinct strings. A reason you are about to paste a second time is a reason you stopped
+  reading.
 
 - **Transcribe evidence, do not summarize it.** The evidence column holds the guard chain or sink expression
   copied character-for-character from source. A one-guard chain and a three-guard chain are different strings;
@@ -346,6 +366,14 @@ Run when your rows are dispositioned.
 
 - **Count.** For each class you own: `Dispositioned / Denominator`. Both integers come from the pasted
   enumeration output. State them.
+- **Citation check.** Count rows whose disposition carries no `file:line`, and rows whose `read` cell is empty
+  or holds a single line. Both are undispositioned rows wearing a verdict. State the count and close them
+  before finalizing; a bare `NOT-REACHABLE` is indistinguishable from a skipped row and is scored as one.
+- **Repetition check.** Sort your disposition strings and count duplicates. Identical dispositions on different
+  rows mean one judgement was copied rather than N judgements made — every row cites its own read range, so
+  genuine per-row work produces distinct strings. Redo every duplicated row by opening its body. Report the
+  duplicate count in your results file even when it is zero; it is the cheapest signal that a ledger was filled
+  rather than worked.
 - **Challenge pass.** Re-open every `SAFE-because` row on a surface whose peers have **mixed** evidence
   (some operations guarded, some not; some branches escaped, some raw). Mixed evidence is where the bug lives.
   Confirm each cited guard is on that row's own path, in current code. Any row you cannot re-confirm becomes a
