@@ -11,7 +11,7 @@ description: >
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.17.1"
+  version: "1.17.2"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -209,10 +209,17 @@ subagents share one cacheable prefix:
 
 > Read `.llm-sast-scanner-cache/architecture-threat-model.md` for context, **your assigned
 > `.llm-sast-scanner-cache/partition-N.txt` as your coverage denominator** (the file list + line counts D1
-> persisted for your partition — use it as-is; do NOT rebuild it and do NOT widen to the full manifest, so every
-> subagent reconciles against exactly the slice it was given; only re-enumerate per the GROUND RULES if that file
-> is missing or stale). Your 100% coverage obligation is your partition, not the repository; the other two
-> partitions are covered by their own subagents, and D3 checks the three sum to the manifest. Also read `.llm-sast-scanner-cache/project-memory.md` as **hints,
+> persisted for your partition — use it as-is; do NOT rebuild it, so every subagent reconciles against exactly
+> the slice it was given; only re-enumerate per the GROUND RULES if that file is missing or stale). Your 100%
+> **coverage obligation** is your partition, not the repository; the other two partitions are covered by their
+> own subagents, and D3 checks the three sum to the manifest.
+>
+> **Your coverage obligation is your partition. Your READ SCOPE is the whole repository.** These are different
+> things, and conflating them hides real bugs. When a taint chain, caller, callee, middleware, shared helper, or
+> base class leads out of your partition, OPEN IT and keep tracing — files outside your partition are yours to
+> read, cite, and build findings from; they are simply not yours to prove coverage of. Defects routinely straddle
+> a partition boundary, with the entry point in one slice and the missing check in another. Declining to look
+> across the boundary is how those go unreported. Also read `.llm-sast-scanner-cache/project-memory.md` as **hints,
 > never authority** (base skill's **Project Memory Protocol**: never skip a line or auto-dismiss a class; a
 > false-positive entry suppresses a re-report only after you re-confirm its rationale in the current code).
 > Do **not** write to `project-memory.md` — Step D3 is the single writer. **If your tail block includes a
@@ -391,9 +398,14 @@ GROUND RULES
   `sast_report-*.md` reports it wrote** (they are tool artifacts, not code under review). If a specific dependency
   must be reviewed, do it deliberately — not as part of the line-by-line repo sweep.
 - ASSIGNED DENOMINATOR (never rebuilt): **if your tail block assigns you a partition, your coverage denominator
-  is that `.llm-sast-scanner-cache/partition-N.txt` — read it as-is and do NOT widen to the full manifest.** Your
-  100% obligation is your partition; the other partitions belong to other subagents. Only when no partition is
-  assigned (single mode) is the denominator the whole `scope-manifest.txt`.
+  is that `.llm-sast-scanner-cache/partition-N.txt` — read it as-is.** Your 100% obligation is your partition;
+  the other partitions belong to other subagents. Only when no partition is assigned (single mode) is the
+  denominator the whole `scope-manifest.txt`.
+- READ SCOPE IS UNRESTRICTED (distinct from the denominator): the denominator says what you must **prove you
+  read**; it never limits what you **may** read. Follow every taint chain, caller, callee, middleware, shared
+  helper, and base class wherever it leads, including into other partitions, and cite those `file:line`s in your
+  findings. A finding whose entry point is in your partition is yours to report even when the defective code
+  sits in another — state that in the finding rather than dropping it.
 - SCOPE MANIFEST (build ONCE, before pass 1): the enumerated in-scope file list + line counts. **Reuse the shared
   manifest when it exists:** if `.llm-sast-scanner-cache/scope-manifest.txt`
   is present (D1 writes it) and current for this SHA, READ it instead of re-enumerating — so
