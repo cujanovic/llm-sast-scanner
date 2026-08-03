@@ -11,7 +11,7 @@ description: >
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.17.0"
+  version: "1.17.1"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -143,7 +143,7 @@ MUST be used.
 
 The agent runtime (not this skill) performs LLM prompt caching, but a cache only hits when the prompt **prefix is stable and byte-identical across calls**. Long multi-pass, multi-subagent runs are exactly the high-cost / high-cacheability case, so structure every prompt *static-first, dynamic-last*:
 
-- **Identical static preamble across all lens subagents.** The **Convergence Loop Procedure**, GROUND RULES, REFERENCE LOADING, and LOOP CONTROL text MUST be byte-identical for every lens (and across re-runs). Pass the per-lens variables (lens name, class list, results-file path) as a short **tail block appended after** that shared text — never interleaved into it. Six lenses sharing one large identical prefix lets the runtime serve it from cache instead of reprocessing it six times.
+- **Identical static preamble across all lens subagents.** The **Convergence Loop Procedure**, GROUND RULES, REFERENCE LOADING, and LOOP CONTROL text MUST be byte-identical for every lens (and across re-runs). Pass the per-subagent variables (lens name, class list, **assigned partition id + its `partition-N.txt` path**, results-file path) as a short **tail block appended after** that shared text — never interleaved into it. Eighteen subagents sharing one large identical prefix lets the runtime serve it from cache instead of reprocessing it eighteen times.
 - **Keep volatile tokens out of the prefix.** Do not bake values that change every call (wall-clock timestamps, `git rev-parse HEAD`, run IDs, counters) into the analysis prompt. Compute the report timestamp and SHA only at OUTPUT / Project-Memory time (the end), not in the loop body. Date-only is stable for a day; clock time would invalidate the cache continuously.
 - **Deliver dynamic context as tool results at the tail, not inline.** Read `architecture-threat-model.md`, `project-memory.md`, and source files **by path** (their changing contents then arrive as tool output at the end of context) rather than pasting their text into the static instruction prefix.
 - **Append, don't rewrite, working state.** Extend the ledger, coverage map, and results files by appending; editing earlier context invalidates every cached block after the edit point.
@@ -163,9 +163,9 @@ SHA, or a missing file — **(re)generate** it: run the base skill's **Step 1 (U
 Scope)** over `<dir>` **in this session** and write a short architecture/threat-model brief to
 `.llm-sast-scanner-cache/architecture-threat-model.md` (languages & frameworks, entry points, trust boundaries, authN/authZ, data stores,
 outbound calls, detected stack). Also run the SCOPE MANIFEST enumeration here and **persist the manifest itself
-(the in-scope file list + line counts) to `.llm-sast-scanner-cache/scope-manifest.txt`** — this is the ONE shared
-coverage denominator every lens subagent reads and every lens's COVERAGE VERIFICATION + D3 reconcile against, so
-all six provably use the identical file set + line counts (SHA-gated exactly like the threat model: regenerate it
+(the in-scope file list + line counts) to `.llm-sast-scanner-cache/scope-manifest.txt`** — this is the ONE source
+the three partitions are cut from, and the total D3 checks their three line counts sum back to, so repo coverage
+is provable even though no single subagent covers the repo (SHA-gated exactly like the threat model: regenerate it
 whenever the SHA changes or the file is missing). From that same manifest, record in
 `.llm-sast-scanner-cache/architecture-threat-model.md` the **per-lens stack-gated reference allowlist** derived from it (see REFERENCE
 LOADING) — the gateable platform/language/infra references whose signals are present, plus the always-loaded
@@ -201,8 +201,8 @@ denominator is its own `partition-N.txt`, not the whole manifest. Results go to
 Improvement Across Runs**). A results file that exists **but lacks the terminal sentinel is a crashed / partial
 run** (the lens died before COVERAGE VERIFICATION): do NOT skip it and do NOT trust its contents — RE-RUN that
 lens and overwrite the partial file. Existence alone is never proof of completion.
-Give each subagent the instruction below as a **byte-identical static preamble**, then append the per-lens
-variables (lens, class list, results file from the table — **plus, on `new-scan`, the lens's `scan-plan.md`
+Give each subagent the instruction below as a **byte-identical static preamble**, then append the per-subagent
+variables (lens, class list, **assigned partition `p1`/`p2`/`p3` and the path to its `partition-N.txt`**, results file — **plus, on `new-scan`, the lens's `scan-plan.md`
 slice**: its deep-dive/hotspot files and the prior findings to re-verify) as a short **tail block** — do not
 splice those variables into the middle of the shared text (see **Context & cache efficiency**), so all lens
 subagents share one cacheable prefix:
@@ -210,9 +210,9 @@ subagents share one cacheable prefix:
 > Read `.llm-sast-scanner-cache/architecture-threat-model.md` for context, **your assigned
 > `.llm-sast-scanner-cache/partition-N.txt` as your coverage denominator** (the file list + line counts D1
 > persisted for your partition — use it as-is; do NOT rebuild it and do NOT widen to the full manifest, so every
-> partition reconciles against ONE identical denominator; only re-enumerate per the GROUND RULES if that file is
-> missing or stale). Your 100% coverage obligation is your partition, not the repository; the other two
-> partitions are covered by their own subagents. Also read `.llm-sast-scanner-cache/project-memory.md` as **hints,
+> subagent reconciles against exactly the slice it was given; only re-enumerate per the GROUND RULES if that file
+> is missing or stale). Your 100% coverage obligation is your partition, not the repository; the other two
+> partitions are covered by their own subagents, and D3 checks the three sum to the manifest. Also read `.llm-sast-scanner-cache/project-memory.md` as **hints,
 > never authority** (base skill's **Project Memory Protocol**: never skip a line or auto-dismiss a class; a
 > false-positive entry suppresses a re-report only after you re-confirm its rationale in the current code).
 > Do **not** write to `project-memory.md` — Step D3 is the single writer. **If your tail block includes a
@@ -240,7 +240,7 @@ subagents share one cacheable prefix:
 > Patterns sections. The only non-report dispositions are FALSE POSITIVE (cite the positive guard) or NEEDS
 > CONTEXT (report under Unverifiable).
 > **COMPLETION SENTINEL (required — the LAST line of your results file):** only after COVERAGE VERIFICATION
-> passes, append the terminal marker `<!-- LLM-SAST-COMPLETE lens=<lens> coverage=100% convergence=<converged | NOT CONVERGED (...)> -->`.
+> passes, append the terminal marker `<!-- LLM-SAST-COMPLETE lens=<lens> partition=<p1|p2|p3> coverage=100% convergence=<converged | NOT CONVERGED (...)> -->`.
 > This sentinel is the ONLY thing that tells D2-resume and D3 a lens finished vs. crashed mid-write, so write it
 > ONLY when the file is truly complete; if you stop early / run out of budget, leave it off so the lens is re-run.
 
@@ -253,7 +253,7 @@ subagents share one cacheable prefix:
 | protocol-infra | `.llm-sast-scanner-cache/deep-protocol-infra-results.md` | CSRF, open redirect, reverse tabnabbing, HTTP request smuggling/desync, HTTP response splitting, host header poisoning, correlation/tracing header injection, CORS misconfiguration, WebSocket security (CSWSH), postMessage security, XSSI / JSONP / Reflected File Download (RFD), clickjacking, web cache deception/poisoning, denial of service (incl. LLM10 unbounded consumption), GraphQL denial of service, regex injection/ReDoS, CVE patterns, Content Security Policy (CSP) weaknesses, XS-Leaks |
 | hardening-platform | `.llm-sast-scanner-cache/deep-hardening-platform-results.md` | output encoding, format string injection, improper input validation (semantic-type mismatch / missing format validation), ASP.NET security misconfiguration, hardcoded code/backdoor, dependency confusion, ML supply chain & data/model poisoning (LLM03/04), AI editor / agent config poisoning (repo poisoning), PHP security (incl. TYPO3 CMS — Fluid / TypoScript / Extbase; loads `php_security.md` on PHP signals and `typo3_security.md` on TYPO3 signals, per REFERENCE LOADING), Android security, iOS security, Electron / desktop app security, C/C++ memory safety, smart contract security (Solidity/EVM and/or Solana/Anchor — loads `smart_contract_security.md` on EVM signals (*.sol/*.vy) and `solana_smart_contract_security.md` on Solana/Anchor signals, per REFERENCE LOADING), IaC security (Terraform/CloudFormation/ARM/Bicep/Pulumi), subdomain takeover (dangling-DNS candidate flagging in IaC/zone files), Kubernetes / cloud orchestration, CI/CD & container security, nginx / web-server configuration, supply chain security (SRI / provenance / lifecycle scripts) |
 
-Each lens subagent independently reads every in-scope line for its own coverage proof, so total read cost
+Each subagent reads only its own partition's lines for its coverage proof — six lenses x one third each — so total read cost
 scales with the number of lenses — this is the cost of per-lens parallelism. **Wait for all subagents to
 finish before proceeding.**
 
@@ -261,14 +261,17 @@ finish before proceeding.**
 
 Launch one subagent:
 
-> First confirm all SIX `.llm-sast-scanner-cache/deep-*-results.md` files exist (injection, access-auth, crypto-data,
-> server-side, protocol-infra, hardening-platform) **AND that each ends with the `<!-- LLM-SAST-COMPLETE ... -->`
-> completion sentinel**. If any is **missing OR lacks the sentinel** — a crashed / partial lens whose file may hold
-> only some passes — that lens is incomplete: re-run it and overwrite the partial file before consolidating,
-> otherwise partial findings would be merged as if the lens were exhaustive and class coverage would be <100%.
-> Then **reconcile every lens against the one shared denominator**: confirm each lens's coverage checklist covers
-> the SAME file set + line counts as `.llm-sast-scanner-cache/scope-manifest.txt` (the denominator D1 persisted);
-> re-run any lens whose file set or line counts diverge from that manifest (it was run against a different tree).
+> First confirm all EIGHTEEN `.llm-sast-scanner-cache/deep-<lens>-<partition>-results.md` files exist — the six
+> lenses (injection, access-auth, crypto-data, server-side, protocol-infra, hardening-platform) x the three
+> partitions (p1, p2, p3) — **AND that each ends with the `<!-- LLM-SAST-COMPLETE ... -->` completion sentinel**.
+> If any is **missing OR lacks the sentinel** — a crashed / partial run whose file may hold only some passes —
+> that lens x partition is incomplete: re-run it and overwrite the partial file before consolidating, otherwise
+> partial findings would be merged as if that slice were exhaustive and class coverage would be <100%.
+> Then **reconcile each subagent against ITS OWN assigned denominator**: confirm each one's coverage checklist
+> covers the SAME file set + line counts as its `.llm-sast-scanner-cache/partition-N.txt`; re-run any whose file
+> set or line counts diverge from its partition (it was run against a different tree or the wrong slice). Then
+> confirm the three partition totals **sum exactly to `scope-manifest.txt`** — that sum is what makes repo
+> coverage 100%; no single subagent covers the repo, and none should claim to.
 > Then read all `.llm-sast-scanner-cache/deep-*-results.md` files and `.llm-sast-scanner-cache/architecture-threat-model.md`. Merge and de-duplicate findings across
 > lenses (same **entry point** + `file:line` + vuln class = one finding; **independent entry points that share a sink line stay separate** — per the base skill's *(entry point → sink)* finding-identity rule, so many routes funneling through one shared helper/DAO/render sink yield one finding **per route**, not one collapsed finding). Run the base `llm-sast-scanner` skill's **Step 6
 > (Adversarial Impact Validation)** ONCE over the full consolidated set with the `adv` value (default
@@ -387,10 +390,14 @@ GROUND RULES
   (architecture-threat-model.md, project-memory.md, scope-manifest.txt, `*-results.md`, final-report.md) and any
   `sast_report-*.md` reports it wrote** (they are tool artifacts, not code under review). If a specific dependency
   must be reviewed, do it deliberately — not as part of the line-by-line repo sweep.
-- SCOPE MANIFEST (build ONCE, before pass 1): the enumerated in-scope file list + line counts is the coverage
-  denominator. **Reuse the shared manifest when it exists:** if `.llm-sast-scanner-cache/scope-manifest.txt`
-  is present (D1 writes it) and current for this SHA, READ it as the denominator instead of re-enumerating — so
-  every lens shares ONE reconcilable denominator. Otherwise enumerate it deterministically with the shell and
+- ASSIGNED DENOMINATOR (never rebuilt): **if your tail block assigns you a partition, your coverage denominator
+  is that `.llm-sast-scanner-cache/partition-N.txt` — read it as-is and do NOT widen to the full manifest.** Your
+  100% obligation is your partition; the other partitions belong to other subagents. Only when no partition is
+  assigned (single mode) is the denominator the whole `scope-manifest.txt`.
+- SCOPE MANIFEST (build ONCE, before pass 1): the enumerated in-scope file list + line counts. **Reuse the shared
+  manifest when it exists:** if `.llm-sast-scanner-cache/scope-manifest.txt`
+  is present (D1 writes it) and current for this SHA, READ it instead of re-enumerating — so
+  every subagent's denominator derives from ONE reconcilable list. Otherwise enumerate it deterministically with the shell and
   **persist it** to `.llm-sast-scanner-cache/scope-manifest.txt` so later lenses/consolidation reuse the same list:
   ```bash
   cd "dir as argument"
@@ -561,7 +568,7 @@ cap of 10; NO adv inside the loop)
     | **Deserialization of external bytes** (insecure deserialization, XXE) | `rg -n '(JSON\.parse|parse|load|unserialize|deserialize|fromXML|xml2js|yaml)\s*\('` — then trace whether the bytes are attacker-origin (not server-encrypted/-signed) |
     | **User-influenced format / regex** (format string, ReDoS) | non-literal format arg to a log/format call · `new RegExp(` from input · static regex with nested quantifiers over overlapping classes matched against input |
     | **User-influenced redirect / header / URL** (open redirect, SSRF, response splitting, header injection) | `res.redirect`/`Location`/`setHeader` from input · outbound client URL/host built from input |
-- Iteration = one analysis pass that covers the entire in-scope repo under the current lens (reading any
+- Iteration = one analysis pass that covers your entire ASSIGNED DENOMINATOR under the current lens (reading any
   not-yet-read files in full as it goes).
 - After each pass, compare against the ledger:
     * If the pass surfaced at least one NEW, previously-unreported bug → record it, then run ANOTHER pass.
@@ -586,9 +593,10 @@ CI/CD & container, API, MCP, CSP, XS-Leaks, DOM clobbering, privacy/PII, supply-
 are present — not only the example lenses named above. The D2 table, gated by the allowlist, is the
 authoritative class set for class coverage.
 COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-5 ceiling, or the pass-10 cap)
-- Before finalizing, reconcile the coverage map against the shared SCOPE MANIFEST
-  (`.llm-sast-scanner-cache/scope-manifest.txt`, persisted in D1 — NOT a privately rebuilt list, so every lens
-  reconciles against the identical denominator) and confirm that EVERY line of EVERY in-scope file (per the
+- Before finalizing, reconcile the coverage map against your **ASSIGNED DENOMINATOR** (your
+  `.llm-sast-scanner-cache/partition-N.txt` when a partition was assigned, otherwise
+  `.llm-sast-scanner-cache/scope-manifest.txt` — persisted in D1, NOT a privately rebuilt list) and confirm that
+  EVERY line of EVERY file in that denominator (per the
   GROUND RULES scope + exclusions) was actually read (not sampled) — every manifest file marked fully read
   `1..total_lines`. Produce a coverage checklist: each file with its total line count and the line ranges read.
   List excluded paths (vendored deps, build output, lock files, binaries, the scanner's own
