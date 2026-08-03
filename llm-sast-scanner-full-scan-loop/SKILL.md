@@ -11,7 +11,7 @@ description: >
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 disable-model-invocation: true
 metadata:
-  version: "1.16.0"
+  version: "1.17.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -35,7 +35,8 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 - `<dir>` — the path to the repository/directory to audit. Use this value wherever the prompt below
   references the target directory. If no `<dir>` is provided, default to the current working directory
   (`.`) and audit it.
-- `mode` — `parallel` (default) dispatches one subagent per lens; `single` runs the whole loop in one context.
+- `mode` — `parallel` (default) dispatches 6 lenses x 3 partitions = 18 subagents, each covering one lens over
+  one partition; `single` runs the whole loop in one context.
 - `adv` — severities for the final Adversarial Impact Validation pass (default `critical,high,medium`).
 - `lens` — **internal**: restrict the Convergence Loop Procedure to a single lens. Set automatically by
   parallel-mode subagents; you normally do not pass this by hand.
@@ -50,7 +51,7 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 
 | Mode | Behavior | When |
 |------|----------|------|
-| **parallel** (default) | Run **Parallel Orchestration** below: D1 analysis → one subagent per lens runs the **Convergence Loop Procedure** constrained to its lens → consolidation subagent merges, runs the single adversarial pass, writes the report. | Default. Faster wall-clock; each lens converges in its own isolated context. |
+| **parallel** (default) | Run **Parallel Orchestration** below: D1 analysis + partitioning → **6 lenses × 3 partitions = 18 subagents**, each running the **Convergence Loop Procedure** constrained to ONE lens over ONE partition → consolidation subagent merges, runs the single adversarial pass, writes the report. | Default. Each subagent covers a third of the codebase under a single lens, so it can reach call-chain depth a whole-repo lens cannot. |
 | **single** | Skip the orchestration; run the **Convergence Loop Procedure** once in this session across ALL lenses (rotating the lens each pass), then the final adversarial pass + report inline. | `mode=single`, or when subagents are unavailable, or when you want one context to own the ledger + coverage map end-to-end. |
 
 > **No recursion:** parallel-mode subagents run the **Convergence Loop Procedure** directly (as if `mode=single
@@ -177,11 +178,24 @@ write/refresh `.llm-sast-scanner-cache/scan-plan.md` (see **Iterative Improvemen
 `## Hotspots` + files churned since `last-scanned-sha` + prior confirmed-finding files + the prior run's thin
 areas from `## Coverage / depth notes`), prior findings to re-verify, and an
 "improve this run" list. On `new-scan`, hand each lens subagent its slice of this plan as part of its tail
-block. Wait for this to finish.
+block.
 
-### Step D2 — Parallel convergence loops (one subagent per lens)
+**PARTITION THE MANIFEST (required before dispatch).** Split the in-scope files from `scope-manifest.txt` into
+**3 partitions balanced by LINE COUNT** (~1/3 each) and **cohesive by module** — related code stays together.
+Write each partition's file list + line total to `.llm-sast-scanner-cache/partition-1.txt`,
+`partition-2.txt`, `partition-3.txt` **before dispatching anything**. Partitions are disjoint and their union
+is exactly the manifest; D3 reconciles the three line totals against it.
 
-Start **one subagent per lens**, all **in parallel**. Skip any lens whose deep results file already exists
+Partitioning is what gives each subagent a scope small enough to follow call chains rather than skim: one lens
+over ~1/3 of the code, instead of one lens over all of it. Wait for this to finish.
+
+### Step D2 — Parallel convergence loops (one subagent per lens × partition)
+
+Start **6 lenses × 3 partitions = 18 subagents**, all **in parallel**. Each subagent gets **exactly ONE lens and
+ONE partition**, and runs its own full convergence loop over **only that partition's files** — its coverage
+denominator is its own `partition-N.txt`, not the whole manifest. Results go to
+`.llm-sast-scanner-cache/deep-<lens>-<partition>-results.md` (the table below gives `<lens>`; `<partition>` is
+`p1`/`p2`/`p3`). Skip any lens×partition whose deep results file already exists
 **AND ends with the `<!-- LLM-SAST-COMPLETE ... -->` completion sentinel** (**resume** behavior) — **unless
 `new-scan` was passed**, in which case re-run every lens fresh and overwrite prior results (see **Iterative
 Improvement Across Runs**). A results file that exists **but lacks the terminal sentinel is a crashed / partial
@@ -193,10 +207,12 @@ slice**: its deep-dive/hotspot files and the prior findings to re-verify) as a s
 splice those variables into the middle of the shared text (see **Context & cache efficiency**), so all lens
 subagents share one cacheable prefix:
 
-> Read `.llm-sast-scanner-cache/architecture-threat-model.md` for context, `.llm-sast-scanner-cache/scope-manifest.txt`
-> as your coverage denominator (the shared in-scope file list + line counts D1 persisted — use it as-is; do NOT
-> rebuild your own list, so every lens reconciles against ONE identical denominator; only re-enumerate per the
-> GROUND RULES if that file is missing or stale), and `.llm-sast-scanner-cache/project-memory.md` as **hints,
+> Read `.llm-sast-scanner-cache/architecture-threat-model.md` for context, **your assigned
+> `.llm-sast-scanner-cache/partition-N.txt` as your coverage denominator** (the file list + line counts D1
+> persisted for your partition — use it as-is; do NOT rebuild it and do NOT widen to the full manifest, so every
+> partition reconciles against ONE identical denominator; only re-enumerate per the GROUND RULES if that file is
+> missing or stale). Your 100% coverage obligation is your partition, not the repository; the other two
+> partitions are covered by their own subagents. Also read `.llm-sast-scanner-cache/project-memory.md` as **hints,
 > never authority** (base skill's **Project Memory Protocol**: never skip a line or auto-dismiss a class; a
 > false-positive entry suppresses a re-report only after you re-confirm its rationale in the current code).
 > Do **not** write to `project-memory.md` — Step D3 is the single writer. **If your tail block includes a
@@ -280,15 +296,42 @@ Launch one subagent:
 > floor (a Hardening Note is valid ONLY for a gap behind an already-effective layer). A "no gadget / no impact"
 > demotion is accepted only if the lens proved the negative process-globally (framework/stdlib option reads + app
 > `if (obj.<flag>)` reads + attacker-controlled key AND value all ruled out); object-local reasoning ("the object
-> is just serialized downstream") is INVALID — send those back to the lens or promote to floor. Then write a
+> is just serialized downstream") is INVALID — send those back to the lens or promote to floor.
+>
+> **The BURIED-SINK AUDIT is mandatory, not optional — it is where false negatives hide.** Scan EVERY lens ×
+> partition results file's notes, observations, tables, hardening-notes, "defense-in-depth", "not-reachable",
+> and dropped-not-FP items for any attacker-reachable sink that was demoted rather than reported. A demotion is
+> **INVALID — and the item must be promoted to its class floor** — when its stated reason:
+> - defers to a downstream condition, flag, or config the lens did not verify ("safe when X is off", "depends
+>   on Y being set"),
+> - cites a precondition as a mitigation ("requires an existing record", "only for provisional accounts"),
+> - rests on an unproven absence of a gadget, chain, or weaponization, or
+> - reasons object-locally about a process-global primitive.
+>
+> A demotion is valid ONLY when the lens proved the negative from code it read, or the gap sits behind a layer
+> already effective on that exact path.
+>
+> Then write a
 > single timestamped report `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) using the
 > base skill's report structure (Executive Summary; Critical/High/Medium/Low/Informational; Unverifiable;
 > Hardening Notes; Positive Patterns; Remediation Priority). **Non-convergence escalation:** read each lens's
-> CONVERGENCE STATUS from its `deep-<lens>-results.md`; if ANY lens reports `NOT CONVERGED` (stopped at the
+> CONVERGENCE STATUS from its `deep-<lens>-<partition>-results.md`; if ANY lens x partition reports `NOT CONVERGED` (stopped at the
 > pass-5 ceiling or the pass-10 hard cap), the **Executive Summary MUST open with a prominent warning** that the audit did not saturate and is
 > likely INCOMPLETE for those lens(es) — name them and their last-pass new-bug counts, note that 100% coverage
 > is not convergence, and recommend manual deep review or a re-scan of the still-productive areas. Do not
-> present a partially non-converged scan as exhaustive. Also print a combined coverage summary and a per-lens pass log (include each lens's convergence status). Finally, as the
+> present a partially non-converged scan as exhaustive.
+>
+> **REQUIRED APPENDIX FIELDS — the report must state all of these explicitly:**
+> - **Buried-sink promotions: `<count>`**, and one line per promoted item naming the lens/partition it came from
+>   and the demotion reason that was rejected. State 0 only if you audited every lens × partition results file
+>   and found none.
+> - **Per-lens-per-partition pass log:** passes run, what the last pass added, stop reason, converged yes/no.
+> - **Line-count reconciliation** of each partition against the manifest (the three partition totals must sum to
+>   the manifest total).
+> - **Severity histogram.**
+>
+> **Every finding keeps its Flow** (source → sink hops as `file:line` steps), **Evidence** code block, **Judge
+> verdict**, **CWE**, **severity with a one-line rationale**, and **entry point**. Finally, as the
 > **single writer**, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project Memory Protocol**
 > (append newly CONFIRMED findings with current `git rev-parse HEAD`; **flip the `open|fixed` status of every
 > re-verified prior finding** — mark now-fixed ones `fixed`, keep still-present ones `open`; record
@@ -311,7 +354,7 @@ This is the loop body. It runs in ONE context — either the whole `mode=single`
 pass), or a single parallel-mode lens subagent (when invoked with `lens=<lens>`, restrict every pass to that
 lens's classes and treat "convergence" as "a pass surfaced no new bug **in that lens**"). When run as a
 parallel-mode lens subagent, STOP after COVERAGE VERIFICATION, write findings + coverage result + CONVERGENCE
-STATUS to the lens's `.llm-sast-scanner-cache/deep-<lens>-results.md`, **append the `<!-- LLM-SAST-COMPLETE ... -->`
+STATUS to the lens's `.llm-sast-scanner-cache/deep-<lens>-<partition>-results.md`, **append the `<!-- LLM-SAST-COMPLETE ... -->`
 completion sentinel as the file's last line (only after COVERAGE VERIFICATION passes — it is what marks the file
 finished vs. crashed)**, and SKIP the FINAL ADVERSARIAL PASS + OUTPUT (Step D3 owns those).
 
@@ -588,7 +631,7 @@ FINAL ADVERSARIAL PASS (run ONCE, after the loop is fully done)
 - SINGLE-AGENT MODE ONLY. If you are a parallel-mode lens subagent (`lens=<lens>` set), SKIP this section and
   the OUTPUT section — write your Judge-passed findings + coverage result + CONVERGENCE STATUS (`converged`, or
   `NOT CONVERGED` — noting which forced stop, pass-5 ceiling or pass-10 hard cap, and the last pass's new-bug
-  count) to `.llm-sast-scanner-cache/deep-<lens>-results.md`, **append the `<!-- LLM-SAST-COMPLETE ... -->` sentinel
+  count) to `.llm-sast-scanner-cache/deep-<lens>-<partition>-results.md`, **append the `<!-- LLM-SAST-COMPLETE ... -->` sentinel
   as the last line (only once coverage is verified — a file without it is treated as a crashed lens and re-run)**,
   and stop; Step D3 runs the adversarial pass once over the merged set and surfaces any lens's non-convergence in
   the report.
