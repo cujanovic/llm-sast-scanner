@@ -1,7 +1,7 @@
 ---
 name: privilege_escalation
-version: "0.7"
-description: Detect broken access control issues including vertical privilege escalation, role bypass, missing authorization checks on privileged endpoints.
+version: "0.8"
+description: Detect broken access control issues including vertical privilege escalation, role bypass, client-controlled flags participating in authorization predicates, missing authorization checks on privileged endpoints.
 ---
 
 # Privilege Escalation / Broken Access Control
@@ -15,6 +15,7 @@ Broken access control arises when an application fails to enforce that users may
 
 - A privileged operation (admin action, data modification, or sensitive read) executes without confirming the requesting user holds the necessary role or permission.
 - Role or admin status is read directly from client-supplied input — such as a request body field, query parameter, or cookie — without a corresponding server-side lookup.
+- **A client-supplied value participates in an authorization decision alongside a correct server-derived check.** The server-side lookup is present and correct; a client-controlled flag is OR'd with it, negates it, or selects around it — so the gate opens on either. See *Client-Controlled Flag in an Authorization Predicate* below. This shape survives review precisely because a legitimate authorization check is visible on the same line.
 - **Access control enforced by a redirect that does not halt execution.** A guard redirects the unauthorized/unauthenticated user (`header('Location: /login')`, `res.redirect('/login')`, `return redirect()`/`RedirectResponse`) but the handler **keeps rendering and emitting the protected content**, so the sensitive body is fully present in the HTTP response and readable by any client that **ignores the redirect** (`curl`, Burp, `fetch(url,{redirect:'manual'})`, `curl --max-redirs 0`). The browser silently follows the 30x and hides it, masking the bug in normal use. **Highest-signal shape**: PHP `header('Location: …');` **not** immediately followed by `exit`/`die`; a filter/`before_action`/middleware that assigns a redirect response but doesn't `return`/short-circuit so the controller action still runs and streams its view; content rendered *before* the redirect is issued. **Framework return contracts matter**: Yii 2 `beforeAction()` must return boolean `false` to stop dispatch; `return $this->redirect(...)` returns a truthy `Response`, so the protected action still runs. Call `redirect(...)` and then `return false`. **SAFE**: halt immediately after issuing the redirect (`exit`/`return`/`abort()`), and run the authz check **before** any sensitive data fetch or render — never rely on the client following a redirect to withhold already-emitted content. Cross-ref `information_disclosure.md`.
 
 ## Safe Patterns
@@ -805,6 +806,63 @@ app.put('/api/users/:id', authenticate, (req, res) => {
     User.findByIdAndUpdate(req.params.id, req.body, ...)   // req.body may include {role: 'admin'}
 });
 ```
+
+## Client-Controlled Flag in an Authorization Predicate
+
+Distinct from role-parameter tampering above: there, the client asserts *who it is*. Here the client asserts *which rule applies*. A server-derived authorization value is computed correctly — a role lookup, a session-derived admin bit, an entitlement check — and then a **client-supplied field is combined with it**, so the caller can satisfy the gate without satisfying the check.
+
+**Why this class evades review.** The correct server-side check is visible on the same line. Scanning for "is there an authorization check here?" returns yes. The defect is not a missing check but a **widened** one, and it is usually documented as a legitimate feature flag ("optional field to skip the X validation", "internal/custom flow"). Neither a doc comment nor an intended use case is a clearance: what matters is whether an untrusted caller can set the value.
+
+### The four shapes
+
+```ts
+// 1. DISJUNCTION — gate opens on either operand; the client owns one of them
+if (isAdminFromSession || input.someModeFlag) { doPrivilegedThing(); }
+
+// 2. SELECTOR — flag chooses which authentication/authorization path runs
+const token = input.someModeFlag
+  ? await getServiceCredentials()          // service identity, no user proof
+  : await authenticateUserSession(creds);  // the real path
+
+// 3. SUPPRESSOR — flag negates a validation the privileged path depends on
+if (!input.someModeFlag) { validateOwnershipAndVersion(order); }
+
+// 4. WIDENER — client value expands the set a server-derived scope authorizes
+const scope = input.requestedScope ?? sessionScope;   // client picks its own scope
+```
+
+### Secure form
+
+An authorization predicate is composed **only** of server-derived terms. A client flag may select behavior *after* authorization is decided, never as an operand of the decision.
+
+```ts
+// SAFE: client flag cannot reach the gate
+if (!isAdminFromSession) throw forbidden();
+const mode = input.someModeFlag ? MODE_B : MODE_A;   // behavior, not permission
+```
+
+If a flag must legitimately relax a rule, bind the relaxation to a server-derived capability:
+
+```ts
+// SAFE: the flag is honoured only for callers the server already trusts
+const mayRelax = isAdminFromSession || hasEntitlement(session, 'RELAX_VALIDATION');
+if (input.someModeFlag && !mayRelax) throw forbidden();
+```
+
+### Detection
+
+Enumerate every client-settable scalar on an input type — booleans, enums, mode strings, scope lists — and trace each to its **use sites**, not just its storage. Report when a traced value appears:
+
+- as an operand of `||` / `&&` / `??` in a condition guarding a privileged branch, alongside a server-derived term;
+- as the test of a ternary or `if` that selects between authentication or credential-acquisition paths;
+- negated in a condition wrapping a validation, ownership, version, or state check;
+- merged into a scope, permission, tenant, or role set that a server-derived value also feeds.
+
+Search by **shape, not by name** — these fields are named for the feature they enable, never for the check they bypass, so the identifier gives nothing away. Start from the input-type declarations and follow the values; do not start from authorization keywords, because the authorization keyword in these cases is the *correct* half of the expression.
+
+Ownership or authentication middleware on the route is **not** a mitigation for this class — it constrains *which* object the caller acts on, while the flag changes *what they are permitted to do* with it. It downgrades severity (authenticated attacker) without clearing the finding.
+
+**Severity:** class floor High when the widened branch reaches an admin-only capability or switches the authentication method; Medium when it suppresses a validation or expands a scope within the caller's own resources. Downgrade one level if exploitation requires authentication — but never below Medium, since the caller controls the predicate directly.
 
 ## Self-Service Privileged Registration (scaffolded auth pair)
 
