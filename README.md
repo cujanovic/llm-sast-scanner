@@ -1,6 +1,6 @@
 # llm-sast-scanner
 
-A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **103 vulnerability classes** — covering web, API, authentication, cloud/IaC, nginx config, mobile, smart-contract, BaaS (Supabase/Firebase) authorization, and the OWASP LLM Top 10 for AI/agent apps.
+A general-purpose **Static Application Security Testing (SAST) skill** for LLM-based code vulnerability analysis. It is loaded by AI coding agents (Claude Code, OpenAI Codex, Cursor, and other agent runtimes) to perform structured **source → sink taint analysis** across **106 vulnerability classes** — covering web, API, authentication, cloud/IaC, nginx config, mobile, smart-contract, BaaS (Supabase/Firebase) authorization, and the OWASP LLM Top 10 for AI/agent apps.
 
 Instead of pattern-matching with hardcoded rules, it gives an agent a disciplined, evidence-based methodology: identify untrusted input, trace it through the code, and confirm whether it reaches a dangerous sink without a sanitizer in between — then verify every candidate through an adversarial "Judge" stage to cut false positives.
 
@@ -16,8 +16,9 @@ Traditional SAST tools rely on fixed rule sets and tend to drown teams in false 
 
 | Component | What it is |
 |-----------|-----------|
-| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 103 vulnerability reference knowledge bases. |
-| **`llm-sast-scanner-full-scan-loop/`** | A wrapper skill for an exhaustive, convergence-driven, line-by-line audit of an entire repository, guaranteeing 100% line coverage. |
+| **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 106 vulnerability reference knowledge bases. |
+| **`llm-sast-scanner-convergence-loop/`** | The audit procedure: an exhaustive, convergence-driven, line-by-line audit of an entire repository, guaranteeing 100% line coverage. Holds all the audit mechanics. |
+| **`llm-sast-scanner-full-scan-loop/`** | A thin wrapper that fixes the **partitioned run configuration** (every vulnerability lens × 3 line-balanced partitions, one subagent each) as the default, plus the consolidation reconciliation steps. Mechanics stay in the convergence loop; only the run configuration lives here. |
 | **`AGENTS.md` / `CLAUDE.md`** | The repo-level orchestrator playbook that drives parallel multi-agent scanning and report consolidation. `CLAUDE.md` is a symlink to `AGENTS.md`. |
 | **`.claude/skills/`, `.agents/skills/`** | Per-runtime skill discovery directories — both symlink to the single canonical skill source, so the two runtimes can never drift apart. |
 
@@ -60,7 +61,7 @@ It is deliberately treated as **hints, never authority**, with guardrails that k
 ## Languages & ecosystems
 
 - **Application languages:** Java, Python, JavaScript / TypeScript, PHP, C# / .NET, Go, Ruby, C / C++, Kotlin, Swift, Objective-C, Rust
-- **Smart contracts:** Solidity / EVM
+- **Smart contracts:** Solidity / EVM, Solana / Anchor (Rust), Move / Aptos, Tron, Substrate pallets
 - **Infrastructure, config & markup:** Terraform / HCL, Kubernetes & CI/CD YAML, Dockerfile, nginx config, XML, SQL, HTML
 
 Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated rule sets; the rest are covered with vulnerable-vs-secure detection patterns across the relevant classes.
@@ -69,7 +70,7 @@ Java, Python, JavaScript/TypeScript, PHP, and C#/.NET have the deepest dedicated
 
 ## Vulnerability coverage
 
-103 reference knowledge bases, organized into categories:
+106 reference knowledge bases, organized into categories:
 
 | Category | Focus |
 |----------|-------|
@@ -112,11 +113,13 @@ cd /path/to/llm-sast-scanner
 
 # Claude Code
 mkdir -p ~/.claude/skills
-ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.claude/skills/
+ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-convergence-loop" \
+      "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.claude/skills/
 
 # OpenAI Codex / Cursor / other agent runtimes
 mkdir -p ~/.agents/skills
-ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.agents/skills/
+ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-convergence-loop" \
+      "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.agents/skills/
 ```
 
 To update later, just `git pull` in the repo — the symlinks always point at the latest version.
@@ -138,10 +141,20 @@ Without arguments it runs the detection + Judge workflow. The optional `adv=` fl
 **Exhaustive whole-repository audit** — run the convergence loop until no new bugs are found, with guaranteed 100% line coverage:
 
 ```
-llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,medium]
+llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]
 ```
 
-`mode=parallel` (default) dispatches one subagent per vulnerability lens and consolidates the results; `mode=single` runs everything in one context for the strongest convergence guarantee. Output is a timestamped `sast_report-<timestamp>.md`.
+This runs the audit **partitioned**: the codebase is split into three line-balanced, module-cohesive slices and every vulnerability lens gets one subagent per slice, so each subagent covers a third of the code under a single lens and can follow call chains instead of skimming. The lens set is the six base classes plus any the detected stack warrants splitting out, each named in the report so coverage stays attributable. Output is a timestamped `sast_report-<timestamp>.md`.
+
+Consolidation reconciles what partitioning breaks: a **cross-partition clearance check** (a sink cleared by two or more agents, each scoped to its own partition, is a coverage gap rather than a clearance), a **hand-off harvest** (items one lens routes to another must be promoted or closed with evidence, never silently dropped), and a **buried-sink audit** that rejects demotions resting on partition-boundary deferrals. When a prior scan left a confirmed-findings ledger, each subagent takes the ledger sinks that live in its own partition and traces them **backward** to every entry point repository-wide — following intermediate helpers and services across partition boundaries, and evaluating each hop for defects of its own. A known sink's *other* entry points get examined instead of only the one already on record.
+
+Re-running without `new-scan` **resumes**: lens results marked complete are skipped. Passing `new-scan` re-runs every lens fresh, using the prior run's memory to prioritize depth — it never reduces coverage.
+
+For a single-context audit with no partitioning, invoke the audit procedure directly:
+
+```
+llm-sast-scanner-convergence-loop <dir> [mode=parallel|single] [adv=critical,high,medium] [new-scan]
+```
 
 **Parallel multi-agent orchestration** — point your agent at `AGENTS.md` / `CLAUDE.md` to run a full assessment (codebase analysis → parallel detection across six vulnerability lenses → consolidated report) written to a `.llm-sast-scanner-cache/` folder. It is re-runnable: steps whose output already exists **and is marked complete** are skipped (a crashed/partial output is re-run, not trusted), and the run updates `project-memory.md` (see [Cross-scan memory](#cross-scan-memory)) so later scans build on earlier ones. Add `.llm-sast-scanner-cache/` to the scanned repo's `.gitignore`.
 
@@ -152,15 +165,17 @@ llm-sast-scanner-full-scan-loop <dir> [mode=parallel|single] [adv=critical,high,
 ```
 llm-sast-scanner/                      ← repo root
 ├── README.md
-├── AGENTS.md                          # parallel orchestrator playbook
-├── CLAUDE.md                          # → symlink to AGENTS.md
-├── llm-sast-scanner/                  # core skill (canonical source)
-│   ├── SKILL.md                       # 7-step workflow + Judge + adversarial + project-memory protocol
-│   └── references/                    # 103 vulnerability knowledge bases
-├── llm-sast-scanner-full-scan-loop/   # exhaustive convergence-audit skill
+├── AGENTS.md                             # parallel orchestrator playbook
+├── CLAUDE.md                             # → symlink to AGENTS.md
+├── llm-sast-scanner/                     # core skill (canonical source)
+│   ├── SKILL.md                          # 7-step workflow + Judge + adversarial + project-memory protocol
+│   └── references/                       # 106 vulnerability knowledge bases
+├── llm-sast-scanner-convergence-loop/    # the audit procedure (D1/D2/D3, coverage, convergence)
 │   └── SKILL.md
-├── .claude/skills/                    # → symlinks to the two skill dirs above
-└── .agents/skills/                    # → symlinks to the two skill dirs above
+├── llm-sast-scanner-full-scan-loop/      # thin wrapper: partitioned run configuration
+│   └── SKILL.md
+├── .claude/skills/                       # → symlinks to the three skill dirs above
+└── .agents/skills/                       # → symlinks to the three skill dirs above
 ```
 
 ---
