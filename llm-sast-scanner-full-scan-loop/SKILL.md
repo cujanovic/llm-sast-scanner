@@ -6,7 +6,7 @@ description: >
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 disable-model-invocation: true
 metadata:
-  version: "2.4.0"
+  version: "2.6.1"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -46,14 +46,44 @@ Run this PARTITIONED, not as one agent per lens.
 balanced by LINE COUNT (~1/3 each) and cohesive by module. Write the file lists + line totals to
 `.llm-sast-scanner-cache/` before dispatching anything.
 
+**REQUIRED CACHE ARTIFACTS.** Every run leaves this exact file set in `.llm-sast-scanner-cache/`. Each one is
+the written record of a decision that otherwise stays in one agent's context and cannot be audited afterward.
+
+| File | Written by | Records |
+|------|-----------|---------|
+| `scope-manifest.txt` | STEP 1 | every in-scope file with its line count, and the total |
+| `scope-excluded.txt` | STEP 1 | every path dropped from scope, one per line, each with its reason |
+| `partition-p<n>-manifest.txt` | STEP 1 | one per partition — its file list and line total |
+| `<lens>-agent-procedure.md` | STEP 1 | the compiled worker contract every STEP 2 subagent reads |
+| `scan-plan.md` | STEP 1 | base SHA, mode, adv, the lens set, and stack-gated exclusions |
+| `deep-<lens>-p<n>-results.md` | STEP 2 | one per lens per partition |
+| `handoff-table.md` | STEP 3 | one row per STEP Y hand-off, each with a final disposition |
+
+Before dispatching STEP 2, verify the STEP 1 artifacts exist and that the partition line counts sum to the
+manifest total. A partition file that is absent, empty, or a glob pattern instead of an enumerated file list
+means STEP 1 did not finish — rebuild it. Never dispatch a subagent against a partition whose file list is not
+on disk; a worker that cannot read its partition will invent a scope and report against it.
+
+Consolidation reads the `deep-*-results.md` files and never writes to them. A lens file is the record of what
+that worker found; a consolidation step that edits one destroys the only evidence of what the run actually
+produced and makes re-consolidation from clean inputs impossible.
+
+Write ONE report, named from `date +%Y-%m-%d_%H-%M-%S` at the moment of writing. Never invent a timestamp,
+advance a clock, or emit a second report under a later name — a run that produces several reports has no
+answer to "which one is the result."
+
 **STEP 2** — Dispatch every lens x 3 partitions in parallel. Each subagent gets exactly ONE lens and ONE
 partition and runs its own full convergence loop over only that partition's files. Write results to
 `.llm-sast-scanner-cache/deep-<lens>-<partition>-results.md`.
 
-The lens set is the six in the base skill's class table, **plus any additional lens the detected stack
-warrants** — split one out when a stack puts a meaningful body of code under classes the six would otherwise
-sweep past. Name each added lens in the report's appendix alongside the classes it owns, so coverage stays
-attributable and runs stay comparable.
+The lens set is the six in the base skill's class table, **plus at least one additional stack-specific lens.
+The additional lens is REQUIRED, not optional.** Derive it from the detected stack: split one out wherever the
+stack puts a meaningful body of code under classes the six would otherwise sweep past. A dispatch of exactly
+the six base lenses is an incomplete STEP 2 — the six are the floor, never the whole set.
+
+Derive the added lens from the stack, not from this list; do not carry another run's lens set over. Name each
+added lens in the report's appendix alongside the classes it owns, so coverage stays attributable and runs
+stay comparable.
 
 **STEP 2a — LEDGER SINK CALLER ENUMERATION.** If `project-memory.md`'s confirmed-findings ledger is
 non-empty, a subagent OWNS a ledger sink when that sink's file is in the subagent's partition. Each subagent
@@ -112,6 +142,13 @@ client-controlled in future partitions"). Every such item is a required report i
 finding with a severity, or listed with a stated disposition and the evidence that closed it.
 
 **REQUIRED APPENDIX FIELDS** — the report must state all of these explicitly:
+- Required cache artifacts: one line per file in the REQUIRED CACHE ARTIFACTS table — the filename and its
+  byte size on disk. Any file that is absent gets a line saying so and why. Then `artifacts present: <n>/7`.
+- Scope exclusions: the contents of `scope-excluded.txt`, plus `excluded: <count> paths / <count> lines`, so a
+  reader can tell a deliberate exclusion from a forgotten one. State `excluded: 0` only if nothing was dropped.
+- Added stack-specific lenses: one line per lens beyond the base six — the lens name, the classes it owns, and
+  the stack signal in `architecture-threat-model.md` that warranted it. Then `added lenses: <count>`, which is
+  1 or greater. A report stating `0` records a STEP 2 that did not finish.
 - Buried-sink promotions: `<count>`, and one line per promoted item naming the lens/partition it came from and
   the demotion reason that was rejected. State 0 only if you audited every lens file and found none.
 - Cross-partition clearance reconciliation (STEP X): one row per sink cleared by two or more agents — sink
