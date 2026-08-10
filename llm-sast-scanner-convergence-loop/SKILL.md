@@ -548,6 +548,12 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-
   reconciles against the identical denominator) and confirm that EVERY line of EVERY in-scope file (per the
   GROUND RULES scope + exclusions) was actually read (not sampled) — every manifest file marked fully read
   `1..total_lines`. Produce a coverage checklist: each file with its total line count and the line ranges read.
+  Its path set is the assigned manifest's path column, copied — one checklist row per manifest row, in manifest
+  order. Re-listing the tree instead drops whatever the listing cannot see (a dotfile inside a dot-directory
+  matches no default shell glob), leaving the checklist short of a denominator that already named the file.
+  A manifest's rows are its `<line-count><TAB><path>` entries alone: a line beginning `#` is a header and the
+  final row is the `total`. Whatever compares path sets — this checklist, D3's reconcile, any integrity check —
+  counts only those entries; reading a header or the total as a path reports a gap that does not exist.
   List excluded paths (vendored deps, build output, lock files, binaries, the scanner's own
   `.llm-sast-scanner-cache/` + `sast_report-*.md`) separately as "excluded" — they are not coverage gaps.
 - If any in-scope file or line range was NOT fully read, run one more targeted pass over only the
