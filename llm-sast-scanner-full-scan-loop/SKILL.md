@@ -6,7 +6,7 @@ description: >
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 disable-model-invocation: true
 metadata:
-  version: "2.6.2"
+  version: "2.6.3"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -68,7 +68,9 @@ Consolidation reads the `deep-*-results.md` files and never writes to them. A le
 that worker found; a consolidation step that edits one destroys the only evidence of what the run actually
 produced and makes re-consolidation from clean inputs impossible.
 
-Write ONE report, named from `date +%Y-%m-%d_%H-%M-%S` at the moment of writing. Never invent a timestamp,
+Write ONE report, into `<dir>` itself — the directory this skill was invoked on, alongside the code, NOT into
+`.llm-sast-scanner-cache/`, which holds the run's working artifacts. The report is the deliverable; the cache
+is the workings. Name it from `date +%Y-%m-%d_%H-%M-%S` at the moment of writing. Never invent a timestamp,
 advance a clock, or emit a second report under a later name — a run that produces several reports has no
 answer to "which one is the result."
 
