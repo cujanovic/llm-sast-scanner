@@ -275,6 +275,38 @@ debit(user_id, body["amount"])                             # executes 10 after p
 
 **SAFE:** parse **once** at the trust boundary; pass the parsed object (or a canonical re-serialized body with duplicate keys rejected) to policy and execution; or enable strict duplicate-key rejection (`STRICT_DUPLICATE_DETECTION`, reject on `object_pairs_hook` seeing a repeated key) on **every** consumer of the raw bytes. Cross-ref `business_logic.md` (price/amount invariants), `api_security.md` (edge vs internal parse), `reverse_proxy_access_bypass.md` (query delimiter desync).
 
+### Multi-signature API overload confusion (validate as one type, dispatch as another) — CWE-843 / CWE-704
+
+The differentials above disagree on the same *bytes*; this one disagrees on the same **value's type**. The guard forces one interpretation (`String(x)`, interpolation, `typeof x === 'string'`, a regex `.test(x)`) while the sink's API has more than one signature — or coerces — and resolves the value differently. The guard is real, it passes, and the sink then does something it never inspected. Arrays and objects matter most: they survive a string-shaped check and still carry properties, elements, and a length.
+
+| Sink | Signatures | What the fork buys |
+|------|-----------|--------------------|
+| `postMessage(msg, target)` | `(any, USVString targetOrigin)` vs `(any, WindowPostMessageOptions)` | string branch uses the argument as the origin; object branch reads `options.targetOrigin` — an array carrying a `targetOrigin` property stringifies past a host check, then delivers to the property's value |
+| `setTimeout` / `setInterval` | `(Function, …)` vs `(string, …)` | a non-callable is `ToString`'d and **compiled**; an array whose element is source text becomes executable |
+| `Function(…)`, `x["constructor"]["constructor"]` | body assembled by `ToString` | array element becomes the function body, reachable without the identifier `Function` appearing in source |
+| `document.write`, `setAttribute`, and the Trusted Types sink set (`innerHTML`, `outerHTML`, `srcdoc`, `insertAdjacentHTML`, `script.src`, `importScripts`) | `string` vs `TrustedHTML`/`TrustedScript`/`TrustedScriptURL` | enforcement runs for plain strings and is **skipped** for genuine trusted instances — the check's presence depends on the argument's type, so a policy existing in the file proves nothing about *this* call |
+| `document.open()` | 2-arg vs 3-arg | the 3-arg form returns a `Window` and enables navigation; **argument count alone** selects it, so a spread of caller-controlled length changes the operation |
+
+```javascript
+// VULN — validated as a string, resolved as the options overload.
+// `origin` stringifies to the allowed host so the regex passes; postMessage then
+// takes the object signature and delivers to origin.targetOrigin instead.
+if (/^https:\/\/app\.example\.com$/.test(String(origin))) win.postMessage(secret, origin);
+
+// SAFE — assert the type, then pass the asserted binding.
+if (typeof origin === 'string' && origin === 'https://app.example.com') win.postMessage(secret, origin);
+```
+
+**SAST signals:**
+- A coercing guard (`String(…)`, interpolation, `.test(`, `startsWith(`) whose value then reaches `postMessage(`, `setTimeout(`, `setInterval(`, `new Function(`, or `document.open(` — the guard's binding and the sink's argument must be the *same* variable.
+- `postMessage` second argument that is not a string literal; timer/`Function` handlers not demonstrably callable.
+- A value crossing `structuredClone`, `postMessage`, or a deserializer that **preserves named properties on arrays** — reads as a string to the guard, as a keyed object to the sink.
+- Spread/`apply`/`...args` into a DOM API whose overloads differ by arity.
+
+**Not this class:** a guard that is simply absent (base class, above); value-level parser differentials (`postmessage_security.md` URL-normalization, and the query-string/JSON cases above).
+
+**SAFE:** assert the type at the call site (`typeof` / `Array.isArray` / `instanceof`) and pass **that asserted binding**; normalize once (`const t = String(x)`), validate `t`, pass `t`; pin the signature by passing an explicit options object; use a literal argument list, never a caller-controlled spread. TypeScript types do **not** clear this when the value crosses a runtime boundary (`postMessage`, JSON, `structuredClone`, `any`) — types are erased at runtime.
+
 ### Python `assert` used as a security/validation gate (disabled under `-O`, CWE-617)
 
 Python `assert` statements are **removed entirely** when the interpreter runs with `-O`/`-OO` (or `PYTHONOPTIMIZE` set, and `__debug__` becomes `False`) — common in production/optimized container images. Any **security check, input validation, or precondition enforced with `assert` therefore vanishes in production**, so the gate that passes in dev is a no-op in prod. The same footgun exists in other toolchains: **Java** assertions are off unless `-ea` is passed (disabled by default in production JVMs); **C/C++** `assert()` is compiled out under `NDEBUG` (implied by release builds / `-DNDEBUG`); **Swift** `assert`/`assertionFailure` are elided in `-O` release builds (use `precondition`, which survives); **.NET** `Debug.Assert` is dropped from Release builds (no `DEBUG` symbol). A security/authorization/validation condition expressed as an assertion in any of these likewise disappears from the shipped optimized build.

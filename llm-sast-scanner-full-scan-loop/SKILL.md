@@ -6,7 +6,7 @@ description: >
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 disable-model-invocation: true
 metadata:
-  version: "2.6.1"
+  version: "2.6.2"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -146,6 +146,12 @@ finding with a severity, or listed with a stated disposition and the evidence th
   byte size on disk. Any file that is absent gets a line saying so and why. Then `artifacts present: <n>/7`.
 - Scope exclusions: the contents of `scope-excluded.txt`, plus `excluded: <count> paths / <count> lines`, so a
   reader can tell a deliberate exclusion from a forgotten one. State `excluded: 0` only if nothing was dropped.
+- Manifest citation coverage: `files cited in lens work: <n> / <manifest total> (<pct>%)`. Get `<n>` by
+  extracting the distinct in-scope paths that appear anywhere in the `deep-*-results.md` files, and the total
+  from `scope-manifest.txt`. Count both from the artifacts; neither is read from a worker's own coverage claim.
+  Every other coverage number in this report is something a worker asserted about itself, and a worker that
+  scanned some scope other than its assigned partition still asserts 100% — this one is derived, so that run
+  shows a gap here. Report the number you get. It is a reading of the run, not a bar the run has to clear.
 - Added stack-specific lenses: one line per lens beyond the base six — the lens name, the classes it owns, and
   the stack signal in `architecture-threat-model.md` that warranted it. Then `added lenses: <count>`, which is
   1 or greater. A report stating `0` records a STEP 2 that did not finish.
