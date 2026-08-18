@@ -4,7 +4,6 @@ description: >
   Exhaustive partitioned security audit of a repository. Invoke explicitly as
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
-disable-model-invocation: true
 metadata:
   version: "2.6.3"
   domain: application-security

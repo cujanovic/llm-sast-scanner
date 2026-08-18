@@ -9,7 +9,6 @@ description: >
   merges results, runs Adversarial Impact Validation (Step 6) once, independently verifies every finding's
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
-disable-model-invocation: true
 metadata:
   version: "1.16.0"
   domain: application-security
