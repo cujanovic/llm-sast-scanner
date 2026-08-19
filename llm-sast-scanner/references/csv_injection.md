@@ -1,7 +1,7 @@
 ---
 name: csv_injection
-version: "0.1"
-description: CSV / formula injection when exporting user-controlled data to spreadsheets (CWE-1236)
+version: "0.2"
+description: CSV / formula injection (CWE-1236) when user-controlled data is exported to a spreadsheet — and the import-side boundary: a CSV header row used as object keys is prototype pollution / mass assignment, not this class.
 ---
 
 # CSV / Formula Injection (CWE-1236)
@@ -112,3 +112,12 @@ Treat every CSV cell as a formula slot. Neutralize formula-leading characters on
 6. Quote-doubling CSV escaping (`""`) does not neutralize formula prefixes — prefix with `'` or strip metacharacter separately from RFC-4180 quoting.
 7. For Java/JS exports without automated coverage, grep `text/csv`, `Content-Disposition.*\.csv`, and `csv.writer` / `papaparse` unescaped writes.
 8. Severity: typically Medium (user interaction + desktop app); raise to High when export is bulk-mailed to finance/admin roles automatically.
+
+## Not this class — CSV *headers* as object paths
+
+This file covers CSV *cell values* interpreted as formulas by a spreadsheet client. A different bug lives in
+the same parser: when a header row supplies the **key names** an importer assigns onto an object, a dotted or
+`__proto__`-bearing header (`a.b.c`, `__proto__.role`) becomes a write path rather than a column label. That
+is server-side prototype pollution / mass assignment, not formula injection — see
+`server_side_prototype_pollution.md` and `mass_assignment.md`. Flag both when one importer does both:
+values rendered to a client *and* headers used as assignment keys.

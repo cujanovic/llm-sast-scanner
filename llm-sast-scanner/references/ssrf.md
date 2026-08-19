@@ -1,6 +1,6 @@
 ---
 name: ssrf
-version: "0.6"
+version: "0.7"
 description: Server-Side Request Forgery detection (CWE-918) — including DNS-only resolve severity cap
 ---
 
@@ -428,9 +428,26 @@ function resolveUpstreamUrl(path: string, baseURL: string): URL {
   const base = new URL(baseURL.endsWith('/') ? baseURL : `${baseURL}/`);
   const url = new URL(path.replace(/^\/+/, ''), base);
   if (url.origin !== base.origin) throw new Error('path escaped base origin');
+  if (!url.pathname.startsWith(base.pathname)) throw new Error('path escaped base prefix');
   return url;
 }
 ```
+
+**Pinning the origin is not enough — pin the base *path prefix* too.** Absolute and protocol-relative
+inputs are the loud variant; the common one in practice is a **relative segment (`../`) that keeps the
+origin and escapes the base path**. `new URL('../../admin/x', 'https://upstream.internal/v1/')` resolves to
+`https://upstream.internal/admin/x`: same origin, so an origin-only guard passes it. The upstream service is
+usually an internal API whose path prefix *is* its authorization boundary, so escaping `/v1/` reaches a
+privileged tier (`/admin/...`, `/internal/reconfigure`) or another principal's resources
+(`../{victimId}/{resourceId}`) on a host the caller could never address directly. File it as SSRF when the
+resolved URL is fetched, and additionally as IDOR/BFLA when the escaped path lands on another user's object.
+
+The guard is a **prefix comparison on the resolved `pathname`**, done after resolution — not a
+`includes('..')` blocklist on the input, which misses encoded and mixed forms. Note `new URL` does *not*
+decode `%2f`, so `..%2f..%2fadmin` stays inside the base prefix at the resolver and can still traverse if
+the **upstream** server decodes it: reject percent-encoded separators in path segments as well. A tainted
+segment in **any** position is in scope for this variant — unlike host escape, `../` does not need
+first-segment placement.
 
 **Do NOT dismiss SSRF just because "no user-controlled *full URL* is passed to an HTTP client."** That heuristic is wrong for base-rebasing: a user-controlled **path/path-segment** resolved against a base and then fetched is sufficient for CWE-918. The same `new URL(path, base)` / `resolveURL` / `urljoin` sink is frequently filed **only** as path traversal (CWE-22) — it must be **re-judged for SSRF (CWE-918) on the same sink** whenever the resolved URL reaches an outbound HTTP client (cross-ref `path_traversal_lfi_rfi.md`). Reachability is often non-obvious: the tainted segment may need **first-segment placement** (it must land as the host/scheme-bearing part of the resolved URL, not a later path segment) and may arrive through a **cross-module taint chain** (e.g. a privileged resolver passing an attacker-influenced value into a shared data-source method) — trace these rather than stopping at "looks like a path."
 

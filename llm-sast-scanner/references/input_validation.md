@@ -1,6 +1,6 @@
 ---
 name: input_validation
-version: "0.3"
+version: "0.4"
 description: Detect missing or weak input validation as a standalone defense-in-depth finding (CWE-20) — a parameter, field, DTO property, GraphQL argument, or structured model/tool output whose semantics imply a constrained contract is accepted without format, allowlist, schema, scalar, required-field, or exact-type validation. Also covers validation-order bypasses where a value is normalized/case-mapped/decoded/stripped *after* it is validated (CWE-179/180 — Unicode NFKC, toUpperCase, URL-decode re-creating a payload the filter rejected) numeric NaN/inf parse-coercion bypasses, Python security checks written as `assert` (silently stripped under `python -O`), and regex allowlists anchored with `^`/`$` instead of `\A`/`\z` (in Ruby `^`/`$` are always line anchors, so a newline-embedded payload passes the check — CWE-777), and the dual defect where a **guard** regex under-matches because `.` excludes newlines by default (no DOTALL), so a `%0a` in the path makes an auth/routing check fail open while `startsWith`-style dispatch still reaches the protected handler. Applies across all languages and GraphQL even when NO injection sink is present. Excludes legitimately free-text fields and already-validated inputs.
 ---
 
@@ -274,6 +274,42 @@ debit(user_id, body["amount"])                             # executes 10 after p
 **Not this class alone:** query-string HPP (`amount=10&amount=1000`) — covered above; IDOR `{"id":1,"id":2}` — `idor.md`; email duplicate keys — `business_logic.md` / `email_parser_differential.md`. Prefer `business_logic.md` when the durable impact is a ledger/entitlement invariant; keep the finding here when the root cause is the dual JSON parse.
 
 **SAFE:** parse **once** at the trust boundary; pass the parsed object (or a canonical re-serialized body with duplicate keys rejected) to policy and execution; or enable strict duplicate-key rejection (`STRICT_DUPLICATE_DETECTION`, reject on `object_pairs_hook` seeing a repeated key) on **every** consumer of the raw bytes. Cross-ref `business_logic.md` (price/amount invariants), `api_security.md` (edge vs internal parse), `reverse_proxy_access_bypass.md` (query delimiter desync).
+
+### Convergent input paths — two request fields feed one sink, the validator is wired to one (CWE-20)
+
+The differentials above disagree about the same *bytes*; this one has no disagreement at all. Two distinct
+request fields — a current one and a deprecated/alias/legacy one kept for backward compatibility — are
+**merged into the same downstream payload**, and the validator names only one of them. Both ends read as
+correct in isolation: the validator is well written, the sink is reached through the field nobody wired it to.
+This survives review precisely because grepping the validator finds a real check for a real field.
+
+```javascript
+// VULN: validator inspects one path; the builder consumes both.
+function validateSearchInput(input) {
+  if (input.filters?.matches) checkEach(input.filters.matches);   // deprecated `query` never inspected
+}
+function toQuery(input) {
+  return [...(input.filters?.matches ?? []), ...(input.query?.matches ?? [])].map(build);
+}
+// Identical payload: REJECTED via input.filters, ACCEPTED via input.query, same sink either way.
+
+// SAFE: normalize to one canonical shape BEFORE validating, then validate the merged result.
+const merged = [...(input.filters?.matches ?? []), ...(input.query?.matches ?? [])];
+checkEach(merged);
+return merged.map(build);
+```
+
+**How to find it:** start at the **sink**, not at the validator. Enumerate every field the sink's payload is
+assembled from (spreads, `Object.assign`, `??`/`||` fallbacks, `concat`, mapper functions that read several
+input branches), then check each one against the validator's field list. A field that appears in the assembly
+and not in the validator is the finding. Names that signal the deprecated twin: `query` beside `filters`,
+`legacy*`, `*V1`, `old*`, `raw*`, plus any field a schema marks `@deprecated` yet still reads.
+
+**Do not accept "the deprecated path is unused" without evidence** — it is reachable if the schema still
+exposes it and the resolver still reads it. Deprecation is a docs statement, not an access control.
+Severity follows whatever the sink does: file it under the sink's class (injection, IDOR, SSRF) with this as
+the bypass mechanism, not as a generic validation gap. Cross-ref `mass_assignment.md` when the extra field
+sets state rather than feeding a query.
 
 ### Multi-signature API overload confusion (validate as one type, dispatch as another) — CWE-843 / CWE-704
 

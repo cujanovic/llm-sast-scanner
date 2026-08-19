@@ -1,7 +1,7 @@
 ---
 name: nosql_injection
-version: "0.4"
-description: Detect NoSQL injection vulnerabilities where user-controlled data is passed directly into MongoDB or other NoSQL query operators without type validation, or concatenated into a NoSQL query/command string (Redis, Neo4j Cypher, Cassandra CQL, CouchDB, DynamoDB PartiQL, Amazon SimpleDB SelectRequest, ArangoDB AQL) instead of bound as a parameter.
+version: "0.5"
+description: Detect NoSQL injection vulnerabilities where user-controlled data is passed directly into MongoDB or other NoSQL query operators without type validation, reaches an Elasticsearch/OpenSearch query-DSL clause as wildcard/query_string/regexp/prefix metacharacters or as a client-supplied field name, or is concatenated into a NoSQL query/command string (Redis, Neo4j Cypher, Cassandra CQL, CouchDB, DynamoDB PartiQL, Amazon SimpleDB SelectRequest, ArangoDB AQL) instead of bound as a parameter.
 ---
 
 # NoSQL Injection
@@ -156,7 +156,37 @@ The operator-injection model above is MongoDB-specific, but every NoSQL store ha
 
 - **ServiceNow — GlideRecord `javascript:` filter evaluation**: the Glide query API evaluates a filter **value** that begins with `javascript:` as a server-side JavaScript expression *before* using the result as the operand — so `addQuery(field, value)`, `addQuery(field, op, value)`, `addOrCondition(...)`, `get(field, value)`, and `addEncodedQuery(str)` with an untrusted value are **code-evaluation sinks, not safe scalar binds** (CVE-2026-6875). The two-argument "structured" form is the trap: `gr.addQuery('sys_id', input)` with `input = "javascript:<expr>"` runs `<expr>` server-side. Reachable **pre-auth** through public Scripted REST resources (`request.queryParams.*`, `request.body.data.*`) and `.do` UI-page processors (`jelly.sysparm_*`). Evaluation runs in the restricted Glide *script sandbox*, but documented escapes (`gs.include()` loads a script-include in an unsandboxed context, then clobbering a global it calls — `Object.defineProperty(Object,'clone',{value: Class.create.constructor})` with the payload in `AbstractAjaxProcessor.prototype` — forces `Function(code)()`) escalate to full **unauthenticated RCE** plus command execution on connected MID/proxy servers. **SAFE**: validate/allowlist the value before it reaches the query (e.g. a 32-hex `sys_id` regex, an enum of field names) and reject a leading `javascript:`; build encoded queries server-side from typed inputs — never forward a client-supplied `addEncodedQuery` string; `GlideRecordSecure`+ACLs and the patched **Guarded Script** mode are defense-in-depth, not a reason to pass tainted input. See `expression_language_injection.md`.
 
-(Elasticsearch/OpenSearch Painless & Lucene `script_score`/`sort` injection is its own class — see `expression_language_injection.md`.)
+- **Elasticsearch / OpenSearch — query-DSL injection (CWE-943)**: a free-form string reaching a
+  `wildcard`/`query_string`/`regexp`/`prefix` clause, or a client-supplied key reaching a field *name*. Unlike
+  operator injection there is no `$`-prefixed payload to grep for — the metacharacters are `*`, `?`, and (for
+  `query_string`) the full Lucene grammar, so the value looks like ordinary search text. Two effects, both real:
+  a leading `*` turns a bounded lookup into a **full-index scan** (amplification → DoS, cross-ref
+  `denial_of_service.md`), and an embedded `*`/`?` **widens the match set past the caller's intended scope**,
+  returning documents an authorization filter was meant to exclude. `query_string` is strictly worse: it also
+  accepts `field:value`, boolean operators, and ranges, letting a caller query fields the API never exposed.
+
+```javascript
+// VULN: free-form value interpolated into a wildcard pattern.
+// value="*" -> "***" (matches every document); value="a*b" -> "*a*b*" (scope widened)
+{ wildcard: { [field]: { value: `*${userValue}*` } } }
+
+// SAFE: escape the metacharacters, bound the length, and keep the field name off the wire.
+const ALLOWED_FIELDS = new Set(['serial', 'label']);
+if (!ALLOWED_FIELDS.has(field)) throw new Error('field not searchable');
+const v = String(userValue).replace(/([*?\\])/g, '\\$1');   // escape, do not strip
+if (v.length < 3 || v.length > 64) throw new Error('term length');
+{ wildcard: { [field]: { value: `*${v}*` } } }
+// Prefer a typed `term`/`terms`/`match` clause when the search is exact — no metacharacter surface at all.
+```
+
+**SAST signal**: any `wildcard`/`regexp`/`prefix`/`query_string` clause whose `value` is not a literal and not
+demonstrably escaped; any clause whose **key** is built from input (`{ [userField]: … }`). A minimum-length
+rule is a **DoS** control, not an injection control — it bounds the scan but still admits `*` inside the term.
+Stripping metacharacters rather than escaping silently changes the user's query and tends to get reverted;
+escape them.
+
+(Elasticsearch/OpenSearch **Painless & Lucene `script_score`/`sort` script** injection is a different class —
+see `expression_language_injection.md`. The query-DSL surface above is in scope here.)
 
 ## Safe Patterns
 
