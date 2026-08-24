@@ -21,7 +21,7 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Syntax check
         shell: sh
         run: sh -n install.sh bootstrap.sh tests/installer-posix.sh
@@ -33,7 +33,7 @@ jobs:
     name: Windows PowerShell 5.1 compatibility
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Parse and load installer
         shell: powershell
         run: |
@@ -45,7 +45,7 @@ jobs:
     name: PowerShell 7
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       - name: Test
         shell: pwsh
         run: ./tests/installer-powershell.ps1
