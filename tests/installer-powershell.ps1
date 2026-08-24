@@ -12,9 +12,9 @@ function Assert([bool] $Condition, [string] $Message) { if (-not $Condition) { t
 function New-Sandbox {
     if ($null -ne $script:Sandbox) { Remove-Item -LiteralPath $script:Sandbox -Recurse -Force -ErrorAction SilentlyContinue }
     $script:Sandbox = Join-Path ([IO.Path]::GetTempPath()) ('llm sast tests ' + [Guid]::NewGuid().ToString('N'))
-    $home = Join-Path $Sandbox 'home with spaces'; $temp = Join-Path $Sandbox 'temp'; $source = Join-Path $Sandbox 'source with spaces'
-    foreach ($path in @($home, $temp, $source)) { [void][IO.Directory]::CreateDirectory($path) }
-    $env:USERPROFILE = $home; $env:HOME = $home; $env:APPDATA = Join-Path $home 'AppData\Roaming'; $env:TEMP = $temp; $env:TMP = $temp
+    $sandboxHome = Join-Path $Sandbox 'home with spaces'; $temp = Join-Path $Sandbox 'temp'; $source = Join-Path $Sandbox 'source with spaces'
+    foreach ($path in @($sandboxHome, $temp, $source)) { [void][IO.Directory]::CreateDirectory($path) }
+    $env:USERPROFILE = $sandboxHome; $env:HOME = $sandboxHome; $env:APPDATA = Join-Path $sandboxHome 'AppData\Roaming'; $env:TEMP = $temp; $env:TMP = $temp
     Copy-Item -LiteralPath (Join-Path $Repo 'install.ps1') -Destination (Join-Path $source 'install.ps1')
     foreach ($skill in $Skills) { $path = Join-Path $source $skill; [void][IO.Directory]::CreateDirectory($path); [IO.File]::WriteAllText((Join-Path $path 'SKILL.md'), "# fixture`nold`n") }
     $script:Source = $source; $script:Installer = Join-Path $source 'install.ps1'
