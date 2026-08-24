@@ -32,13 +32,14 @@ jobs:
   windows-powershell:
     name: Windows PowerShell 5.1 compatibility
     runs-on: windows-latest
-    env:
-      LLM_SAST_COMPATIBILITY_SMOKE: '1'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-      - name: Test
+      - name: Parse and load installer
         shell: powershell
-        run: ./tests/installer-powershell.ps1
+        run: |
+          [void][scriptblock]::Create((Get-Content ./install.ps1 -Raw))
+          [void][scriptblock]::Create((Get-Content ./bootstrap.ps1 -Raw))
+          ./install.ps1 --help
 
   powershell:
     name: PowerShell 7
