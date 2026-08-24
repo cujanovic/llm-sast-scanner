@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  posix:
+    name: POSIX (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Syntax check
+        shell: sh
+        run: sh -n install.sh bootstrap.sh tests/installer-posix.sh
+      - name: Test
+        shell: sh
+        run: sh tests/installer-posix.sh
+
+  powershell:
+    name: PowerShell (${{ matrix.shell }})
+    strategy:
+      fail-fast: false
+      matrix:
+        shell: [powershell, pwsh]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Test
+        shell: ${{ matrix.shell }}
+        run: ./tests/installer-powershell.ps1

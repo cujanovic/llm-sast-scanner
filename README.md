@@ -106,23 +106,84 @@ Exploitation that requires authentication, non-default config, chaining, or admi
 
 ## Installation
 
-From the repository directory, **symlink** both skill directories into the skills folder for your agent runtime — a single `git pull` then updates every runtime at once, with no stale copies to re-sync. Link the real top-level directories (not the `.claude`/`.agents` symlinks), using absolute paths so the links resolve from anywhere:
+The dependency-free installers copy all three skills into agent runtime discovery directories. They install no packages or persistent manager command; rerun the installer from the desired checkout or remote ref to update managed copies.
 
-```bash
-cd /path/to/llm-sast-scanner
+### Remote bootstrap
 
-# Claude Code
-mkdir -p ~/.claude/skills
-ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-convergence-loop" \
-      "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.claude/skills/
+POSIX (requires `curl` or `wget` and `tar`):
 
-# OpenAI Codex / Cursor / other agent runtimes
-mkdir -p ~/.agents/skills
-ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-convergence-loop" \
-      "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.agents/skills/
+```sh
+curl -fsSL https://raw.githubusercontent.com/cujanovic/llm-sast-scanner/main/bootstrap.sh | sh -s -- --runtime agents
 ```
 
-To update later, just `git pull` in the repo — the symlinks always point at the latest version.
+PowerShell:
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/cujanovic/llm-sast-scanner/main/bootstrap.ps1'))) --runtime agents
+```
+
+The bootstrap downloads and validates the canonical GitHub source archive before running its installer. Add `--ref TAG_OR_COMMIT` before the installer arguments to select a tag or commit instead of `main`, for example `sh bootstrap.sh --ref v1.2.3 --runtime agents`. Download and inspect the bootstrap first if your environment does not permit piping remote code to a shell.
+
+### Local checkout
+
+```sh
+git clone https://github.com/cujanovic/llm-sast-scanner.git
+cd llm-sast-scanner
+sh ./install.sh --runtime agents
+```
+
+```powershell
+git clone https://github.com/cujanovic/llm-sast-scanner.git
+Set-Location llm-sast-scanner
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1 --runtime agents
+```
+
+`--runtime` is repeatable and accepts `claude`, `agents`, `devin`, or `all`. Selecting both `agents` and `devin` uses the shared Agents destination rather than creating a duplicate Devin copy.
+
+| Runtime | POSIX global | Windows global | Project-local |
+|---|---|---|---|
+| Claude | `~/.claude/skills` | `%USERPROFILE%\.claude\skills` | `PATH/.claude/skills` |
+| Agents | `~/.agents/skills` | `%USERPROFILE%\.agents\skills` | `PATH/.agents/skills` |
+| Devin only | `~/.config/devin/skills` | `%APPDATA%\devin\skills` | `PATH/.devin/skills` |
+
+Global installation is the default. Use `--project PATH` for project-local copies. In an interactive terminal, omitting `--runtime` detects existing runtime directories and asks for confirmation; automation must pass `--runtime` or `--yes`. `--yes` selects all adapters when no runtime is given and approves compatible legacy-link migration. `--dry-run` previews changes and `--quiet` suppresses normal output.
+
+### Update, doctor, and uninstall
+
+Rerun install to update. Use the same local installer for health checks and removal:
+
+```sh
+sh ./install.sh --runtime agents
+sh ./install.sh doctor --runtime agents
+sh ./install.sh uninstall --runtime agents
+```
+
+```powershell
+.\install.ps1 --runtime agents
+.\install.ps1 doctor --runtime agents
+.\install.ps1 uninstall --runtime agents
+```
+
+The remote bootstrap supports the same commands, for example:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/cujanovic/llm-sast-scanner/main/bootstrap.sh | sh -s -- doctor --runtime agents
+```
+
+```powershell
+& ([scriptblock]::Create((Invoke-RestMethod 'https://raw.githubusercontent.com/cujanovic/llm-sast-scanner/main/bootstrap.ps1'))) uninstall --runtime agents
+```
+
+Every installer-owned copy has a strict `.llm-sast-scanner-managed` marker. Install, doctor, and uninstall refuse unrelated paths; uninstall removes only valid managed copies. Compatible legacy skill symlinks are migrated only with `--yes`, and staged activation restores previous managed copies if activation fails.
+
+### Manual fallback
+
+From a checkout, manually copy all three top-level skill directories into your runtime's `skills` directory. Manual copies have no ownership marker, so update and remove them manually:
+
+```sh
+mkdir -p ~/.agents/skills
+cp -R llm-sast-scanner llm-sast-scanner-convergence-loop llm-sast-scanner-full-scan-loop ~/.agents/skills/
+```
 
 To use the parallel orchestrator, also place `AGENTS.md` (and/or `CLAUDE.md`) at the root of the project you want to scan.
 
@@ -165,8 +226,13 @@ llm-sast-scanner-convergence-loop <dir> [mode=parallel|single] [adv=critical,hig
 ```
 llm-sast-scanner/                      ← repo root
 ├── README.md
+├── LICENSE
 ├── AGENTS.md                             # parallel orchestrator playbook
 ├── CLAUDE.md                             # → symlink to AGENTS.md
+├── bootstrap.sh / bootstrap.ps1          # remote archive bootstrap
+├── install.sh / install.ps1              # POSIX and PowerShell installers
+├── tests/                                # installer test suites
+├── .github/workflows/ci.yml              # installer CI
 ├── llm-sast-scanner/                     # core skill (canonical source)
 │   ├── SKILL.md                          # 7-step workflow + Judge + adversarial + project-memory protocol
 │   └── references/                       # 106 vulnerability knowledge bases
