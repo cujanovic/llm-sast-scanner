@@ -29,15 +29,20 @@ jobs:
         shell: sh
         run: sh tests/installer-posix.sh
 
-  powershell:
-    name: PowerShell (${{ matrix.shell }})
-    strategy:
-      fail-fast: false
-      matrix:
-        shell: [powershell, pwsh]
+  windows-powershell:
+    name: Windows PowerShell 5.1
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
       - name: Test
-        shell: ${{ matrix.shell }}
+        shell: powershell
+        run: ./tests/installer-powershell.ps1
+
+  powershell:
+    name: PowerShell 7
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Test
+        shell: pwsh
         run: ./tests/installer-powershell.ps1
