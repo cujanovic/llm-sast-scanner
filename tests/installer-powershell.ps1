@@ -23,7 +23,8 @@ function Invoke-File([string] $File, [string[]] $Arguments) {
     $stdout = Join-Path $Sandbox ('out-' + [Guid]::NewGuid().ToString('N')); $stderr = "$stdout.err"
     $all = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $File) + $Arguments
     $quoted = @($all | ForEach-Object { '"' + ([string]$_).Replace('"', '\"') + '"' })
-    $process = Start-Process -FilePath $PowerShell -ArgumentList ([string]::Join(' ', $quoted)) -Wait -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    $process = Start-Process -FilePath $PowerShell -ArgumentList ([string]::Join(' ', $quoted)) -PassThru -NoNewWindow -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+    if (-not $process.WaitForExit(30000)) { $process.Kill(); throw "child process timed out: $([string]::Join(' ', $quoted))" }
     $script:Status = $process.ExitCode; $script:Output = ((Get-Content -LiteralPath $stdout, $stderr -Raw -ErrorAction SilentlyContinue) -join '').Trim()
     Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
 }

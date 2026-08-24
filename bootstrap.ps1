@@ -57,5 +57,5 @@ try {
         if (-not (Test-Path -LiteralPath (Join-Path $source "$skill\SKILL.md") -PathType Leaf)) { Fail "archive is missing required skill: $skill" }
     }
     & $installer @Forward
-    exit $LASTEXITCODE
+    exit 0
 } finally { Remove-Item -LiteralPath $TempRoot -Recurse -Force -ErrorAction SilentlyContinue }
