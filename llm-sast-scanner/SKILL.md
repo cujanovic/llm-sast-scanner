@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.48.1"
+  version: "1.49.0"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -451,6 +451,7 @@ For each candidate finding, answer all of the following:
 - [ ] Is the source actually user-controlled, or is it internal/trusted data?
 - [ ] Is the vulnerable code path reachable from an HTTP endpoint / entry point — or, for a library/SDK, from a public/exported API a downstream caller can reach — or is it dead code / private-internal-only?
 - [ ] Are there upstream guards (auth middleware, input filters) that block the path before it reaches the sink?
+- [ ] **Deferred trigger** (scheduled job, queue/stream consumer, background worker, event handler): check the **registration site** — the `schedule(...)`, `process(...)`, `subscribe(...)`, `on(...)`, or `setInterval(...)` call. **If the registration is unconditional at module load, the trigger is established and reachability is PASS.** Do not record "depends on the scheduler/consumer actually running" as an open question when the registration is visible in scope and unconditional — that is a fact you can check, not an assumption you must make.
 
 **Map the sink to its entry point (route + parameter).** To confirm web reachability and record the concrete attack surface for each finding:
 - If the sink is in a request handler, derive the route by combining class-level and method-level route declarations, and note the HTTP method and the tainted parameter (e.g. Spring `@RequestMapping`/`@GetMapping`/`@PostMapping` + `@RequestParam`/`@PathVariable`/`@RequestBody`; Flask/Express/Rails/Gin equivalents — see route tables in `api_security.md`).
@@ -472,7 +473,7 @@ For each candidate finding, answer all of the following:
 - *Raises confidence*: reachable from the Internet (vs local console/CLI only); exploitable by an anonymous vs an authenticated user; the input (source) and output (sink) nodes match what the class actually requires.
 - *Lowers confidence — cap at LIKELY / prefer NEEDS CONTEXT*:
   - **Source/sink type mismatch**: the actual source or sink does not match the class (e.g., a "reflected XSS" whose sink is a log file rather than an HTTP response, or an "SQLi" sink that is not a query API) — usually a false positive.
-  - **Second-order / stored input**: the flow starts from stored data (file/DB/cache/config) rather than a direct request — exploitability depends on how that store was populated.
+  - **Second-order / stored input**: the flow starts from stored data (file/DB/cache/config) rather than a direct request — exploitability depends on how that store was populated. Once a tainted write site is identified, rate the flow by **what the sink does, not by how the value arrived at it**: delay is not a precondition and indirection is not a mitigation. Persistence usually makes a finding worse rather than better — the payload re-executes on every read, it runs with no request to trace it back to, and it often runs with broader privileges than a request handler.
   - **Non-production sink**: output goes only to a debug/trace log or dev-only path typically disabled in production.
   - **Sanitizer present in the path** (even if imperfect), or the data-flow is very long/complex/hard to reproduce, or evidence is insufficient — do not report as CONFIRMED on weak evidence.
 
