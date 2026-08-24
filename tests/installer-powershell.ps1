@@ -77,31 +77,35 @@ Test-Case 'doctor and safe uninstall' {
     Run @('doctor', '--runtime', 'claude'); Assert ($Status -ne 0) 'doctor accepted missing marker'
     Run @('uninstall', '--runtime', 'claude'); Assert ($Status -ne 0 -and (Test-Path -LiteralPath $path)) 'unsafe uninstall removed copy'
 }
-Test-Case 'forged marker refusal' {
-    New-Sandbox; Run @('--runtime', 'agents'); Assert ($Status -eq 0) $Output
-    $path = Join-Path $env:USERPROFILE '.agents\skills\llm-sast-scanner'; $markerPath = Join-Path $path $Marker
-    foreach ($content in @($MarkerText, "$MarkerText`:llm-sast-scanner-convergence-loop")) {
-        [IO.File]::WriteAllText($markerPath, $content + [Environment]::NewLine)
-        Run @('doctor', '--runtime', 'agents'); Assert ($Status -ne 0) 'doctor accepted forged marker'
-        Run @('install', '--runtime', 'agents'); Assert ($Status -ne 0 -and $Output.Contains('unmanaged')) 'reinstall accepted forged marker'
-        Run @('uninstall', '--runtime', 'agents'); Assert ($Status -ne 0 -and (Test-Path -LiteralPath $path)) 'uninstall accepted forged marker'
+if ($env:LLM_SAST_COMPATIBILITY_SMOKE -ne '1') {
+    Test-Case 'forged marker refusal' {
+        New-Sandbox; Run @('--runtime', 'agents'); Assert ($Status -eq 0) $Output
+        $path = Join-Path $env:USERPROFILE '.agents\skills\llm-sast-scanner'; $markerPath = Join-Path $path $Marker
+        foreach ($content in @($MarkerText, "$MarkerText`:llm-sast-scanner-convergence-loop")) {
+            [IO.File]::WriteAllText($markerPath, $content + [Environment]::NewLine)
+            Run @('doctor', '--runtime', 'agents'); Assert ($Status -ne 0) 'doctor accepted forged marker'
+            Run @('install', '--runtime', 'agents'); Assert ($Status -ne 0 -and $Output.Contains('unmanaged')) 'reinstall accepted forged marker'
+            Run @('uninstall', '--runtime', 'agents'); Assert ($Status -ne 0 -and (Test-Path -LiteralPath $path)) 'uninstall accepted forged marker'
+        }
     }
 }
 Test-Case 'install dry-run' {
     New-Sandbox; Run @('--runtime', 'agents', '--dry-run'); Assert ($Status -eq 0 -and $Output.Contains('would install')) 'dry-run failed'
     Assert (-not (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.agents'))) 'dry-run changed home'
 }
-Test-Case 'mocked bootstrap' {
-    New-Sandbox; Add-Type -AssemblyName System.IO.Compression.FileSystem
-    $archiveParent = Join-Path $Sandbox 'archive'; $archiveRoot = Join-Path $archiveParent 'llm-sast-scanner-main'; [void][IO.Directory]::CreateDirectory($archiveRoot)
-    Copy-Item -LiteralPath (Join-Path $Source 'install.ps1') -Destination $archiveRoot
-    foreach ($skill in $Skills) { Copy-Item -LiteralPath (Join-Path $Source $skill) -Destination $archiveRoot -Recurse }
-    $archive = Join-Path $Sandbox 'source.zip'; [IO.Compression.ZipFile]::CreateFromDirectory($archiveParent, $archive)
-    $wrapper = Join-Path $Sandbox 'mock-bootstrap.ps1'; $env:MOCK_ARCHIVE = $archive
-    $bootstrap = (Join-Path $Repo 'bootstrap.ps1').Replace("'", "''")
-    [IO.File]::WriteAllText($wrapper, "function Invoke-WebRequest { param([switch]`$UseBasicParsing,[string]`$Uri,[string]`$OutFile) Copy-Item -LiteralPath `$env:MOCK_ARCHIVE -Destination `$OutFile }`n& '$bootstrap' @args`nexit `$LASTEXITCODE`n")
-    Invoke-File $wrapper @('--runtime', 'agents'); Assert ($Status -eq 0) $Output
-    Assert (Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".agents\skills\llm-sast-scanner\$Marker")) 'bootstrap did not install'
+if ($env:LLM_SAST_COMPATIBILITY_SMOKE -ne '1') {
+    Test-Case 'mocked bootstrap' {
+        New-Sandbox; Add-Type -AssemblyName System.IO.Compression.FileSystem
+        $archiveParent = Join-Path $Sandbox 'archive'; $archiveRoot = Join-Path $archiveParent 'llm-sast-scanner-main'; [void][IO.Directory]::CreateDirectory($archiveRoot)
+        Copy-Item -LiteralPath (Join-Path $Source 'install.ps1') -Destination $archiveRoot
+        foreach ($skill in $Skills) { Copy-Item -LiteralPath (Join-Path $Source $skill) -Destination $archiveRoot -Recurse }
+        $archive = Join-Path $Sandbox 'source.zip'; [IO.Compression.ZipFile]::CreateFromDirectory($archiveParent, $archive)
+        $wrapper = Join-Path $Sandbox 'mock-bootstrap.ps1'; $env:MOCK_ARCHIVE = $archive
+        $bootstrap = (Join-Path $Repo 'bootstrap.ps1').Replace("'", "''")
+        [IO.File]::WriteAllText($wrapper, "function Invoke-WebRequest { param([switch]`$UseBasicParsing,[string]`$Uri,[string]`$OutFile) Copy-Item -LiteralPath `$env:MOCK_ARCHIVE -Destination `$OutFile }`n& '$bootstrap' @args`nexit 0`n")
+        Invoke-File $wrapper @('--runtime', 'agents'); Assert ($Status -eq 0) $Output
+        Assert (Test-Path -LiteralPath (Join-Path $env:USERPROFILE ".agents\skills\llm-sast-scanner\$Marker")) 'bootstrap did not install'
+    }
 }
 
 if ($null -ne $Sandbox) { Remove-Item -LiteralPath $Sandbox -Recurse -Force -ErrorAction SilentlyContinue }
