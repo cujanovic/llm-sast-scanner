@@ -106,11 +106,11 @@ Exploitation that requires authentication, non-default config, chaining, or admi
 
 ## Installation
 
-The repository checkout is the source of truth. Install creates absolute symlinks from both runtime roots (`~/.claude/skills` and `~/.agents/skills`) to the three skill directories in this checkout.
+The local Git checkout and its configured remote are the source of truth. The installer derives the repository root from Git, so the same `install.sh` works unchanged from any clone whose remote URL is configured locally. Install creates absolute symlinks from both runtime roots (`~/.claude/skills` and `~/.agents/skills`) to the three skill directories in that checkout.
 
 ```sh
-git clone https://github.com/cujanovic/llm-sast-scanner.git
-cd llm-sast-scanner
+git clone <repository-url>
+cd <repository-directory>
 sh install.sh install
 ```
 
@@ -131,11 +131,15 @@ Updates are only:
 git pull
 ```
 
+`git pull` follows the checkout's configured upstream branch.
+
 Health check:
 
 ```sh
 sh install.sh doctor
 ```
+
+`doctor` prints the detected repository root, upstream, remote name, and remote URL, then validates the six symlinks.
 
 To use the parallel orchestrator, also place `AGENTS.md` (and/or `CLAUDE.md`) at the root of the project you want to scan.
 
