@@ -19,7 +19,7 @@ case $script in
 esac
 script_dir=$(CDPATH= cd "$(dirname "$script")" && pwd -P)
 
-if ! repo_root=$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null); then
+if ! repo_root=$(git -C "$script_dir" rev-parse --show-toplevel 2>/dev/null) || [ -z "$repo_root" ]; then
     printf 'error: install.sh is not inside a Git checkout\n' >&2
     exit 1
 fi
@@ -36,22 +36,29 @@ do
 done
 
 upstream='none'
-remote_name=''
-remote_url=''
+branch_remote=''
 
 if upstream_ref=$(git -C "$repo_root" rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null); then
     upstream=$upstream_ref
-    remote_name=${upstream_ref%/*}
-elif git -C "$repo_root" remote get-url origin >/dev/null 2>&1; then
-    remote_name=origin
-else
-    printf 'error: checkout has no configured remote (no branch upstream and no origin)\n' >&2
-    exit 1
+fi
+
+if current_branch=$(git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null) && [ "$current_branch" != 'HEAD' ]; then
+    branch_remote=$(git -C "$repo_root" config --get "branch.$current_branch.remote" 2>/dev/null || true)
+fi
+
+remote_name=''
+remote_url=''
+
+if [ -n "$branch_remote" ] && [ "$branch_remote" != '.' ]; then
+    remote_name=$branch_remote
+    remote_url=$(git -C "$repo_root" remote get-url "$branch_remote" 2>/dev/null || true)
 fi
 
 if [ -z "$remote_url" ]; then
-    if ! remote_url=$(git -C "$repo_root" remote get-url "$remote_name" 2>/dev/null); then
-        printf 'error: checkout has no configured remote (no branch upstream and no origin)\n' >&2
+    if remote_url=$(git -C "$repo_root" remote get-url origin 2>/dev/null); then
+        remote_name=origin
+    else
+        printf 'error: checkout has no configured remote URL\n' >&2
         exit 1
     fi
 fi

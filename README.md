@@ -106,7 +106,7 @@ Exploitation that requires authentication, non-default config, chaining, or admi
 
 ## Installation
 
-The local Git checkout and its configured remote are the source of truth. The installer derives the repository root from Git, so the same `install.sh` works unchanged whether you cloned from the public GitHub repository or Rivian's internal GitLab repository (or any other Git host). Install creates absolute symlinks from both runtime roots (`~/.claude/skills` and `~/.agents/skills`) to the three skill directories in that checkout.
+The local Git checkout and its configured remote are the source of truth. The installer derives the repository root from Git, so the same `install.sh` works unchanged from any clone whose remote URL is configured locally. Install creates absolute symlinks from both runtime roots (`~/.claude/skills` and `~/.agents/skills`) to the three skill directories in that checkout.
 
 ```sh
 git clone <repository-url>
