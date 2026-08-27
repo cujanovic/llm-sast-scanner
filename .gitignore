@@ -15,8 +15,10 @@
 Thumbs.db
 desktop.ini
 
-# Scanner working artifacts (when this repo is itself a scan target)
-.llm-sast-scanner-cache/
+# Scanner working artifacts (when this repo is itself a scan target).
+# NOTE: .llm-sast-scanner-cache/ is deliberately NOT listed here — agent runtimes that block
+# writes to ignored paths would stop the scanner writing its own cache. It goes in
+# .git/info/exclude instead (repo-local, never committed). See CLAUDE.md Step 1.
 sast_report-*.md
 
 # Working plans and scan notes: these reference the target codebase under
