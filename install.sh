@@ -2,15 +2,24 @@
 set -eu
 
 usage() {
-    printf 'usage: sh install.sh [install|doctor]\n' >&2
+    printf 'usage: sh install.sh install [agents|claude|all]\n' >&2
+    printf '       sh install.sh doctor [agents|claude|all]\n' >&2
     exit 1
 }
 
-[ "$#" -eq 1 ] || usage
+[ "$#" -ge 1 ] && [ "$#" -le 2 ] || usage
 case $1 in
     install|doctor) command=$1 ;;
     *) usage ;;
 esac
+
+target=all
+if [ "$#" -eq 2 ]; then
+    case $2 in
+        agents|claude|all) target=$2 ;;
+        *) usage ;;
+    esac
+fi
 
 script=$0
 case $script in
@@ -68,8 +77,15 @@ fi
     exit 1
 }
 
+roots=
+case $target in
+    agents) roots="$HOME/.agents/skills" ;;
+    claude) roots="$HOME/.claude/skills" ;;
+    all) roots="$HOME/.claude/skills $HOME/.agents/skills" ;;
+esac
+
 if [ "$command" = install ]; then
-    for root in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
+    for root in $roots; do
         mkdir -p "$root"
         for skill in \
             llm-sast-scanner \
@@ -93,7 +109,7 @@ printf 'remote: %s\n' "$remote_name"
 printf 'remote url: %s\n' "$remote_url"
 
 invalid=0
-for root in "$HOME/.claude/skills" "$HOME/.agents/skills"; do
+for root in $roots; do
     for skill in \
         llm-sast-scanner \
         llm-sast-scanner-convergence-loop \
