@@ -106,23 +106,54 @@ Exploitation that requires authentication, non-default config, chaining, or admi
 
 ## Installation
 
-From the repository directory, **symlink** both skill directories into the skills folder for your agent runtime — a single `git pull` then updates every runtime at once, with no stale copies to re-sync. Link the real top-level directories (not the `.claude`/`.agents` symlinks), using absolute paths so the links resolve from anywhere:
+The local Git checkout and its configured remote are the source of truth. The installer derives the repository root from Git, so the same `install.sh` works unchanged from any clone whose remote URL is configured locally. Install creates absolute symlinks from the selected runtime root(s) to the three skill directories in that checkout.
 
-```bash
-cd /path/to/llm-sast-scanner
-
-# Claude Code
-mkdir -p ~/.claude/skills
-ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-convergence-loop" \
-      "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.claude/skills/
-
-# OpenAI Codex / Cursor / other agent runtimes
-mkdir -p ~/.agents/skills
-ln -s "$(pwd)/llm-sast-scanner" "$(pwd)/llm-sast-scanner-convergence-loop" \
-      "$(pwd)/llm-sast-scanner-full-scan-loop" ~/.agents/skills/
+```sh
+git clone <repository-url>
+cd <repository-directory>
+sh install.sh install          # default: both runtimes (all)
+sh install.sh install all      # same as omitting the target
+sh install.sh install agents   # only ~/.agents/skills
+sh install.sh install claude   # only ~/.claude/skills
 ```
 
-To update later, just `git pull` in the repo — the symlinks always point at the latest version.
+The optional target defaults to `all`. Each target manages one runtime root:
+
+| Target | Directory |
+|--------|-----------|
+| `agents` | `~/.agents/skills` (Cursor, Codex, and other agent runtimes) |
+| `claude` | `~/.claude/skills` (Claude Code) |
+| `all` | both of the above |
+
+`install` force-replaces the selected symlink entries so they always point to this checkout. With the default `all` target, that is six entries:
+
+```sh
+~/.claude/skills/llm-sast-scanner
+~/.claude/skills/llm-sast-scanner-convergence-loop
+~/.claude/skills/llm-sast-scanner-full-scan-loop
+~/.agents/skills/llm-sast-scanner
+~/.agents/skills/llm-sast-scanner-convergence-loop
+~/.agents/skills/llm-sast-scanner-full-scan-loop
+```
+
+Updates are only:
+
+```sh
+git pull
+```
+
+`git pull` follows the checkout's configured upstream branch.
+
+Health check:
+
+```sh
+sh install.sh doctor           # default: validate both runtimes (all)
+sh install.sh doctor agents    # validate only ~/.agents/skills
+sh install.sh doctor claude    # validate only ~/.claude/skills
+sh install.sh doctor all       # validate both runtimes
+```
+
+`doctor` prints the detected repository root, upstream, remote name, and remote URL, then validates the symlinks for the selected target (six with `all`, three with `agents` or `claude`).
 
 To use the parallel orchestrator, also place `AGENTS.md` (and/or `CLAUDE.md`) at the root of the project you want to scan.
 
@@ -167,6 +198,7 @@ llm-sast-scanner/                      ← repo root
 ├── README.md
 ├── AGENTS.md                             # parallel orchestrator playbook
 ├── CLAUDE.md                             # → symlink to AGENTS.md
+├── install.sh                            # POSIX installer/doctor
 ├── llm-sast-scanner/                     # core skill (canonical source)
 │   ├── SKILL.md                          # 7-step workflow + Judge + adversarial + project-memory protocol
 │   └── references/                       # 106 vulnerability knowledge bases
