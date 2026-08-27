@@ -77,15 +77,20 @@ fi
     exit 1
 }
 
-roots=
+suffixes=
 case $target in
-    agents) roots="$HOME/.agents/skills" ;;
-    claude) roots="$HOME/.claude/skills" ;;
-    all) roots="$HOME/.claude/skills $HOME/.agents/skills" ;;
+    agents) suffixes='.agents/skills' ;;
+    claude) suffixes='.claude/skills' ;;
+    all) suffixes='.claude/skills .agents/skills' ;;
+    *)
+        printf 'error: unknown target: %s\n' "$target" >&2
+        exit 1
+        ;;
 esac
 
 if [ "$command" = install ]; then
-    for root in $roots; do
+    for suffix in $suffixes; do
+        root="$HOME/$suffix"
         mkdir -p "$root"
         for skill in \
             llm-sast-scanner \
@@ -109,7 +114,8 @@ printf 'remote: %s\n' "$remote_name"
 printf 'remote url: %s\n' "$remote_url"
 
 invalid=0
-for root in $roots; do
+for suffix in $suffixes; do
+    root="$HOME/$suffix"
     for skill in \
         llm-sast-scanner \
         llm-sast-scanner-convergence-loop \
