@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.16.0"
+  version: "1.16.2"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -336,13 +336,16 @@ GROUND RULES
   docs/, config, CI, Dockerfile, and source of any language (*.py, *.java, *.go, *.rb, *.php, *.cs, *.js,
   *.jsx, *.ts, *.tsx, *.json, *.yml/*.yaml, *.toml, *.sh, *.env, *.html, templates, etc.). Do NOT sample
   or skim — read each in-scope file fully, line by line.
-- EXCLUDE from scope (do NOT read, do NOT count against coverage): binary assets; vendored/third-party
-  dependency trees (node_modules/, vendor/, third_party/); build/generated output (dist/, build/, out/,
-  *.min.js, *.bundle.js, source maps); lock files (package-lock.json, yarn.lock, pnpm-lock.yaml,
-  poetry.lock, Gemfile.lock, etc.); and **the scanner's OWN outputs — the `.llm-sast-scanner-cache/` directory
+- EXCLUDE from scope (do NOT read, do NOT count against coverage): binary assets; dependency trees this repo
+  does not author (node_modules/); build/generated output (dist/, build/, out/, *.min.js, *.bundle.js, source
+  maps); and **the scanner's OWN outputs — the `.llm-sast-scanner-cache/` directory
   (architecture-threat-model.md, project-memory.md, scope-manifest.txt, `*-results.md`, final-report.md) and any
   `sast_report-*.md` reports it wrote** (they are tool artifacts, not code under review). If a specific dependency
   must be reviewed, do it deliberately — not as part of the line-by-line repo sweep.
+  **Lock files and vendored/committed third-party code that ships stay IN scope** — dependency-confusion,
+  plaintext-registry and integrity findings exist ONLY in the lock file, and vendored code is reachable at
+  runtime. For anything not named above, the base skill's **Step 1 skip rule** governs: a file leaves the
+  coverage set only when you can name the in-scope file its security-relevant content is derived from.
 - SCOPE MANIFEST (build ONCE, before pass 1): the enumerated in-scope file list + line counts is the coverage
   denominator. **Reuse the shared manifest when it exists:** if `.llm-sast-scanner-cache/scope-manifest.txt`
   is present (D1 writes it) and current for this SHA, READ it as the denominator instead of re-enumerating — so
@@ -352,9 +355,9 @@ GROUND RULES
   cd "dir as argument"
   mkdir -p .llm-sast-scanner-cache
   { git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f; } \
-    | grep -ivE '(^|/)(node_modules|vendor|third_party|dist|build|out|\.git|\.llm-sast-scanner-cache|coverage)/' \
+    | grep -ivE '(^|/)(node_modules|dist|build|out|\.git|\.llm-sast-scanner-cache|coverage)/' \
     | grep -ivE '\.(min\.js|bundle\.js|map|png|jpe?g|gif|webp|ico|pdf|zip|gz|jar|woff2?|ttf|mp4|so|dylib|dll|exe|wasm)$' \
-    | grep -ivE '(^|/)(package-lock\.json|yarn\.lock|pnpm-lock\.yaml|poetry\.lock|Gemfile\.lock|go\.sum|Cargo\.lock|sast_report-.*\.md)$' \
+    | grep -ivE '(^|/)sast_report-.*\.md$' \
     | tr '\n' '\0' | xargs -0 grep -Il '' 2>/dev/null \
     | tr '\n' '\0' | xargs -0 wc -l 2>/dev/null | sort -n \
     | tee .llm-sast-scanner-cache/scope-manifest.txt
@@ -553,8 +556,9 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-
   A manifest's rows are its `<line-count><TAB><path>` entries alone: a line beginning `#` is a header and the
   final row is the `total`. Whatever compares path sets — this checklist, D3's reconcile, any integrity check —
   counts only those entries; reading a header or the total as a path reports a gap that does not exist.
-  List excluded paths (vendored deps, build output, lock files, binaries, the scanner's own
-  `.llm-sast-scanner-cache/` + `sast_report-*.md`) separately as "excluded" — they are not coverage gaps.
+  List excluded paths (binaries, `node_modules/`, build output, derived artifacts cleared by the Step 1 skip
+  rule, the scanner's own `.llm-sast-scanner-cache/` + `sast_report-*.md`) separately as "excluded" — they are
+  not coverage gaps. Lock files and vendored code that ships are in scope, so they never appear in that list.
 - If any in-scope file or line range was NOT fully read, run one more targeted pass over only the
   unread lines until coverage is 100%. (This coverage-completion pass does not count toward the
   10-pass cap, but any NEW bug it surfaces is added to the ledger.)

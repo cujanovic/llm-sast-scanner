@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.49.0"
+  version: "1.50.3"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -153,6 +153,10 @@ Determine:
 - User's goal: quick scan, deep audit, specific vuln class, or full report
 - Enumerate the `context/` directory: any `*.md` files there are **external context** describing out-of-repo systems the code interacts with, and are **always loaded** (see Step 2 → "External Context"). An empty `context/` is a no-op.
 - **Exclude the scanner's own artifacts from scope** — they are tool output, not code under review: the `.llm-sast-scanner-cache/` directory (architecture-threat-model.md, project-memory.md, scope-manifest.txt, `*-results.md`, final-report.md) and any `sast_report-*.md` reports. On a git target these are normally git-ignored; on a **non-git** target nothing hides them, so drop them explicitly or the sweep will read its own memory/results/reports back in as "source" and inflate the coverage denominator.
+- **Skipping anything else — name the source file, or keep it.** A file leaves the coverage set ONLY when you can name the in-scope file its security-relevant content is **derived from**; record that path beside the exclusion. Nothing to name → it stays in scope.
+  - *Derived, and the source is in scope → skip*: `dist/`/`build/` bundles and minified assets (source in `src/`), ORM migration snapshots (e.g. a `meta/` or `snapshots/` directory beside the migrations, derived from the `.sql` migrations), generated clients/stubs from a checked-in schema or IDL (`*.pb.go`, `*_pb2.py`, OpenAPI/GraphQL codegen output).
+  - *Nothing else expresses it → keep, whatever its size, generator, or authorship*: **lock files** (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Gemfile.lock`, `poetry.lock`, `go.sum`, `Cargo.lock`) — the manifest holds no resolved URLs, registry hosts, or integrity hashes, so dependency-confusion, plaintext-registry, and integrity findings exist ONLY in the lock file; vendored or committed third-party code that ships; `.sql` migrations (grants, RLS policies, triggers, definer functions); IaC and CI/CD config.
+  - "Auto-generated", "third-party", "not source code", and "too large" are **not** reasons — each is true of files in both lists above.
 
 ### Step 2: Load Relevant References
 
