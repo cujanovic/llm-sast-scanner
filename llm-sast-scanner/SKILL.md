@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.3"
+  version: "1.50.13"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -90,14 +90,26 @@ to steer iterative re-scans). It is state, not a skill.
 - Coverage discipline is unchanged: read every in-scope line and evaluate every applicable class regardless of
   what memory says.
 
-**Writing it — single writer (the report/consolidation step only):** after the final pass, update the file —
-append newly CONFIRMED findings (`class | file:line | brief | git sha | open|fixed`); record
-DOWNGRADED/DISPUTED/WITHDRAWN findings as false-positive patterns **with the rationale that defeated them**;
-refresh project security primitives and hotspots; optionally record a **Coverage / depth notes** entry
-(which files/classes got a deep pass vs. thin ones worth more scrutiny) — consumed by iterative re-scans
-(`new-scan`) to steer the next run's depth; set `last-scanned-sha` to `git rev-parse HEAD` (or `unknown`
-if not a git repo) and `last-updated` to today. Never delete history — mark superseded entries instead.
-Detection/lens runs are **read-only** on this file.
+**Writing it — single writer (the report/consolidation step only):** after the final pass, update the file in
+place. The file has exactly the sections of the template below; a run adds or edits rows inside them and never
+adds a section — the run's narrative, per-record evidence and dispositions live in the report, not here. A
+finding is one ledger row keyed by `class | file:line`, where `class` is the reference file stem
+(`authentication_jwt`, `ssrf`, never a finding title) and `brief` is at most fifteen words: a run that
+re-verifies it updates that row's `last-verified` and `status`; a run that finds it new appends a row with
+`first-seen sha`; the same key is never written twice. Record WITHDRAWN findings — a finding defeated by a named guard, type fact or deployment fact — as false-positive-pattern rows; a DOWNGRADED or DISPUTED finding is real, keeps its ledger row carrying its verdict, and is never a false-positive pattern. Write those rows **with the rationale
+that defeated them**; an Unverifiable (NEEDS CONTEXT) finding is not a false-positive pattern and is never written to that
+section — it stays a ledger row, status `open`, its brief naming the missing context; refresh project security primitives and hotspots by editing their rows; append exactly one
+line to **Coverage / depth notes** per run (sha, new-confirmed, found-late, maturity-streak, deep pass, thin
+areas) — consumed by iterative re-scans (`new-scan`) to steer the next run's depth; set `last-scanned-sha` to
+`git rev-parse HEAD` (or `unknown` if not a git repo) and `last-updated` to today. History is kept, never
+deleted: a row whose status becomes `fixed` or `superseded` moves, as one line in the same row format, to
+`.llm-sast-scanner-cache/project-memory-archive.md` (append-only; detection runs never read it), and when
+**Coverage / depth notes** holds more than ten run lines the oldest are folded into its single
+`earlier runs: <n>` line. The file's size is bounded by its keys, not by a line budget: at most one ledger row
+per `class | file:line`, one false-positive row per pattern, one primitive or hotspot row per item, and the run
+lines above — a confirmed row is never dropped, grouped or shortened to save space, and a file that grows only
+because more distinct sinks were confirmed is the intended result. Detection/lens runs are **read-only** on
+this file.
 - **Never persist secrets or PII.** Do NOT write credential values, API keys, tokens, private keys, passwords,
   connection strings, or personal data into memory — record the **class + `file:line` + a neutral description**
   only (e.g. "hardcoded AWS secret key", never the key itself). Redact any sensitive substring as `[REDACTED]`.
@@ -123,7 +135,7 @@ last-updated: <YYYY-MM-DD>
 > PII here — record class + file:line + a neutral description, redacting sensitive values as [REDACTED].
 
 ## Confirmed findings ledger
-<!-- class | file:line | brief | git sha | open|fixed -->
+<!-- class | file:line | brief | first-seen sha | last-verified | open|fixed|superseded -->
 
 ## Confirmed false-positive patterns
 <!-- class | location | why safe (named sanitizer/validator + path) | git sha -->
@@ -135,8 +147,11 @@ last-updated: <YYYY-MM-DD>
 <!-- file/dir | note -->
 
 ## Coverage / depth notes
-<!-- run <git sha>: new-confirmed=<n> | found-late=<files swept-clean-before-now-flagged> | maturity-streak=<n> | deep pass=<files/classes> | thin, deepen next=<files/classes> -->
+<!-- one line per run: run <git sha> <YYYY-MM-DD>: new-confirmed=<n> | found-late=<files swept-clean-before-now-flagged> | maturity-streak=<n> | deep pass=<files/classes> | thin, deepen next=<files/classes>; at most ten run lines plus one `earlier runs: <n>` line -->
 ```
+
+Fixed and superseded rows live in `.llm-sast-scanner-cache/project-memory-archive.md`, one line each in the ledger
+row format; it is append-only and detection runs do not read it.
 
 The orchestrator should add `.llm-sast-scanner-cache/` to the scanned repo's `.gitignore` (or commit it
 deliberately to share memory across developers).
@@ -452,7 +467,13 @@ Before reporting, every preliminary finding (VULN or LIKELY VULN) **must pass a 
 For each candidate finding, answer all of the following:
 
 #### Reachability Check
-- [ ] Is the source actually user-controlled, or is it internal/trusted data?
+- [ ] Is the source actually user-controlled, or is it internal/trusted data? Data that arrives from another system —
+  records synced from a ticketing, ITSM, HR or identity platform, webhook payloads, and model output generated from
+  them — is untrusted: another party's users and access controls stand behind it and this repository cannot prove
+  them. Name that external principal as the source and rate the finding at the class default: the external origin is
+  the finding's premise, not a position the attacker must hold, so under the Severity Downgrade Rule it is neither
+  a privileged position nor a chained prerequisite, and the finding never goes to NEEDS CONTEXT because the other
+  system's authorization model is unknown.
 - [ ] Is the vulnerable code path reachable from an HTTP endpoint / entry point — or, for a library/SDK, from a public/exported API a downstream caller can reach — or is it dead code / private-internal-only?
 - [ ] Are there upstream guards (auth middleware, input filters) that block the path before it reaches the sink?
 - [ ] **Deferred trigger** (scheduled job, queue/stream consumer, background worker, event handler): check the **registration site** — the `schedule(...)`, `process(...)`, `subscribe(...)`, `on(...)`, or `setInterval(...)` call. **If the registration is unconditional at module load, the trigger is established and reachability is PASS.** Do not record "depends on the scheduler/consumer actually running" as an open question when the registration is visible in scope and unconditional — that is a fact you can check, not an assumption you must make.
@@ -487,7 +508,7 @@ For each candidate finding, answer all of the following:
 |---------|---------|--------|
 | **CONFIRMED** | All reachability/sanitization/exploitability checks pass | Include in report |
 | **LIKELY** | Most checks pass; one uncertainty remains | Include in report, flag uncertainty |
-| **NEEDS CONTEXT** | Cannot determine without runtime behavior / config / additional files | Note as "unverifiable without X" |
+| **NEEDS CONTEXT** | Cannot determine without runtime behavior / config / additional files of this repository or its deployment; the access control of an external system whose data this code ingests is never the missing context | Note as "unverifiable without X" |
 | **FALSE POSITIVE** | Positive evidence of protection found — cite the exact file+line of the sanitization, allowlist check, guard, or framework-level auto-protection that makes the sink safe | Drop silently |
 
 **Only CONFIRMED and LIKELY findings are reported.**
@@ -662,7 +683,7 @@ For each matching finding, work through ALL of the following:
 | Verdict | Meaning | Action |
 |---------|---------|--------|
 | **STANDING** | Finding survived all challenges — real-world impact is credible and demonstrable | Report at original severity |
-| **DOWNGRADED** | Finding is real but impact is lower than initially assessed | Demote by one or more severity levels, proceed to report |
+| **DOWNGRADED** | Finding is real and one of the Severity Downgrade Rule's three triggers — privileged position, non-default configuration, chained prerequisite — applies and is named, and the named prerequisite passes the downgrade validity check — it is not a hop of the record's Flow | Demote by one level per named trigger, proceed to report |
 | **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact | Demote by one severity level, add explicit caveat to finding |
 | **WITHDRAWN** | Cannot construct a credible real-world attack scenario despite the technical truth of the bug | Drop from report; log internally as "withdrawn after adversarial review" with rationale |
 
@@ -707,7 +728,9 @@ On any mismatch: correct the citation if the real evidence is found, or **downgr
 | **Low** | Information disclosure, open redirect, weak crypto, insecure cookie, improper input validation (semantic-type mismatch / missing format validation, CWE-20 — see `input_validation.md`) |
 | **Informational** | Missing security headers, verbose errors, defense-in-depth gaps |
 
-**Severity Downgrade Rule:** When exploitation requires authentication, specific non-default configuration, chained prerequisites, or is only reachable through an internal/admin-only path, downgrade severity by one level from the class default; LIKELY-verdict findings whose exploitability is marked UNCERTAIN must be capped at one level below the class default regardless of vulnerability type.
+**Severity Downgrade Rule:** Downgrade severity by one level from the class default when exploitation requires one of exactly three things, and name which one in the record: a **privileged position** — a role beyond an ordinary authenticated user of the application (administrator, operator, or a caller holding an integration's own credential), or a network location the code shows is not exposed; a **non-default configuration** the code shows is off by default; or a **chained prerequisite** — another finding in this report, or a condition inside this repository's deployment that the attacker must establish before the recorded Flow begins. Ordinary authentication is the baseline of any application with a login and is never a downgrade: an attack that any signed-in user can perform is rated at the class default, and a user of an integrated surface the application serves — a chat workspace, a portal, a ticket queue — is that ordinary user, not a privileged position. Three things are never a trigger: the **external origin of untrusted data** — the integration or upstream system that delivers records, webhook payloads or model output is the finding's source, controlling what it delivers is the attack, and only holding its credential is a position; a **step of the attack itself** — each hop in the recorded Flow is the exploit, not a condition established beforehand; and **missing context** — deployment policy, retention terms, provider approval or any fact outside the code is grounds for NEEDS CONTEXT or for nothing, never for a downgrade. LIKELY-verdict findings whose exploitability is marked UNCERTAIN are capped at one level below the class default regardless of vulnerability type.
+
+**Downgrade validity check:** a DOWNGRADED verdict names its trigger and the one concrete thing the attacker must hold or establish — a role, a configuration value, a network location, or another finding's VULN id. A prerequisite is never an action: compare the named thing to the record's Flow before writing the verdict, and if satisfying it is the same as performing a hop — supplying or altering the source data, getting content stored or retrieved, having the model select a tool or emit output, moving a tag or record the pipeline reads, reaching the sink — the downgrade is INVALID. An invalid downgrade is not softened, it is struck: the record is rated at the class default and its line reads `Adversarial: STANDING — downgrade voided: <named thing> is hop <n> of the Flow`. The check is mechanical and applies to every DOWNGRADED verdict, including one whose trigger is correctly named.
 
 **Downgrade floor (interacts with the IMPACT-ANCHORING GUARD):** the Severity Downgrade Rule may lower severity but may NEVER push a CONFIRMED, attacker-reachable sink *below* its class-specific defense-in-depth floor, nor out of the findings body. If a class reference sets a floor for a confirmed sink (e.g. `server_side_prototype_pollution.md` → **Low** for a sink without a proven gadget), that floor is the minimum reported severity — a further "authenticated" or "UNCERTAIN" downgrade does not demote it to Informational-as-burial or to a Hardening Note. `Informational` is for genuinely non-exploitable observations, never a way to move a confirmed reachable sink out of the findings.
 
@@ -723,7 +746,7 @@ Flow: <source file:line> → <intermediate hop file:line> → … → <sink file
 Evidence:
   <relevant code snippet>
 Judge: <one sentence — why this passed re-verification>
-Adversarial: <one sentence — why this survived the stress test> [STANDING | DOWNGRADED | DISPUTED]
+Adversarial: <one sentence — why this survived the stress test; for DOWNGRADED, the trigger by name: privileged position / non-default configuration / chained prerequisite, and the named thing the attacker must hold or establish, which is not a hop of the Flow> [STANDING | DOWNGRADED | DISPUTED]
 Remediation: <specific fix — not generic advice>
 Reference: references/<vuln>.md (v<version>)
 Context: context/<file>.md — <only if an external-context file influenced this verdict/severity; omit otherwise>
@@ -769,12 +792,26 @@ After individual findings are confirmed, check whether two or more **CONFIRMED**
 
 #### Report Structure
 
-When producing a full report, write to `sast_report.md` (or user-specified path):
+When producing a full report, write to `sast_report.md` (or user-specified path). Every finding under Critical
+through Informational is one Finding Format record; the record count under each heading is what the histogram
+reports. The header's `<model>` is the model the runtime states for the session that writes the report — the
+`You are powered by …` line of the system prompt, or the runtime's model setting — copied verbatim: the exact
+model ID when one is stated, otherwise the stated display name, and the word `unknown` when the runtime states
+none. In a fan-out whose workers ran on a different stated model, append ` (workers: <model>)`. A report written by
+a subagent that another session dispatched takes `<model>`, `<invocation>` and `<sha>` from the `model`, `invocation`
+and `base-sha` rows that session recorded in `.llm-sast-scanner-cache/scan-plan.md`, never from the subagent's own
+session. `<target>` is the basename of the scanned directory. `<invocation>` is
+the skill invocation that started the run — the skill name and its arguments exactly as given, in backticks. `<sha>`
+is the full `git rev-parse HEAD` of the scanned checkout when the scan began, or `unknown` when the target is not a
+git checkout.
 
 ```markdown
 # SAST Security Report — <target>
 Date: <date>
 Analyzer: llm-sast-scanner v<version>
+Model: <model>
+Invocation: <invocation>
+Base SHA: <sha>
 
 ## Executive Summary
 <2-3 sentences: total findings by severity, most critical issue>

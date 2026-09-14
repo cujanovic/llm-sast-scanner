@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.16.2"
+  version: "1.17.1"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -249,9 +249,10 @@ Launch one subagent:
 > completion sentinel**. If any is **missing OR lacks the sentinel** — a crashed / partial lens whose file may hold
 > only some passes — that lens is incomplete: re-run it and overwrite the partial file before consolidating,
 > otherwise partial findings would be merged as if the lens were exhaustive and class coverage would be <100%.
-> Then **reconcile every lens against the one shared denominator**: confirm each lens's coverage checklist covers
-> the SAME file set + line counts as `.llm-sast-scanner-cache/scope-manifest.txt` (the denominator D1 persisted);
-> re-run any lens whose file set or line counts diverge from that manifest (it was run against a different tree).
+> Then **reconcile every lens against the one shared denominator**: confirm each lens's `coverage:` line names
+> `.llm-sast-scanner-cache/scope-manifest.txt` (or its assigned partition manifest, the denominator D1 persisted),
+> shows file and line counts equal to that manifest's, and lists no unread range; re-run any lens whose counts
+> diverge from that manifest (it was run against a different tree).
 > Then read all `.llm-sast-scanner-cache/deep-*-results.md` files and `.llm-sast-scanner-cache/architecture-threat-model.md`. Merge and de-duplicate findings across
 > lenses (same **entry point** + `file:line` + vuln class = one finding; **independent entry points that share a sink line stay separate** — per the base skill's *(entry point → sink)* finding-identity rule, so many routes funneling through one shared helper/DAO/render sink yield one finding **per route**, not one collapsed finding). Run the base `llm-sast-scanner` skill's **Step 6
 > (Adversarial Impact Validation)** ONCE over the full consolidated set with the `adv` value (default
@@ -282,7 +283,15 @@ Launch one subagent:
 > is just serialized downstream") is INVALID — send those back to the lens or promote to floor. Then write a
 > single timestamped report `sast_report-<timestamp>.md` (timestamp from `date +%Y-%m-%d_%H-%M-%S`) using the
 > base skill's report structure (Executive Summary; Critical/High/Medium/Low/Informational; Unverifiable;
-> Hardening Notes; Positive Patterns; Remediation Priority). **Non-convergence escalation:** read each lens's
+> Hardening Notes; Positive Patterns; Remediation Priority). The body of each of the five severity sections is the ordered
+> sequence of that severity's findings, each written as one complete Finding Format record (base skill Step 7) in
+> plain markdown — the code fence around the template in Step 7 delimits the template, not the report — with the
+> `[SEVERITY] VULN-NNN — <Class> [verdict]` line, then CWE, File, Description, Impact, Flow, an Evidence code block,
+> Judge, Adversarial, Remediation and Reference. The number of records in a section equals that severity's count in
+> the Severity Histogram — the histogram is derived by counting the records, never the other way round — and the
+> report's appendix ends with a **Body/histogram reconciliation** block of five plain lines,
+> `<severity>: <records counted in body> / <histogram count>`, all equal, written after the recount and before the
+> completion sentinel. Exactly one report file is written per run. **Non-convergence escalation:** read each lens's
 > CONVERGENCE STATUS from its `deep-<lens>-results.md`; if ANY lens reports `NOT CONVERGED` (stopped at the
 > pass-5 ceiling or the pass-10 hard cap), the **Executive Summary MUST open with a prominent warning** that the audit did not saturate and is
 > likely INCOMPLETE for those lens(es) — name them and their last-pass new-bug counts, note that 100% coverage
@@ -549,10 +558,14 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-
   (`.llm-sast-scanner-cache/scope-manifest.txt`, persisted in D1 — NOT a privately rebuilt list, so every lens
   reconciles against the identical denominator) and confirm that EVERY line of EVERY in-scope file (per the
   GROUND RULES scope + exclusions) was actually read (not sampled) — every manifest file marked fully read
-  `1..total_lines`. Produce a coverage checklist: each file with its total line count and the line ranges read.
-  Its path set is the assigned manifest's path column, copied — one checklist row per manifest row, in manifest
-  order. Re-listing the tree instead drops whatever the listing cannot see (a dotfile inside a dot-directory
-  matches no default shell glob), leaving the checklist short of a denominator that already named the file.
+  `1..total_lines`. Produce the coverage checklist by command, not by hand: compare the assigned manifest's path
+  column against the files read, row for row in manifest order, and write into the results file only the
+  outcome — one line `coverage: <files read>/<manifest files> files | <lines read>/<manifest lines> lines |
+  reconciled against <manifest path>`, then one line per unread range (`<path>:<from>-<to>`), none when coverage
+  is complete. A copy of the manifest's rows is not a checklist and does not belong in the results file. The
+  comparison uses the manifest's path column, never a re-listing of the tree: a listing drops whatever it cannot
+  see (a dotfile inside a dot-directory matches no default shell glob), leaving the count short of a denominator
+  that already named the file.
   A manifest's rows are its `<line-count><TAB><path>` entries alone: a line beginning `#` is a header and the
   final row is the `total`. Whatever compares path sets — this checklist, D3's reconcile, any integrity check —
   counts only those entries; reading a header or the total as a path reports a gap that does not exist.
@@ -614,7 +627,15 @@ OUTPUT (single-agent mode)
   `sast_report-<timestamp>.md`, where `<timestamp>` is the output of `date +%Y-%m-%d_%H-%M-%S`
   (e.g., `sast_report-2026-06-11_14-30-05.md`). Use the skill's report structure (Executive Summary;
   Critical/High/Medium/Low/Informational; Unverifiable; Hardening Notes; Positive Patterns; Remediation
-  Priority), with exact file paths + line numbers and concrete remediations. As the report's FINAL line, append
+  Priority), with exact file paths + line numbers and concrete remediations. The body of each of the five severity sections is the ordered
+  sequence of that severity's findings, each written as one complete Finding Format record (base skill Step 7) in
+  plain markdown — the code fence around the template in Step 7 delimits the template, not the report — with the
+  `[SEVERITY] VULN-NNN — <Class> [verdict]` line, then CWE, File, Description, Impact, Flow, an Evidence code block,
+  Judge, Adversarial, Remediation and Reference. The number of records in a section equals that severity's count in
+  the Severity Histogram — the histogram is derived by counting the records, never the other way round — and the
+  report's appendix ends with a **Body/histogram reconciliation** block of five plain lines,
+  `<severity>: <records counted in body> / <histogram count>`, all equal, written after the recount and before the
+  completion sentinel. Exactly one report file is written per run. As the report's FINAL line, append
   `<!-- LLM-SAST-COMPLETE -->` once it is fully written, so any resume/skip check can tell a finished report from
   a crashed partial one.
 - NON-CONVERGENCE ESCALATION (report body, not just the loop log). If the CONVERGENCE STATUS was
@@ -633,7 +654,7 @@ OUTPUT (single-agent mode)
 - Finally, as the single writer, update `.llm-sast-scanner-cache/project-memory.md` per the base skill's **Project
   Memory Protocol**: append newly CONFIRMED findings (with current `git rev-parse HEAD`), **flip the
   `open|fixed` status of every re-verified prior finding** (mark now-fixed ones `fixed`), record
-  DOWNGRADED/DISPUTED/WITHDRAWN findings as false-positive patterns with the rationale that defeated them,
+  WITHDRAWN findings as false-positive patterns with the rationale that defeated them — DOWNGRADED and DISPUTED findings are real and stay ledger rows carrying their verdict, never false-positive patterns —,
   refresh project security primitives and hotspots, bump `last-scanned-sha` / `last-updated`, and append a run
   entry to the memory's **`## Coverage / depth notes`** section — `new-confirmed=<n>`, any **found-late** files
   (swept clean last run, flagged now → also add to `## Hotspots`), the updated `maturity-streak` (increment if

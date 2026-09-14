@@ -106,10 +106,12 @@ Exploitation that requires authentication, non-default config, chaining, or admi
 
 ## Installation
 
-The local Git checkout and its configured remote are the source of truth. The installer derives the repository root from Git, so the same `install.sh` works unchanged from any clone whose remote URL is configured locally. Install creates absolute symlinks from the selected runtime root(s) to the three skill directories in that checkout.
+The local Git checkout is the source of truth. The installer derives the repository root from Git, so the same `install.sh` works unchanged from any clone (no remote needs to be configured) and may be invoked through a symlink. Install creates absolute symlinks from the selected runtime root(s) to the three skill directories in that checkout.
+
+Clone the repository somewhere outside the runtime roots (for example `~/src`), not directly as `~/.claude/skills/llm-sast-scanner` or `~/.agents/skills/llm-sast-scanner`: the installer refuses to run when one of its destinations would be the checkout itself.
 
 ```sh
-git clone <repository-url>
+git clone <repository-url>     # anywhere outside ~/.claude/skills and ~/.agents/skills
 cd <repository-directory>
 sh install.sh install          # default: both runtimes (all)
 sh install.sh install all      # same as omitting the target
@@ -125,7 +127,7 @@ The optional target defaults to `all`. Each target manages one runtime root:
 | `claude` | `~/.claude/skills` (Claude Code) |
 | `all` | both of the above |
 
-`install` force-replaces the selected symlink entries so they always point to this checkout. With the default `all` target, that is six entries:
+`install` replaces the selected entries when they are symlinks (or empty directories) so they always point to this checkout. It refuses to touch a regular file or a non-empty directory at any of those paths, and it checks every selected entry before changing anything, so a refusal during those checks leaves both runtime roots exactly as they were. A root whose path passes through an entry that install is about to replace is refused up front as well. The roots are then updated one at a time and each is re-verified just before it is touched; should the first update ever change where the second root resolves, install stops before touching the second root and reports what happened. `$HOME` must already exist; the runtime root directories themselves are created when missing. With the default `all` target, that is six entries:
 
 ```sh
 ~/.claude/skills/llm-sast-scanner
@@ -153,7 +155,14 @@ sh install.sh doctor claude    # validate only ~/.claude/skills
 sh install.sh doctor all       # validate both runtimes
 ```
 
-`doctor` prints the detected repository root, upstream, remote name, and remote URL, then validates the symlinks for the selected target (six with `all`, three with `agents` or `claude`).
+`doctor` prints the detected repository root, upstream, remote name, and remote URL (`none` where not configured), then validates the symlinks for the selected target (six with `all`, three with `agents` or `claude`). It exits non-zero if any entry is missing, is not a symlink, or points somewhere other than this checkout.
+
+The installer has a regression suite that exercises it against a fresh clone with `HOME` pointed at a throwaway directory (the real home and checkout are never touched):
+
+```sh
+bash tests/install_test.sh                       # default interpreter: sh
+TEST_SH=/bin/dash bash tests/install_test.sh     # or bash, ksh, "zsh --emulate sh"
+```
 
 To use the parallel orchestrator, also place `AGENTS.md` (and/or `CLAUDE.md`) at the root of the project you want to scan.
 
