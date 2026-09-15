@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.16.6"
+  version: "2.16.8"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -47,7 +47,9 @@ the skill's D1, writing the manifest and partition files with redirected shell c
 in a response. Then split the in-scope files into 3 partitions balanced by ATTACK SURFACE, not by line count
 alone. The manifest holds only what D1 leaves in scope: generated output derived from in-scope source — ORM
 snapshots and journals, build and bundle output, generated route trees — is excluded in `scope-excluded.txt`
-with its reason, never classified or partitioned. Classify every remaining row as `source` (application,
+with its reason, never classified or partitioned, and so are the orchestrating runtime's own run logs and exported
+transcripts in the repository: they are records of a scan, not code under review, and a route string inside one is
+not an entry point. Classify every remaining row as `source` (application,
 infrastructure, CI and build code), `test` (test, fixture, mock and end-to-end trees) or `text` (documentation,
 package manifests, lockfiles, editor and agent configuration). Count entry points per directory with STEP 2's entry-point
 definition — every registration of every kind, plain HTTP routes included, attributed to the directory of the
@@ -86,9 +88,12 @@ into `scan-plan.md`; compile the worker contracts
 only after the lens set is fixed. `scan-plan.md` opens with the rows `invocation: <the skill invocation as given>`, `model: <the model this
 session runs on, written as the base skill's header `<model>` rule prescribes — the exact model ID when the runtime
 states one, else the stated display name, else `unknown`; the identifier alone, never the sentence around it>` and
-`base-sha: <sha>`, `target: <the absolute path of the target directory, from pwd>`, and `wrapper:
-llm-sast-scanner-full-scan-loop v<this file's frontmatter version>`; STEP 3 copies the
-report header from these rows, so a value missing here is missing from the report.
+`base-sha: <sha>`, `target: <the absolute path of the target directory, from pwd>`, `wrapper:
+llm-sast-scanner-full-scan-loop v<this file's frontmatter version>`, `started: <date +%Y-%m-%d_%H-%M-%S, run when
+this file is first written>` and `earlier-reports: <n> — <name> <bytes>, ...` — every `sast_report-*.md` already in
+`<dir>` with its byte size, or `earlier-reports: 0`; STEP 3 copies the
+report header from these rows, so a value missing here is missing from the report, and the `started:` and
+`earlier-reports:` rows are what the report-naming rule below and the close-out compare against.
 
 **REQUIRED CACHE ARTIFACTS.** Every run leaves this exact file set in `.llm-sast-scanner-cache/`. Each one is
 the written record of a decision that otherwise stays in one agent's context and cannot be audited afterward.
@@ -115,11 +120,16 @@ produced and makes re-consolidation from clean inputs impossible.
 
 Write ONE report, into `<dir>` itself — the directory this skill was invoked on, alongside the code, NOT into
 `.llm-sast-scanner-cache/`, which holds the run's working artifacts. The report is the deliverable; the cache
-is the workings. Name it from `date +%Y-%m-%d_%H-%M-%S` at the moment of writing. Never invent a timestamp,
+is the workings. Name it from `date +%Y-%m-%d_%H-%M-%S` at the moment of writing, and the moment the file exists
+record that name in `scan-plan.md` as `report: sast_report-<timestamp>.md`. Never invent a timestamp,
 advance a clock, or emit a second report under a later name — a run that produces several reports has no
-answer to "which one is the result." A re-consolidation, repair or rebuild within the run rewrites that same file in
-place under its original name; a second `sast_report-*.md` newer than the run's start is a STEP 3 error and is deleted
-before the run ends, so exactly one report is newer than the run's log.
+answer to "which one is the result." A re-consolidation, repair or rebuild within the run rewrites the file named in
+the `report:` row, in place, under that name; a second `sast_report-*.md` whose name timestamp is at or after the
+scan-plan's `started:` row is a STEP 3 error and is deleted before the run ends. A `sast_report-*.md` whose name
+timestamp precedes `started:` is an earlier run's result and belongs to the user: this session and every subagent it
+starts never writes to it, renames it or deletes it. "One report" means one report from this run, not one report in
+the directory — a run that removes or rewrites an earlier report has destroyed a record that no repair can restore,
+and the close-out reports it by file name rather than hiding it.
 
 Every finding in the report body is one complete Finding Format record (base skill Step 7) and keeps its Flow
 (source -> sink hops as `file:line` steps), Evidence code block, Judge verdict, CWE, severity with a one-line
@@ -135,10 +145,10 @@ slots filled — the whole of it, in this order, nothing dropped:
 
 > You are the `<lens>` worker for partition `p<n>` of an `llm-sast-scanner-full-scan-loop` run on `<target>`.
 > Run every command from `<target>` and read every file by an absolute path under it. Before reading anything
-> else, run `pwd` and `git rev-parse HEAD` there: the results file's second and third lines are
-> `target: <pwd output>` and `base-sha: <git output>`, produced by running those commands, never copied from this
-> prompt; if either differs from the `target:` and `base-sha:` rows of `.llm-sast-scanner-cache/scan-plan.md`,
-> stop and write nothing.
+> else, run `pwd` and `git rev-parse HEAD` there; their outputs go into the results file's first line as its
+> `target:` and `base-sha:` fields (below), produced by running those commands, never copied from this prompt; if
+> either differs from the `target:` and `base-sha:` rows of `.llm-sast-scanner-cache/scan-plan.md`, stop and write
+> nothing.
 > Read in full, in this order: `<skills root>/llm-sast-scanner-convergence-loop/SKILL.md`,
 > `<skills root>/llm-sast-scanner/SKILL.md`, `.llm-sast-scanner-cache/<lens>-agent-procedure.md`,
 > `architecture-threat-model.md`, `scan-plan.md`, `scope-manifest.txt`, `partition-p<n>-manifest.txt`, and
@@ -147,9 +157,10 @@ slots filled — the whole of it, in this order, nothing dropped:
 > contract: Steps 1–5 to convergence with 100% line coverage; no adversarial pass, no timestamped report, no
 > `project-memory.md` write, no skill or wrapper invocation. Write only
 > `.llm-sast-scanner-cache/deep-<lens>-p<n>-results.md`. Its first line is
-> `procedure: <convergence-loop skill name> v<its version> / <base skill name> v<its version>` — the convergence-loop
-> skill first and the base skill second, both names and both versions copied from the `name:` and `version:` fields
-> of the two SKILL.md frontmatters you have just read, never from this prompt. Then every Judge-passed finding as one complete Finding Format
+> `procedure: <convergence-loop skill name> v<its version> / <base skill name> v<its version> | target: <pwd output> |
+> base-sha: <git output>` — one line, four fields: the convergence-loop skill first and the base skill second, both
+> names and both versions copied from the `name:` and `version:` fields of the two SKILL.md frontmatters you have
+> just read, then the two command outputs; nothing on this line comes from this prompt. Then every Judge-passed finding as one complete Finding Format
 > record (base skill Step 7) whose first line is `[SEVERITY] VULN-<id> — <class> [CONFIRMED | LIKELY]` with the
 > severity in capitals, without the Adversarial field, the Clearance Records, the coverage checklist, the
 > pass log and the convergence status. When `project-memory.md`'s confirmed-findings ledger is non-empty, also run the
@@ -183,12 +194,13 @@ user is told that a single-context audit is a separate `llm-sast-scanner-converg
 invocation. Before STEP 3, every worker file is checked against the dispatch list and its first line: a file with
 no dispatch line, or whose `procedure:` line is missing or names a skill or version other than the two frontmatters' `name:` and `version:`
 fields — the two skills in either order pass; a wrong name or version does not —,
-was not produced by a worker that loaded the procedure — delete it and re-run that worker. A file whose `target:` or
-`base-sha:` line is missing or differs from the scan-plan's rows, or whose cited `File:` paths do not resolve under the
+was not produced by a worker that loaded the procedure — delete it and re-run that worker. A file whose first line lacks the
+`target:` or `base-sha:` field, or whose field differs from the scan-plan's row, or whose cited `File:` paths do not resolve under the
 target, was produced against another checkout — delete it and re-run that worker; the path line is the primary check,
 because a sibling copy can sit at the same commit. A file that nowhere contains
-`new entry points: <count>` or `ledger empty` — on its own line or inside a sentence — fails the same gate and is
-re-run the same way; the phrase's presence is the test, not its position.
+`new entry points: <count>` or `ledger empty` — on its own line or inside a sentence, in any letter case, so
+`New entry points: 0` at the start of a sentence passes — fails the same gate and is
+re-run the same way; the phrase's presence is the test, not its position or its capitalization.
 
 The lens set is the six in the base skill's class table, **plus at least one added lens. The added lens is
 REQUIRED, not optional.** A dispatch of exactly the six base lenses is an incomplete STEP 2 — the six are the
@@ -332,7 +344,10 @@ becomes `unverifiable` with that reason and its body block moves to the Unverifi
 `verdict` is Step 6's result for the row, written into the table before any body block is rendered: `STANDING`,
 `STANDING — downgrade voided: <named thing> is hop <n> of the Flow`, `DOWNGRADED — <trigger>: <the named thing the
 attacker must hold>`, or `DISPUTED — <one clause>` for every `body` row whose severity is in `adv=`; `not run` for a
-`body` row outside `adv=`; `n/a` for every other row. Any other content is an invalid cell.
+`body` row outside `adv=`; `n/a` for every other row. Any other content is an invalid cell, and so is a cell that is
+specific in form but not in substance: the named thing in a `DOWNGRADED` cell is a token that appears in that row's
+own record — its Flow, Description or Evidence — and two rows with different sinks never carry identical `DOWNGRADED`
+or `DISPUTED` text; verdicts are written per finding, never per category.
 Step 6 and citation verification update the `disposition` and `verdict` cells of this table. The body is then
 rendered from the table: one Finding Format record per `body` row, in severity order, carrying the row's VULN id.
 Every block has one layout, so two runs' blocks diff line for line: the severity line, then
@@ -406,7 +421,10 @@ finding with a severity, or listed with a stated disposition and the evidence th
 The appendix is one `## Appendix` section whose sub-headings are the items below as `###` headings, in this order and
 under these names, with nothing else at the `##` level after the body:
 - Required cache artifacts: one line per file in the REQUIRED CACHE ARTIFACTS table — the filename and its
-  byte size on disk. Any file that is absent gets a line saying so and why. Then `artifacts present: <n>/8`.
+  byte size on disk. Any file that is absent gets a line saying so and why. Then `artifacts present: <n>/8`, and
+  last `earlier reports: <n> recorded | <m> present at recorded size` — `n` from the scan-plan's `earlier-reports:`
+  row, `m` counted on disk at close-out by name and byte size. `m` below `n` is a STEP 3 error that no repair
+  undoes; the run's final message names each missing or resized file.
 - Scope exclusions: the contents of `scope-excluded.txt`, plus `excluded: <count> paths / <count> lines`, so a
   reader can tell a deliberate exclusion from a forgotten one. State `excluded: 0` only if nothing was dropped.
 - Manifest citation coverage: `files cited in lens work: <n> / <manifest total> (<pct>%)`. Get `<n>` by
@@ -525,3 +543,18 @@ under these names, with nothing else at the `##` level after the body:
 - **Block layout and appendix sectioning are fixed because three consecutive reports laid them out three ways** — the
   `Worker record:` line second, last, or third; an `Entry point:` line in one; Evidence fenced in a third of blocks;
   one appendix section or nine — each consolidator choosing where the unspecified pieces went.
+- **The pinning values live in the first line because a separate line was skipped by half the workers on first
+  attempt** — one run re-ran seventeen of thirty-three workers for it — while the first line has been written correctly
+  in every file of four consecutive runs.
+- **Verdict cells must be specific because one consolidation wrote a single sentence for all seventeen downgrades and
+  another for all fifty-two disputes**, meeting the form of the rule while naming nothing the Flow check could test.
+- **Runtime logs and transcripts are excluded because a previous run's exported transcript was partitioned as source
+  with fifty entry points**, all of them route strings quoted inside the JSON.
+- **Earlier runs' reports are named, counted and protected because a consolidation writer deleted them.** The rule
+  said a second report "newer than the run's start" is deleted "so exactly one report is newer than the run's log";
+  with no recorded start and no named report file, one `new-scan` writer read it as one report in the directory and
+  deleted the two earlier runs' reports, and the run before it had "rewritten in place" the previous run's report
+  instead of its own. The `started:`, `earlier-reports:` and `report:` rows make both comparisons mechanical, and
+  the `earlier reports:` close-out line makes a loss visible instead of silent.
+- **The ledger-phrase gate is case-insensitive because five of six re-runs in one run were for `New entry points: 0`
+  written at the start of a sentence** — the phrase was present; only its capitalization differed.
