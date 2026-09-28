@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.17.1"
+  version: "1.17.3"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -103,10 +103,9 @@ run's memory as a plan — not by scanning less. The mechanics:
    risk-priority set never silently shrinks. Two persisted signals tell the loop whether it is actually winning:
    - **New-confirmed count per run** — findings confirmed this run that were **not already in `## Confirmed
      findings ledger`** (recorded in the coverage note). Successive runs should trend toward **zero** new.
-     After **K consecutive `new-scan`s with zero new confirmed findings and zero re-opened/regressed
-     findings** (default **K=2**), record the repo as **mature** and say so in the run summary — a *reported*
-     signal of diminishing returns, **never** a licence to reduce coverage: the next `new-scan` still sweeps
-     100% and still re-verifies open findings.
+     After **K consecutive `new-scan`s with at most 3 new-confirmed keys, zero found-late files and
+     zero re-opened/regressed findings** (default **K=2**), record the repo as **mature** and say so in the run
+     summary. The new-key count is the streak's input: a run that adds more than three keys to the ledger resets it, because a repository that is still yielding new sinks is not mature whatever its body count does.
    - **Found-late = shallow-coverage feedback**: a `new-scan` confirms a finding in a file with **no prior
      `## Confirmed findings ledger` entry** (previously swept clean — detectable from the persisted ledger, not
      the overwritten results files). That file got a shallow pass last time — record it as a `## Hotspots`
@@ -304,8 +303,9 @@ Launch one subagent:
 > false-positive patterns with the rationale that defeated them; refresh primitives/hotspots; bump
 > `last-scanned-sha`/`last-updated`; and append a run entry to the memory's **`## Coverage / depth notes`**
 > section — `new-confirmed=<n>`, any **found-late** files (swept clean last run, flagged now → also add to
-> `## Hotspots`), the updated `maturity-streak` (increment if new-confirmed=0 and no regressions, else reset
-> to 0; K=2 ⇒ mark repo mature), and per-lens deep-pass vs. thin areas — so the next `new-scan`'s
+> `## Hotspots`), the updated `maturity-streak` (increment if new-confirmed is at most 3, no found-late
+> files and no regressions, else reset to 0; K=2 ⇒ mark
+> repo mature), and per-lens deep-pass vs. thin areas — so the next `new-scan`'s
 > `scan-plan.md` can target the thin areas and track cross-run convergence).
 
 When D3 finishes, tell the user the report path and summarize the highest-severity findings. **In parallel
@@ -658,7 +658,7 @@ OUTPUT (single-agent mode)
   refresh project security primitives and hotspots, bump `last-scanned-sha` / `last-updated`, and append a run
   entry to the memory's **`## Coverage / depth notes`** section — `new-confirmed=<n>`, any **found-late** files
   (swept clean last run, flagged now → also add to `## Hotspots`), the updated `maturity-streak` (increment if
-  new-confirmed=0 and no regressions, else reset; K=2 ⇒ mark mature), and deep vs. thin areas per class — for
+  new-confirmed is at most 3 with no found-late files and no regressions, else reset; K=2 ⇒ mark mature), and deep vs. thin areas per class — for
   the next `new-scan`.
 
 ---

@@ -595,3 +595,16 @@ rg -n "createComplexityLimitRule\(\s*[5-9][0-9]{3,}|max_complexity:\s*[5-9][0-9]
 ## Core Principle
 
 Treat every public GraphQL operation as a **program** the client submits: bound its parse/validate/execute cost with depth, complexity, alias/directive/field caps, batch limits, pagination ceilings, timeouts, and request size limits — and design resolvers so list/cyclic fields cannot multiply work beyond those bounds.
+
+## Alias caps bound count, not effect
+
+A limit on the number of aliases per operation (`maxAliases` in graphql-armor / ApolloArmor, `graphql-no-alias`,
+custom validation rules) bounds how many times a field may be selected. It does not bound what each selection does:
+`a: pay(...) b: pay(...) ...` under a cap of 25 is still 25 payment calls, 25 reservations, 25 side-effecting writes in
+one request, each passing the same authorization check, with no idempotency between them. Treat an alias cap as a
+DoS mitigation only. For every side-effecting mutation reachable in one operation, the question is whether a repeated
+selection is idempotent or deduplicated by the resolver — a per-operation execution limit for that field, an
+idempotency key, or atomic reuse of the created resource.
+
+**SAFE** only when the resolver is idempotent or the schema rejects duplicate root selections of that field.
+**NOT a clearance**: a numeric alias cap, however low, on its own.

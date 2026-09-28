@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.13"
+  version: "1.50.17"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -89,24 +89,34 @@ to steer iterative re-scans). It is state, not a skill.
   as advisory-only and re-verify before relying on them.
 - Coverage discipline is unchanged: read every in-scope line and evaluate every applicable class regardless of
   what memory says.
+- One exception, for the report writer only and only at an unchanged commit — `git rev-parse HEAD` equal to the
+  file's `last-scanned-sha`: an `open` ledger row that no detection run re-confirmed this time is carried into the
+  report as `carried` records — one per block that the earlier report which confirmed it holds at that sink, each
+  copied from that report and labelled on its
+  second line `Carried: confirmed <date> at <sha> — not re-judged this run — source <report>`. The code it was judged
+  on is the code being reported on, so the judgement stands; the label keeps the reader informed; the row's
+  `last-verified` keeps the date of the judgement it carries. Detection runs never carry anything: they read memory as
+  hints and write their own evidence.
 
 **Writing it — single writer (the report/consolidation step only):** after the final pass, update the file in
 place. The file has exactly the sections of the template below; a run adds or edits rows inside them and never
 adds a section — the run's narrative, per-record evidence and dispositions live in the report, not here. A
-finding is one ledger row keyed by `class | file:line`, where `class` is the reference file stem
+finding is one ledger row keyed by `class | file:line`, where `line` is the sink's first line and `class` is the reference file stem
 (`authentication_jwt`, `ssrf`, never a finding title) and `brief` is at most fifteen words: a run that
 re-verifies it updates that row's `last-verified` and `status`; a run that finds it new appends a row with
 `first-seen sha`; the same key is never written twice. Record WITHDRAWN findings — a finding defeated by a named guard, type fact or deployment fact — as false-positive-pattern rows; a DOWNGRADED or DISPUTED finding is real, keeps its ledger row carrying its verdict, and is never a false-positive pattern. Write those rows **with the rationale
 that defeated them**; an Unverifiable (NEEDS CONTEXT) finding is not a false-positive pattern and is never written to that
 section — it stays a ledger row, status `open`, its brief naming the missing context; refresh project security primitives and hotspots by editing their rows; append exactly one
-line to **Coverage / depth notes** per run (sha, new-confirmed, found-late, maturity-streak, deep pass, thin
+line to **Coverage / depth notes** per run (sha, new-confirmed, found-late, maturity-streak — incremented when
+new-confirmed is at most 3 and found-late is empty, else reset to 0 — deep pass, thin
 areas) — consumed by iterative re-scans (`new-scan`) to steer the next run's depth; set `last-scanned-sha` to
 `git rev-parse HEAD` (or `unknown` if not a git repo) and `last-updated` to today. History is kept, never
 deleted: a row whose status becomes `fixed` or `superseded` moves, as one line in the same row format, to
 `.llm-sast-scanner-cache/project-memory-archive.md` (append-only; detection runs never read it), and when
 **Coverage / depth notes** holds more than ten run lines the oldest are folded into its single
 `earlier runs: <n>` line. The file's size is bounded by its keys, not by a line budget: at most one ledger row
-per `class | file:line`, one false-positive row per pattern, one primitive or hotspot row per item, and the run
+per `class | file:line` — the line is the sink's first line, so a record whose `File:` reads `Dockerfile:45-55` keys the row
+`Dockerfile:45`, and a row written with the range is the same key, merged into the single-line row, never a second row — one false-positive row per pattern, one primitive or hotspot row per item, and the run
 lines above — a confirmed row is never dropped, grouped or shortened to save space, and a file that grows only
 because more distinct sinks were confirmed is the intended result. Detection/lens runs are **read-only** on
 this file.
@@ -814,7 +824,17 @@ Invocation: <invocation>
 Base SHA: <sha>
 
 ## Executive Summary
-<2-3 sentences: total findings by severity, most critical issue>
+| Severity | Findings |
+|---|---:|
+| Critical | <n> |
+| High | <n> |
+| Medium | <n> |
+| Low | <n> |
+| Informational | <n> |
+| Total | <n> |
+<2-3 sentences: most critical issue, what the numbers mean for the reader. The table's five counts are the records under
+the matching severity headings — the same counts the Severity Histogram reports — and Total is their sum; a warning a
+flow requires the summary to open with (non-convergence) precedes the table>
 
 ## Critical Findings
 ## High Findings
