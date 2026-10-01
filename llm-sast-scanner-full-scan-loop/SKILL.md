@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.22.50"
+  version: "2.25.8"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -77,7 +77,7 @@ fewest total lines so far, ties by the lowest partition number. The same manifes
 partitions, and a run at the same SHA is comparable worker by worker with the one before it. The result must still
 pass the checks — no partition above 40% of the `source` lines or of the entry points, every partition within 15%
 of one third of the manifest — and a failed check means one unit is too large: split only the largest unit of the
-class that failed, by the quantity that failed, one level deeper and run the procedure again; never move a file by hand — units move only by the reassignment rule below — and never re-form units
+class that failed, by the quantity that failed, one level deeper and run the procedure again; never move a file by hand — units move only by the reassignment and move rules below — and never re-form units
 that passed. The remedy repeats until the checks pass or the largest unit of the class that failed — by the quantity that
 failed — is itself a single file; only then does no split remain, and the check is recorded in `scan-plan.md` as
 `check failed: <check> — <file> holds <n> of <m> <source lines | entry points> (<share>%)`. The cut does not stand
@@ -85,12 +85,29 @@ as formed while a partition is over a cap: the remedy continues by reassignment 
 re-run with the over-cap partition's smallest whole units moved, in assignment order, to the partition with the
 lowest share of the failed quantity, one unit at a time, until every partition is under its caps or no move leaves
 every partition under them — and STEP 1 ends with one `checks:` line, written above `workers dispatched:`, `checks: pass — <the shares>` or, once remedy and reassignment leave no move,
-`checks: failed — <each failure> | <the shares>`, which the report repeats.
+`checks: failed — <each failure> | <the shares>`, which the report repeats. A line share outside the band is remedied the
+same way — the largest unit by lines, of any class, split one level deeper while it is not a single file — and then by
+moves, one at a time: the partition with the most lines that has a movable unit gives the partition with the fewest
+the smallest movable unit whose move puts both inside the band, else its smallest movable unit, a unit being movable
+when it has more than zero lines, is smaller than the difference between the two partitions' lines and puts the
+receiving partition above neither 40% cap, of the source lines or of the entry points — ties to the lowest partition
+number, then to the unit first in assignment order; each such move narrows the spread, so
+the moves end — a moved unit's entry points moving with it, their list lines' partition column rewritten, until every
+partition that no single file holds above the band is within it or no unit is movable; the manifests and unit lines are
+rewritten to the cut that results. A line share writes no `check failed:` line of its own, and `--checks` prints a
+`remedy:` line under its `checks:` line whenever a line share has no `(one file: …)` and no file by itself holds more
+than about 43% of the lines (100% less twice the band's floor, which leaves the other two no room) — it never reads
+units, so the split and the moves decide whether the cut can still be balanced — and that line is never copied into the
+plan. One
+first run's cut left a partition at 41% of the lines, a lockfile a fifth of the manifest, and recorded its own
+`check failed:` over it instead of moving the small units that would have passed.
 The line is the output of `python3 <this skill's directory>/recheck.py --checks`, run from the target once the entry list
 and the partition manifests are written — the one computation recheck item (19) repeats — copied verbatim, never
 composed from this session's own arithmetic: while the command prints `failed` for a share, the remedy and the
-reassignment continue, except for a failure that ends `(one file: <path> holds <n> of <m> entry points)` — a file is
-never split, so no move can fix it; the line is written as the command prints it. It counts each entry in the partition whose manifest holds the entry's file and fails a list
+reassignment continue, except for a failure that ends `(one file: <path> holds <n> of <m> entry points)` or
+`(one file: <path> holds <n> of <m> lines)` — a file is never split, so no move can fix it; a line share without it is
+written, once no split and no move remains, as the command prints it, and item (19) reads it as a mismatch even then — the
+run's record that its cut could not be balanced; the line is written as the command prints it. It counts each entry in the partition whose manifest holds the entry's file and fails a list
 line that names no partition, or one other than that file's — a bare `<n>` reads as `p<n>` — which is corrected before
 any dispatch, because workers are assigned their entry points by that column. Nine entry lines of one plan once named
 their partition as a bare number, and a recheck that read only `p<n>` computed a failing share for a cut that passed. A scan plan carrying a
@@ -145,11 +162,18 @@ llm-sast-scanner-full-scan-loop v<this file's frontmatter version>`, `started: <
 this file is first written>` and `earlier-reports: <n> — <name> <bytes>, ...` — every `sast_report-*.md` already in
 `<dir>` with its byte size, or `earlier-reports: 0`, `ledger rows at start: <n>` and `previous run residual: <…>` — before anything else in this run reads or writes `project-memory.md`, STEP 1
 copies it to `.llm-sast-scanner-cache/project-memory.md.pre-write-<started>` — that exact name, `<started>` the
-`started:` row's value — and `<n>` is the output of a command that counts, in the copy, the lines between the
-`## Confirmed findings ledger` heading and the next `## ` heading that match the ledger row pattern of STEP 3's recheck
-item (6), the same measure as `ledger rows after`, and no line outside that section: the false-positive section's rows
-share the shape, and six runs in a row counted the whole file and corrected the row afterwards; `0`, over an empty copy,
-when the file is absent or empty. An existing `project-memory.md` is the ledger every later run builds on: STEP 1
+`started:` row's value — and the `ledger rows at start:` row, left out of the plan's first write and added among these
+rows before `workers dispatched:` is written, is the whole line
+`python3 <this skill's directory>/recheck.py --ledger-start` prints, run from the target once this run's `scan-plan.md`
+holds its `started:` row and the copy is made, copied verbatim and never composed — the command refuses a plan that
+holds a `workers dispatched:` line (the previous run's plan still in place, whose copy is that run's ledger, or this
+run's past STEP 1, whose row is corrected by appending the count recheck item (16) names), and it refuses a copy holding
+a different number of ledger rows from `project-memory.md`, since nothing before the dispatch adds a ledger row to the
+memory (a first run's template holds none): the command counts, in the copy the `started:` row names and no other, the lines between the `## Confirmed findings ledger` heading and the next `## `
+heading that match the ledger row pattern of STEP 3's recheck item (6), the same measure as `ledger rows after`, and no
+line outside that section — the false-positive section's rows share the shape, six runs in a row counted the whole file
+and corrected the row afterwards, and one session counted the previous run's copy and wrote its 363 over a ledger of
+448; `0`, over an empty copy, when the file is absent or empty. An existing `project-memory.md` is the ledger every later run builds on: STEP 1
 copies it and never deletes it, re-creates it or initialises it from the base skill's template — only an absent file is
 initialised, after its empty copy is written — and an existing `scan-plan.md` is copied into `previous-run-<started>/`
 before this plan replaces it, never discarded; at a `new-scan` the copy's ledger is what the Same-commit carry and the
@@ -265,10 +289,15 @@ names that file (the path test below):
 > ledger no caller enumeration is owed, and none is written in its place. When `project-memory.md`'s confirmed-findings ledger is non-empty, also run the
 > ledger sink caller enumeration: for every ledger sink whose file is in your partition, trace backward to every entry point
 > repository-wide, state per sink which entry points were already reported and which are new, run each new one
-> through Source→Sink and the Judge as its own candidate, and write the line `new entry points: <count>` (`0` is a
-> valid count); write `ledger empty` when there was no ledger. Before the final line, check your own file as the gate
+> through Source→Sink and the Judge as its own candidate — and where your trace shows a sink's recorded finding does
+> not hold, because a named guard, type fact or deployment fact defeats it, write for that sink one line
+> `ledger refuted: <class> | <sink file:line> — <that guard, function or file:line>`
+> with the ledger row's own class and sink, never a finding or a clearance in its place — and write the line
+> `new entry points: <count>` (`0` is a valid count); write `ledger empty` when there was no ledger. Before the final line, check your own file as the gate
 > will: its first line is the `procedure:` line above; it holds `ledger empty` on an empty ledger and `new entry points:
-> <count>` on a populated one; every record
+> <count>` on a populated one; each `ledger refuted:` line reads
+> `ledger refuted: <class> | <sink file:line> — <the guard>`
+> with a ledger row's class and sink as the ledger holds them — STEP 3 reads no other form; every record
 > opens with a severity token — `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[LOW]` or `[INFO]` — before its `VULN-` id, carries a
 > `Reference:` line naming a file of the base skill's `references/` directory, and cites in its `File:` line a path
 > that exists under the target — its `:line` dropped, each tested with `test -f <path>` from the target directory, never
@@ -549,7 +578,12 @@ a state check sitting mid-chain is in scope for its own class, not merely a step
 
 Each subagent states in its results file, for every sink it owns: the entry points it traced to, the hop chain
 for each, which were already reported, and which are new. Write `new entry points: <count>` — `0` is a valid
-answer only after tracing.
+answer only after tracing. A sink whose recorded finding the trace shows does not hold — a named guard, type fact or
+deployment fact defeats it — gets one line `ledger refuted: <class> | <sink file:line> — <that guard, function or
+file:line>`, the ledger row's class and sink as the ledger holds them, on a line or list item of its own — a mention
+inside a sentence (`considered … but rejected`, `e.g. …`) is read as prose. The line is a claim for STEP 3 to test, never a
+verdict of its own: a confirmed finding outranks one worker's reading until Step 6 withdraws every block of it, as it
+outranks a clearance.
 
 **STEP 3** — Consolidate by executing the skill's D3 consolidation procedure IN ITS ENTIRETY AND IN ORDER. Do
 not substitute a shortened list of steps for it. STEP 3 begins only after the artifact gate below has passed for every
@@ -586,6 +620,8 @@ opening `Adversarial: DOWNGRADED` or `Adversarial: DISPUTED` that does not match
 `file:line` — is an invalid cell, so a bare verdict word or a clause naming nothing counts; the recheck command
 contains that expression verbatim; (3) `first-line tags` — every body block's first line
 ending `[CONFIRMED]` or `[LIKELY]`; (4) `merges with a different entry point` — the number of `merged` rows whose entry point, sink `file:line` or class differs from their target body row's, required to be 0,
+a duplicate the writer judged under the **Duplicates** rule aside — its `duplicate candidate:` line `merged into` the kept row,
+the lower worker severity merged and, across keys, the kept block's `Also:` line and the merged key no ledger row of the copy —
 each entry point cell read as the list entry it names — a cited `file:line` as the entry at it or up to three lines
 below it in that file, a bare name as the one entry holding it, a name two entries share as written; (5) `config clearances rewritten` — the phrase search over the
 worker files' disposition lines, a finding record's own lines (its `Judge:`, its `Impact:`) not among them; (6) `ledger rows after` and `archived` — `ledger rows after` is the number of lines in `project-memory.md`'s
@@ -595,15 +631,16 @@ file, `duplicate-key rows` the number of those lines beyond the first for any on
 is the sink's first line, so a row written with a range (`Dockerfile:45-55`) duplicates the row `Dockerfile:45` — required to
 be 0 after the write, `ledger rows before` the pre-write copy's row count, `duplicate-key rows merged` the copy's
 duplicate-key rows (none may remain), `after` equal to `before − merged + new keys` less the copy keys that left the ledger
-this run (archived now; none leave at an unchanged commit; a title-class row STEP X corrects onto a stem row is merged, not
+this run (archived now; at an unchanged commit only a key whose every block Step 6 withdrew leaves; a title-class row STEP X corrects onto a stem row is merged, not
 gone, and counts in `merged`) — `archived` itself is the archive file's all-time count — and
 `ledger present` the number of distinct body `File:` sinks whose `file:line` — by
 its first line — appears in the ledger section, each by a command that states that pattern; (7)
 `earlier reports` — each listed file present at its recorded size; (8) the close-out equations; (9) `header versions` — the report's `Analyzer:` line and the scan-plan's `wrapper:`
-row naming each skill's version as its own frontmatter states it, never another skill's; (10) `headings` — the
+row naming each skill's version as its own frontmatter states it, never another skill's, and the report's `Base SHA:`
+line, the first before its first `## ` heading, the scan-plan's `base-sha`, the sha alone; (10) `headings` — the
 report's `## ` headings are the severity sections, the base skill's fixed sections and one `## Appendix`, in that
 order and nothing else, so a working-notes, draft or duplicate section anywhere is a mismatch; (11) `maturity
-worker records` — the maturity line's `worker records` value equals the table's rows minus its `carried` rows, and its
+worker records` — the maturity line's `worker records` value equals the table's rows minus its `carried` and `refuted` rows, and its
 `vs` pair states the newest earlier report's close-out `table rows` and `body blocks`; (12) `new keys` — the
 number of distinct `class | file:line` keys in `project-memory.md`'s ledger section that have no row in the run's
 pre-write copy, keys compared by the sink's first line (a range twin of a copy row is not a new key), by a command that
@@ -630,7 +667,8 @@ plan copy's last `recheck: ledger rows after`, else the newest report on disk wr
 `ledger rows before <n> | after <m>`, else its own pre-write copy's count; (17) `non-stem classes` — the ledger rows in `project-memory.md` and the rows in the disposition
 table whose class is not the file stem of a file in the base skill's `references/` directory, the stems listed by a
 command over that directory, counted `<ledger>/<table>` and required to be `0/0`; (18) `rekeyed to stem` — the pre-write
-copy's rows under a class that is not a stem whose sink now stands in `project-memory.md` under a stem, against the
+copy's rows under a class that is not a stem whose sink now stands in `project-memory.md` under a stem — or, for a key
+Step 6 withdrew in every block, in the archive's `superseded` row — against the
 appendix's `rekeyed to stem <r>`, with `trail missing <x>` the number of those whose new brief lacks ` was <old class>`,
 required to be 0; (19) `checks` — the scan-plan's `checks:` line reads `pass` only if it should: the entry-point share of every partition, each entry of the `## Entry points` list counted in the partition whose manifest
 holds its file and the list's partition column required to agree, is at most 40%, and every
@@ -650,7 +688,7 @@ scan-plan's `continuity join: <n> rows carry a previous verdict — <ids>` again
 carried, voided and bare, with `n` equal to the ids listed and `listed rows bare <x>` — listed rows whose block's
 `Adversarial:` line is a bare `STANDING` — required to be 0; a join line without its ids is a count nobody can walk, and
 a run whose `earlier-reports:` row reads `0` has nothing to join, so its absent join line reads as `0`; (23) `sentinel` — the report's last non-empty line is `<!-- LLM-SAST-COMPLETE -->`; (24) `not re-found` — every key of
-the pre-write copy — read after STEP X's class correction — that holds neither a body record nor a carried row this run still has its ledger row and its brief carries
+the pre-write copy — read after STEP X's class correction — that holds neither a body record, a carried row nor a `refuted` row this run still has its ledger row and its brief carries
 `not re-found <this run's date>`, counted `<marked>/<such keys>` with `rows gone <g>`, required equal and `0`: the
 same-commit rule's mark is how a later reader tells a miss from a fix, and one write left one hundred and
 twenty-eight missed sinks unmarked while the run ended clean; (25) `wave rosters` — the scan-plan's `wave roster <k>:`
@@ -665,22 +703,24 @@ worker had ended, may have been rebuilt since and is not read — and a first-at
 full `date` output is named on the line, since it cannot be read; a `wave <k> complete: <time>` line of its own is read as that wave's `complete`
 when its `wave <k>:` line carries none; (26)
 `carried` — at an unchanged commit, as the Same-commit carry paragraph reads it, the `carried` rows equal the blocks that the copy's `open` keys — read after STEP X's
-class correction — without a row of any other disposition this run hold in their newest earlier report, `s` the count of such keys no earlier report holds
-(recomputed from the reports), every carried row has its block, every block's `Carried:` line carries the row's
-`last-verified` cell as the copy holds it and the scan-plan's `base-sha` and names the newest earlier report that holds a block with the same
-sink whose reference stem is the row's class and whose verdict honours the key's standing downgrade, the block's
+class correction — without a row of any other disposition this run, a `refuted` row aside, hold in the newest earlier report holding a block of the key that is a source, less the key's `refuted` rows — a block citing a line past the end of a file of the target, or held by a report whose `Base SHA:` does not name the scan-plan's `base-sha`, being no source, and `sources citing past the end <p>` counting the past-end blocks of those keys passed over, from the newest report of this commit holding a key down to and including its source, or in all of them at this commit when it has none — `s` the count of such keys no earlier report holds in a block that is a source (recomputed from the reports), every carried row has its block, every block's `Carried:` line carries the row's
+`last-verified` cell as the copy holds it and the scan-plan's `base-sha` and names the newest earlier report that holds a block with the same sink whose reference stem is the row's class, whose verdict honours the key's standing downgrade and that is a source, the block's
 other lines match one of that report's blocks of the key word for word (heading id, `Worker record:` and `Carried:` lines
 aside, whitespace collapsed) with no source block copied twice, and every carried row's ledger line is the copy's line
 unchanged, its sink cell read by first line (a lone range row rewritten as `Dockerfile:45` with every other cell intact is the
 same row) — or, for a key the copy held as range twins or under a title-form class STEP X corrected, the one row the merge
 or correction left, its sha, `last-verified` and status cells one copy row's and its brief holding every copy row's brief
 (a twin dropped with its brief is a loss even when the surviving row is byte-identical) — counted
-`<rows> | blocks <k> | sources verified <v>/<k> | verbatim <w>/<k> | without source <s> | expected <e> | ledger rows altered <a>`
-with `a` required zero and the close-out's and the maturity line's `carried` values both equal to the rows; at a
+`<rows> | blocks <k> | sources verified <v>/<k> | verbatim <w>/<k> | without source <s> | sources citing past the end <p> | expected <e> | ledger rows altered <a> |
+rows without source altered <x>` with `a` and `x` required zero — a key without source keeping its row as the copy holds it, or the one row a range-twin merge or STEP X's class
+correction left, `open`, every earlier mark kept and its brief gaining only this run's `not re-found <date>` — and the close-out's and the maturity line's `carried` values both equal to the rows; at a
 changed commit the item reads `not applicable` and requires zero carried rows; (27) `summary table` — the Executive Summary's severity table, the first table there whose header opens `Severity` (a
 warning's own table of uncovered partitions or lenses may precede it), holds one row each for Critical, High, Medium, Low, Informational and Total, each severity's number equal
 to the records counted under that heading and to the histogram's line, Total their sum, counted per row as
-`<table>=<body>=<histogram>` with `total <t> = <sum>`; a missing row or table reads `absent`; (28) `previous run residual` —
+`<table>=<body>=<histogram>` with `total <t> = <sum>`; a missing row or table reads `absent`; and its `Confirmed` and
+`Likely` columns, found by their header names, split each row by the tag closing its records' headings — `[CONFIRMED]`
+or `[LIKELY]` — Total's their sums, counted `confirmed/likely <row> <c>/<l>=<c>/<l>`, a table without the two columns
+reading `columns absent` and a record whose heading carries neither tag failing the item; (28) `previous run residual` —
 the scan-plan's `previous run residual:` row against the last `recheck: mismatches` line of `previous-run-<started>/scan-plan.md` (or, when that copy has no such line, against the copy's own `previous run residual:` row),
 count and items alike, `none` only when no earlier plan exists; a copy missing where an earlier run left a plan — a
 `previous-run-<started>/` directory holding moved worker files but no plan, or a cache that is an earlier run's as item
@@ -698,7 +738,7 @@ the files changed after their gate — before the writer's prompt was written, a
 standing; after it, a write by the writer or a repair, which read the worker files and never write them; (30) `report name` — the report name's timestamp at or after `started:` and no later than the file
 it names, written or renamed, a later one being a time chosen rather than read; a `report:` row naming a file created
 before `started:` names an earlier run's report, which is the user's and is never renamed; (31) `worker record ids` — the
-identity check of the disposition table: every `worker record` id outside `promoted` and `carried` rows names a record
+identity check of the disposition table: every `worker record` id outside `promoted`, `carried` and `refuted` rows names a record
 of the current worker files, every such record has a row under its own id — two records of one worker file under one id
 take two rows, and the line names them — and no id is on more rows than records hold it; (32) `withdrawn lines` — every
 `withdrawn` row has its appendix line `withdrawn: <worker record> — <Step 6 | citation>: <one line>`, no such line names a
@@ -712,8 +752,7 @@ first-attempt dispatch lines beneath each `wave <k>:` line timed at or after tha
 for a wave already opened opening nothing — or, where every wave's start is read and the plan's layout and its start
 times place a line in different waves, the same count taken by start times; the line's presence is item (13)'s; (36) `memory header` — the written memory holds, above its `## Confirmed findings ledger`
 heading, `scanner-version:`, `last-scanned-sha:` equal to the scan-plan's `base-sha`, `last-updated:` a date from the
-run's `started` to the memory's own write, and the hints notice; (37) `record cells` — every `body` and `merged` row's
-sink and class cells are its worker record's own — the first sink of its `File:` line, the same `path:line` read by
+run's `started` to the memory's own write, and the hints notice; (37) `record cells` — every `body` and `merged` row's sink and class cells are its worker record's own — the first sink of its `File:` line, the same `path:line` read by
 first line, and a stem its `Reference:` names; a record with no `path:line` there makes the row `unverifiable` — and, when the
 record states an `Entry point:` line, its entry point cell names that entry point. The cell is written as the `## Entry
 points` list writes it and the record in its own words, so the two meet when either holds the other, or when they share
@@ -723,7 +762,8 @@ record's `Flow:` line or a line of its worker file that names its id; a cell of 
 of them in the `Entry point:` line; and a cell that copies the row's sink cell (unless the record's entry point is that
 line), or whose only words are the report's own — `worker entry point`, `see VULN-…`, `—` — names none. A record with no `Entry point:` line
 leaves the writer the list's entry or `unavailable`, and its cell is not read — and each body block's `File:` and `Reference:` are that record's, so a merge is read
-from what the workers wrote; (38) `verdict scope`
+from what the workers wrote; a record whose own sink lies past the end of its file makes its row `withdrawn` as (46)
+reads it, never copied into the row; (38) `verdict scope`
 — every `body` row's verdict follows its worker record's severity, the one Step 6 saw: a Step 6 verdict when it is in
 `adv=`, `not run` when it is outside, a verdict the continuity join carries excepted; a block rendered below its
 record's severity carries the `DOWNGRADED` or `DISPUTED` verdict that lowered it; `merged`, `withdrawn` and
@@ -736,8 +776,36 @@ file holds it; (42) `scope exclusions` — the appendix reproduces every row of 
 `excluded: <p> paths / <l> lines` has `p` its row count and `l` the lines of the regular files it names, counted from
 them; (43) `class clearances` — `class clearances <n>` is the number of lines across the worker files that hold
 `SAFE in p<n> — no <surface>`; (44) `pass log` — one entry per pair, its passes the worker file's sentinel `passes=`;
-(45) `routed hand-offs` — `handoff-table.md` exists and `routed: <n>` counts its rows. Two lines are readings, not
-items: `recorded sets <n> | lone mismatches lines <k>`, a lone line being a subagent's own run appended to the plan, and
+(45) `routed hand-offs` — `handoff-table.md` exists and `routed: <n>` counts its rows; (46) `citations` — every `file:line`
+a body, promoted or carried block cites on its `File:` or `Flow:` line in a file of the target lies within that file,
+`checked <c> in <b> blocks | past the end of their file <k>`, `k` required `0`, each block read to its next `#`, `##` or `###` heading and outside fenced code, a file's lines counted as `grep -c ''` counts them: a worker's record whose `File:` sink lies past
+the end fails the base skill's Citation & Evidence Verification and is `withdrawn` with a `citation:` line, never
+re-cited, since (37) reads the sink against the record, and every `merged` row whose own sink is that sink and whose
+body record is that VULN id is withdrawn the same way, while one merged into it from another sink becomes a `body` row
+of its own, and a `duplicate candidate:` line naming a withdrawn row goes — a body block whose sink is not its record's is rendered from the record instead, unless the
+record's sink lies past the end too, and a promoted row's block, rendered from the record the same way, goes with its
+row when the record is withdrawn or has none, one `withdrawn` row per record; a `Flow:` hop, another citation on a `File:` line or a sink's range end past the end is corrected from the source, as that verification
+requires, or the record withdrawn the same way; and a carried block citing past the end is (26)'s — its key carried
+from its source, or counted without one; (47) `refutations` — at an unchanged commit, the worker files' `ledger refuted:`
+lines, outside fenced code, whose class and sink name an `open` key of the copy that no row of another disposition
+holds, each such key accounted for once, every source block of it either a `refuted` row or a carried row: all
+`refuted`, the key gone from the ledger, its row in the archive with status `superseded` and a false-positive pattern
+row at its class and sink; some, its ledger row kept; none, carried as (26) reads it; or, with no source block, neither
+— and the appendix's one `refuted:` line for it naming that outcome, no `refuted` row or `refuted:` line at any other
+key, and `refutations: <n>` counting the keys, `<n> | withdrawn <w> | partly withdrawn <q> | stands <s> | no source <x> |
+refuted rows <r> | unaccounted <u>`, `u` required `0`, the line's `n of m` and `carried as` ids those of the key's rows;
+a worker's line the checker cannot read, or one naming no row of the copy, is shown on the item's line — `worker lines
+unread <n> | naming no ledger row <o>` — and is no mismatch, its key read as one no line names; at a changed commit the
+item reads `not applicable` and requires zero `refuted` rows; (48) `duplicates` — every pair `--duplicates` lists, computed
+from the table's `body` and `merged` rows and the plan's `## Entry points` list, has one `duplicate candidate:` line whose
+answer the table bears out — `merged into` the kept block's VULN id with each row of the pair that row or merged into it,
+`distinct: <clause>` with neither merged into the other, `linked` for two `body` rows at two keys whose record to merge
+away holds a ledger key of the copy and whose blocks name each other on `Also:` lines — a line on a pair the table
+answers agreeing with it, and `duplicate candidates: <n>` counting the lines, `pairs <p> (entry <e> | same <s> | near
+<x>) | answered merged <m> | distinct <d> | linked <l> | unanswered <u> | lines at no pair <z> | pairs the table answers
+<t> | repeated clauses <r>`, `u`, `z` and `r` required `0` — `r` counting the `distinct` clauses that each answer three or
+more pairs of two or more class pairs over two or more groups of the records those pairs join; nothing is merged by the
+item, so a pair answered with its own `distinct` clause stands. Two lines are readings, not items: `recorded sets <n> | lone mismatches lines <k>`, a lone line being a subagent's own run appended to the plan, and
 `recheck: repair none — …`, printed when every mismatch in the set reads a STEP 1 or STEP 2 line.
 
 Before it starts the writer, the session writes the writer's prompt to `.llm-sast-scanner-cache/writer-prompt.md`,
@@ -798,10 +866,11 @@ describe the report as it is when the run ends: after every subagent that wrote 
 writer's, a repair's — and after any write of this session's own, the set is recorded again with `--record`, earlier sets kept; a report written after the last
 `recheck:` set has not been rechecked, and the run does not end on it: before the final message this session compares
 the report's modification time with the last `recheck:` set's and records a set again with `--record` if the report is newer. D3 includes, among others: negative-verdict re-derivation, the
-cross-lens shared-primitive rule, the BURIED-SINK AUDIT, Adversarial Impact Validation, and citation
-verification. Run all of them. Whoever writes the report — this session or a consolidation subagent — reads
+cross-lens shared-primitive rule, the BURIED-SINK AUDIT, Adversarial Impact Validation, and citation verification — never of a carried block, which the
+Same-commit carry reads. Run all of them. Whoever writes the report — this session or a consolidation subagent — reads
 `scan-plan.md` first: the header's `Invocation:`, `Model:` and `Base SHA:` lines are copied from its
-`invocation`, `model` and `base-sha` rows, never taken from the writer's own session; `<target>` in the title is
+`invocation`, `model` and `base-sha` rows, never taken from the writer's own session — the next run's same-commit
+carry reads `Base SHA:` to tell a report of its commit; `<target>` in the title is
 the target directory's basename; `Analyzer:` names the three skills with their frontmatter versions — the wrapper's
 from the scan-plan's `wrapper:` row, the other two from the frontmatters the writer read; a name without a version
 is a missing header value.
@@ -826,8 +895,8 @@ these cells. The table is built from
 this run's worker files alone: a previous run's table, a previous report and its VULN ids are not inputs to any cell,
 and a table found in the cache from an earlier run is deleted, not extended. Before Step 6 the table passes an identity
 check — the set of `worker record` ids in the table equals the set of Judge-passed record ids in the current worker
-files, in both directions, `promoted` rows excepted — their `worker record` cell reads `promoted/<lens>/p<n>` and is
-the one id form the check ignores; a table that fails is deleted and rebuilt, never patched, and recheck item (31)
+files, in both directions, `promoted`, `carried` and `refuted` rows excepted — a promoted row's `worker record` cell
+reads `promoted/<lens>/p<n>`, a carried or refuted row's `ledger`, and those are the id forms the check ignores; a table that fails is deleted and rebuilt, never patched, and recheck item (31)
 repeats the check on the table as written. Here `worker record` is
 `<lens>/p<n>/<the worker's own finding id>`, the id exactly as the record's heading states it: the record headed
 `[MEDIUM] VULN-001` in `deep-access-auth-p2-results.md` is `access-auth/p2/VULN-001`, never an id composed from the lens
@@ -837,13 +906,15 @@ promotion, or a finding at another entry point of a record that names several. E
 point (route, handler, tool or consumer name), a `path:line` sink, a class name, a disposition word, a verdict as
 defined below, or a VULN id;
 a cell holding anything else — a cross-reference, a placeholder, a blank, a description, a sink without its `:line`,
-a disposition outside the four words below and the `promoted` and `carried` rows' own — is an **invalid cell**. An invalid cell is filled from the row's worker
+a disposition outside the four words below and the `promoted`, `carried` and `refuted` rows' own — is an **invalid cell**. An invalid cell is filled from the row's worker
 record; when the worker record does not hold the value (a `File:` with no line number), the row's disposition
 becomes `unverifiable` with that reason and its body block moves to the Unverifiable section.
-`disposition` of a worker record's row is exactly one of these four (a `promoted` or a `carried` row, defined below, is
-not a worker record's and carries its own word):
+`disposition` of a worker record's row is exactly one of these four (a `promoted`, a `carried` or a `refuted` row,
+defined below, is not a worker record's and carries its own word):
 - `body` — the record is a body record; `body record` holds the VULN id assigned to it here, in the table;
-- `merged` — the record has the same entry point, the same sink `file:line` and the same class as a `body` row;
+- `merged` — the record has the same entry point, the same sink `file:line` and the same class as a `body` row — each
+  entry point read as the `## Entry points` entry it names, never by its wording, so `POST /x (a.ts:20)` and
+  `a.ts:20 — HTTP route — POST /x` are one — or it is the same defect as a `body` row by the **Duplicates** rule below;
   `body record` holds that row's VULN id. A record whose entry point differs from every `body` row is never
   `merged`;
 - `withdrawn` — Step 6 returned WITHDRAWN, or Citation & Evidence Verification failed, and nothing else — a record that
@@ -852,12 +923,56 @@ not a worker record's and carries its own word):
   line>`, so the reason has a home outside the cells;
 - `unverifiable` — the record moved to the Unverifiable section, whose entries are numbered `UNV-<nnn>` in order;
   `body record` holds that id.
+
+**Duplicates.** Two workers often report one finding: an added lens re-applies classes a base lens owns, and a worker
+traces past its partition. `python3 .llm-sast-scanner-cache/recheck.py --duplicates`, run from the target once the
+table is written, lists every pair of `body` and `merged` rows that may be one finding, each read from its worker
+record's own `Entry point:` line — `entry`: one class and sink,
+both records' entry points naming one list entry by `file:line` and by name, one finding by the identity rule; `same`: one
+class and sink, entry points shown one — the same wording, list entry or unique route — or one of them `unavailable`,
+a record that states no `Entry point:` line being `unavailable` unless its `Flow:` line or the lines naming its id hold
+every route its cell names or meet the cell as item (37) reads a cell, and an `unavailable` entry point told apart
+from none — and, at a line of a configuration or infrastructure file (a Dockerfile, Makefile or Jenkinsfile, any YAML
+— CI, a deployment manifest, a Helm template —, Terraform or Bicep, build, server or environment config (INI, TOML,
+`.conf`, `.properties`, `.env`, `.htaccess`, a Caddyfile or Procfile) or a template of one, a site's `index.html` shell
+— no other page, since a filename cannot tell a static page from a template rendered once per route, and no
+`index.html` under a template, view, layout, partial, include or `jinja2` directory — and no code file whatever its name),
+any two unless the list resolves their entry points — by list entry or unique route — to entries with none in common, or
+both cells name routes with none in common;
+`near`: another class or sink line within five lines of one file, at
+one entry point — or another class at one line of such a configuration or infrastructure file, unless the list resolves
+their entry points to entries with none in common or both cells name routes with none in common — with each record's
+worker severity and whether its own `class | file:line` key is a ledger row of the
+pre-write copy. The writer judges every listed pair from its two records, and nothing is merged by rule. An `entry` pair
+is one finding by the identity rule and is merged, unless its records show two entry points the list resolved to one —
+then `distinct: <the two entry points>`. A `same` or `near` pair is one finding when both records name the same absent
+check on the same data path from one entry point; two entry points, or one topic with two different checks, parameters
+or guards, are two findings. A class difference is what makes a pair `near`, never what tells it apart, and a
+`distinct` clause names what differs — the two entry points, or the two checks, parameters or guards — in its own pair:
+one clause written for pairs of different classes names it in none — a group of records that pair with each other may
+share one clause naming every difference — and recheck item (48) counts it. In a merge the
+record of the lower worker severity is `merged` into the other — on a tie the one holding a ledger key of the pre-write
+copy is kept, then a `[CONFIRMED]` record over a `[LIKELY]` one, else the one `--duplicates` lists first — and the kept
+block gains a last line after `Reference:`, `Also: <class> — <worker record> at <sink file:line>`, when the merged
+record's class or sink differs, so neither class leaves the report, or when it names a fix the kept block lacks, with
+` — <that fix>` after it. A record whose own key is a ledger row of the pre-write copy is never merged into another key —
+merged, that row would read as not re-found — so when the record to be merged away holds one, both stay `body` and the
+pair is `linked`: two findings in the counts, the price of keeping the ledger row, each block's last line after
+`Reference:` naming the other on an `Also:` line. The appendix answers every listed pair on one line,
+`duplicate candidate: <worker record> / <worker record> — merged into <the kept block's VULN id>`,
+`— distinct: <what differs>` or `— linked`, then `duplicate candidates: <n>`, the number of those lines; a pair the table already
+answers — one key whose two rows name one entry point, one merged into the other, or two rows merged into one body row —
+is not listed, and a line on it that agrees is no stray; a merge whose two records name two list entries is two findings
+whatever their cells read. A wrong `merged into` folds a distinct finding into the kept one — its record and row stay,
+its block and count do not — so a pair is merged only on the records' own evidence. A merge is made before the body, the histogram and the counts are taken, like every
+merge. One run carried twenty-nine `entry` pairs as separate findings, the same defect at two severities.
+
 `verdict` is Step 6's result for the row, written into the table before any body block is rendered: `STANDING`,
 `STANDING — downgrade voided: <named thing> is hop <n> of the Flow`, `DOWNGRADED — <trigger>: <the named thing the
 attacker must hold>`, or `DISPUTED — <one clause>` for every `body` row whose worker record's severity — the severity
 Step 6 saw, before any downgrade — is in `adv=`; `not run` for a `body` row whose record's severity is outside `adv=`,
-so a record Step 6 disputed or downgraded below `adv=` keeps the verdict that lowered it; a `carried` row's cell is the copied block's `Adversarial:` verdict as it stands; `n/a` for every
-other row. Any other content is an invalid cell, and so is a cell that is
+so a record Step 6 disputed or downgraded below `adv=` keeps the verdict that lowered it; a `carried` row's cell is the copied block's `Adversarial:` verdict as it stands; a `refuted` row's is
+`WITHDRAWN — <the guard its worker's line names>`; `n/a` for every other row. Any other content is an invalid cell, and so is a cell that is
 specific in form but not in substance: every `DOWNGRADED` and `DISPUTED` cell contains at least one identifier in
 backticks — a permission string, configuration key, function, type, route, role or VULN id — or a `file:line`, copied
 verbatim from that row's own record (its File, Flow, Description or Evidence); a cell with no backticked identifier and
@@ -893,7 +1008,8 @@ absolute ones once made fifteen keys that matched nothing. Step 6 may then repla
 `STANDING — previous downgrade voided: <one clause naming what changed>`; a bare `STANDING` on such a row is an invalid
 cell, and a run whose join line is missing rendered its verdicts without looking: one writer rendered thirty previously
 downgraded sinks as bare `STANDING` and restored them only when the recheck named them.
-Step 6 and citation verification update the `disposition` and `verdict` cells of this table. The body is then
+Step 6 and citation verification update the `disposition` and `verdict` cells of this table — never a carried row's,
+whose cells are its block's. The body is then
 rendered from the table: one Finding Format record per `body` row, in severity order, carrying the row's VULN id.
 Every block has one layout, so two runs' blocks diff line for line: the severity line, then
 `Worker record: <worker record id>` — or, for a carried block, its `Carried:` line in that position — then `Entry point: <the row's entry point>`, then the base skill's fields in its
@@ -911,15 +1027,25 @@ last written at — its header's `last-scanned-sha`, above its ledger heading, o
 such line, the sha of its newest `run <sha> <date>:` line under Coverage / depth notes, the latest date and of lines
 sharing it the last — nothing in the code has changed since the ledger was last judged, so a finding judged then is a finding now: every
 ledger row of the copy whose status is `open` and whose `class | file:line` key holds no row of any other disposition
-this run — a key a worker reached and the writer dispositioned, as `body`, `merged`, `withdrawn` or `unverifiable`, or
-that STEP X promoted, was judged this run and is not carried — is carried from the newest earlier report — among those the
-scan-plan's `earlier-reports:` row lists, never a stray file in the directory — that holds a block with the same
+this run — a key a worker reached and the writer dispositioned, as `body`, `merged`, `withdrawn` or `unverifiable`,
+or that STEP X promoted, was judged this run and is not carried — a key whose blocks Step 6 withdrew on a worker's
+`ledger refuted:` line is read below — is carried from the newest earlier report — among those the
+scan-plan's `earlier-reports:` row lists, never a stray file in the directory, and only a report written at this commit,
+its header's `Base SHA:` naming the scan-plan's `base-sha` in full or by seven or more leading digits (a report of
+another commit judged other code, so its blocks are no source) — that holds a block with the same
 target-relative `File:` sink and class whose verdict honours the sink and class's standing downgrade (repeats it, or voids it
-in the named-hop form) — a report whose block at that key reads bare `STANDING` under a standing downgrade is passed over
-for the newest one that honours it — a sink's line is its first line on either side, so
+in the named-hop form) — a block at that key reading bare `STANDING` under a standing downgrade is passed over for the newest report whose block
+honours it,
+and a block whose `File:` or `Flow:` line cites a line past the end of a file of the target — its lines counted as
+`grep -c ''` counts them, a last line without a newline counting, never `wc -l` — is no source: that line does not
+exist at this commit, so the block cannot have been verified where it points, and it is left out — neither
+carried nor re-cited, nor its key re-keyed to a sink a worker reached, since correcting it would judge the finding anew,
+which only a worker does. The downgrade and line-count tests are block by block: the key's source is the newest listed report holding a block
+of the key that is a source, its blocks that are sources are carried and its others left out, and the base skill's Citation & Evidence Verification,
+by its exception for a `carried` record, does not re-open a carried block — it was verified when judged, its label says it is not re-judged, its source's
+commit and the line count are the checks it meets, and it is never re-cited. A sink's line is its first line on either side, so
 `Dockerfile:45-55` and `Dockerfile:45` name one sink; a block's class is the stem of its `Reference:` file, never the
-words of its heading, which older reports wrote as titles: every block of that key in that report — several
-when several entry points reach the sink, each a finding of its own under the base skill's identity rule — becomes one
+words of its heading, which older reports wrote as titles: every block of that key in the key's source report that is a source — several when several entry points reach the sink, each a finding of its own under the base skill's identity rule — becomes one
 `carried` row of the table (worker record cell `ledger` — or `ledger/<class>/<sink>/<n>` when the writer wants it unique — sink
 and class the copy row's key, entry point from the block,
 verdict cell the block's `Adversarial:` verdict, body record a fresh VULN id) and one body block, that block copied
@@ -932,10 +1058,27 @@ it, do not change its severity, and do not rebuild it from the worker record —
 writer's own words and spent the one repair putting them back. So
 the reader sees on every carried block what was checked today and what was not. A carried block keeps its
 source's severity and verdict, counts in the histogram, and leaves its ledger row as it stands: `last-verified` keeps
-the date of the judgement it carries. A row whose key no earlier
-report holds as a block cannot be carried: such rows are counted in the appendix as `carried without source: <s>` — rows,
-not blocks — and each brief
-gains `not re-found <date>` as before. At a changed commit nothing is carried and every rule below reads as it did.
+the date of the judgement it carries. A row whose key no earlier report holds as a block — or holds only in blocks that are no source — cannot be carried: such
+rows are counted in the appendix as `carried without source: <s>` — rows, not blocks — and each brief gains `not re-found <date>` as before, the row otherwise as the copy holds it — or the one row a
+range-twin merge or STEP X's class correction left, as for a carried key — every earlier mark kept and its status `open`.
+A key that a worker's `ledger refuted:` line names — an `open` key of the copy that no row of another disposition holds
+this run, the line's class and sink read as the copy's keys are — is tested before it is carried, within the run's one
+Step 6 pass and whatever the block's severity or `adv=`: Step 6 is run on each of its source blocks with one question,
+whether the guard the line names defeats it — the guards of several workers' lines joined with `; ` — and each block it
+withdraws is not carried but gives one `refuted` row (worker record cell as a carried row's, entry point from the block,
+sink and class the key, verdict `WITHDRAWN — <the guard>`, body record `refuted`) and no body block, since each block is
+a finding of its own entry point; the blocks it does not withdraw are carried as above, each as its source has it. Any
+result but WITHDRAWN leaves a block not withdrawn, and a carried block keeps its `Carried:` label: the Judge did not
+re-judge it. When every block is withdrawn the key's ledger row — as STEP X's class correction left it, a ` was <old
+class>` trail kept and counted in `rekeyed to stem` — takes the status `superseded` and moves to the archive, and the
+false-positive patterns gain the row `<class> | <sink> | <the guard> | <base-sha>`; when only some are, the ledger row
+stands as the copy holds it and no false-positive pattern row is written, since an entry point still reaches the sink. A refuted key with no source block cannot be
+tested and stays a row without source. The appendix states one line per such key,
+`refuted: <class> | <sink> — <lens>/p<n>[, <lens>/p<n>…]: <the guard> — withdrawn`, or
+`— partly withdrawn: <n> of <m> blocks, carried as <VULN ids>`, or `— stands, carried as <VULN ids>`, or
+`— no source, not tested`, then `refutations: <count>` counting those keys. A `ledger refuted:` line at a key a row of
+another disposition holds is moot — that row is this run's judgement — and has no line; at a changed commit no line is
+tested: nothing is carried, and its key reads as any key no worker re-found. At a changed commit nothing is carried and every rule below reads as it did.
 Workers are not told about the carry and behave as before: a sink they re-confirm is a `body` row with this run's
 evidence, and only the sinks no worker re-confirmed are carried. At an unchanged commit the writer's prompt, and a
 repair's, carries this **Same-commit carry** paragraph verbatim with the pre-write copy's path, the earlier reports'
@@ -943,7 +1086,9 @@ file names and `base-sha`, so the carry is not lost to a summary. Two different 
 carried <n>` and the `continuity join:` line count previous verdicts joined onto this run's `body` rows at previously
 downgraded sinks and never list a carried block; `carried` rows, blocks and the `carried <c>` counts are this same-commit
 carry of un-judged ledger keys and never enter the join. The appendix reproduces `disposition-table.md` by copying the file, then states
-`worker records: <n> | body: <b> | merged: <m> | withdrawn: <w> | unverifiable: <u> | promoted: <p> | carried: <c>`, where
+`worker records: <n> | body: <b> | merged: <m> | withdrawn: <w> | unverifiable: <u> | promoted: <p> | carried: <c>`, with
+`| refuted: <r>` after it when the table holds `refuted` rows — a `refuted` row is none of the four, whatever its verdict
+cell reads — where
 `b + m + w + u = n` and `b + p + c` equals the number of body records, and the close-out line
 `close-out: table rows <t> | file records <f> | body rows <b> | promoted <p> | carried <c> | body blocks <k> | linked blocks <j> |
 invalid cells <i>`, each number produced by counting — table rows, Judge-passed record ids across the current worker
@@ -951,7 +1096,7 @@ files, `body` rows, `promoted` rows, `carried` rows, `### [SEVERITY] VULN-` head
 body, body blocks whose
 `Worker record:` id has a `body` row with the same VULN id or whose `Carried:` line has a `carried` row with the same VULN
 id, and cells of the table that are invalid under the cell
-rule above. `k` equals `b + p + c`, `j` equals `b + c`, `i` equals `0` and `t` equals `f + p + c` — a table shorter than the worker files
+rule above. `k` equals `b + p + c`, `j` equals `b + c`, `i` equals `0` and `t` equals `f + p + c + r`, `r` the `refuted` rows — a table shorter than the worker files
 has dropped records and is rebuilt; until they do, the report is not finished and
 the sentinel is not written. Both lines are written in exactly that form — a paraphrase into prose, however
 complete, is not the line — and a repair that touches the body or the table re-counts and re-writes both; a report
@@ -966,13 +1111,15 @@ A prior report, the project-memory ledger, and a previous run's histogram are in
 of records or counts: a worker record that matches a ledger row is a body record of this run, and the ledger's
 status is updated from it. Route families are entry points: two routes reaching one sink are two body records. A
 `merged` row shares its entry point, its sink `file:line` and its class with the body row it points to; a row that
-differs in any of the three is a `body` row, not a merge, whatever the writer's reason — de-duplication is between
-lenses that recorded one finding, never between findings.
+differs in any of the three is a `body` row, not a merge, whatever the writer's reason, save a duplicate the
+**Duplicates** rule's judgement merges — one finding two lenses recorded under two classes or sink lines, its `Also:`
+line naming the merged class — de-duplication is between workers that recorded one finding, never between findings.
 
 The BURIED-SINK AUDIT is where false negatives hide, so treat it as mandatory rather than optional. Scan EVERY
 lens file's notes, observations, tables, hardening-notes, "defense-in-depth", "not-reachable", and
 dropped-not-FP items for any attacker-reachable sink that was demoted rather than reported. Promote each one
-into the findings body at its class floor.
+into the findings body at its class floor. A `ledger refuted:` line is not such a demotion: it names a finding the
+ledger already holds, and the Same-commit carry tests it with Step 6 — the audit never promotes it.
 
 A demotion is INVALID — and the item must be promoted — when its stated reason:
 - defers to a downstream condition, flag, or config the lens did not verify ("safe when X is off", "depends on
@@ -1006,7 +1153,7 @@ repository, and a run that reports a class as absent while its body holds a reco
 itself in one document.
 
 Any non-finding disposition line in a worker file — a Clearance Record, a `Hits → disposition` entry, a Hardening
-Note, a Positive Pattern, a `safe-because` clause — whose text contains `disabled by default`, `enabled by default`,
+Note, a Positive Pattern, a `safe-because` clause, never a `ledger refuted:` line, which Step 6 tests — whose text contains `disabled by default`, `enabled by default`,
 `default configuration`, `environment-gated`, `non-production`, `only when the flag` or `unless configured` rests on
 configuration and is not a clearance, unless the same line also names a code guard that holds regardless of
 configuration — an authorization middleware, an ownership check, a validator, by name or by `file:line`. A flag or
@@ -1030,9 +1177,9 @@ one write that dropped the header made the run after it read an unchanged commit
 writes none for a row whose class is `unclassified`, which has no key: a first write over an empty ledger once kept 37
 rows for 83 body keys, every low-severity finding Step 6 had not validated among the missing. A ledger row is never `fixed` when this run's `base-sha` equals the
 row's `last-verified` sha: at an unchanged commit nothing was fixed, and a row whose sink no worker re-confirmed is
-carried into the body under the same-commit carry of STEP 3; only a row that could not be carried — no earlier report
-holds its block — is a miss of this run: it stays `open`, its brief gains `not re-found <date>`, and its sink is a STEP Y
-hand-off to the owning lens. At a different commit a row becomes `fixed` only when `git diff <last-verified sha> <base-sha> --
+carried into the body under the same-commit carry of STEP 3, or withdrawn there on a worker's `ledger refuted:` line; only a row that could not be carried — no earlier report holds its block, or holds it only in blocks that are no source —
+is a miss of this run: it stays `open`, its brief gains `not re-found <date>`, and its sink, when that line exists, is a
+STEP Y hand-off to the owning lens. At a different commit a row becomes `fixed` only when `git diff <last-verified sha> <base-sha> --
 <file>` is non-empty for the sink's file; an unchanged file is not re-found, not fixed. Run lines under Coverage /
 depth notes are appended, never rewritten or removed, no ledger row is deleted, and a row is rekeyed only as this
 paragraph says. A row's class is the
@@ -1047,12 +1194,14 @@ more than one row for a key, or the rekeying produces one — earlier
 writes that broke the one-row-per-key rule — the writer merges them into one row whose brief joins the distinct briefs
 with `; `, the brief's word limit yielding to the join so no caller's brief is lost, and counts them as
 `duplicate-key rows merged <d>` — a row whose sink carries a range is a duplicate of the single-line row and merges into
-it, the single-line row keeping its cells; this merge is the only way a row count may fall at an unchanged commit. The appendix
+it, the single-line row keeping its cells; this merge and the row of a key Step 6 withdrew in every block moving to the archive are the only ways a row count may fall at an unchanged commit. The appendix
 states `ledger rows before <n> | after <m> | archived <k> | duplicate-key rows merged <d> | rekeyed to stem <r>`,
 counted from the pre-write
-copy, `project-memory.md` and its archive: `m` equals `n` minus `d` plus the new keys minus `k`, `m` equals the number
+copy, `project-memory.md` and its archive: `m` equals `n` minus `d` plus the new keys minus the rows this write moved
+to the archive, `k` is the archive's row count after the write, `m` equals the number
 of distinct keys after the write, the new keys are recheck item (12)'s key difference between the copy and the file,
-and `k` is `0` at an unchanged commit, as the Same-commit carry paragraph reads it; a write that fails any of these is redone
+and at an unchanged commit the only rows this write moves are those of keys whose every block Step 6 withdrew, as the
+Same-commit carry paragraph reads it; a write that fails any of these is redone
 from the pre-write copy STEP 1 made, `project-memory.md.pre-write-<started>`, which nothing in the run overwrites — a
 copy made later would be a copy of the write under test, not of the state before it, and an earlier run's copy is that
 run's evidence, not this one's. A writer that finds no copy under that name makes it before touching the file and the
@@ -1101,7 +1250,11 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   disposition. Then `routed: <count>`.
 - Ledger sink caller enumeration (STEP 2a): one row per ledger sink — sink `file:line`, the partition that
   owned it, each entry point traced to with its hop chain, which were already reported, and which are new.
-  Then `new entry points: <count>`. State `ledger empty` if there was no ledger to trace against.
+  Then `new entry points: <count>`. State `ledger empty` if there was no ledger to trace against. At an unchanged
+  commit whose workers wrote `ledger refuted:` lines at open keys no row of another disposition holds, the Same-commit carry's
+  `refuted:` lines and `refutations: <count>` follow.
+- Duplicate candidates (the **Duplicates** rule): one `duplicate candidate:` line per pair recheck item (48) lists, then
+  `duplicate candidates: <count>`.
 - Worker dispatch: the `workers dispatched: <n>` line, the `waves:` line, each `wave <k>:` line and the per-worker
   lines copied from `scan-plan.md` — the per-worker lines with their start times are the evidence, and a wave line
   that disagrees with them is reported here as a STEP 2 error — then
@@ -1122,9 +1275,10 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   copied from `scan-plan.md`, so the single file that forced it is named in the report.
 - Worker record disposition: `disposition-table.md` copied in full (one row per Judge-passed worker record), the
   `promoted` rows, the totals line `worker records: <n> | body: <b> | merged: <m> | withdrawn: <w> |
-  unverifiable: <u> | promoted: <p> | carried: <c>` with `b + m + w + u = n` and `b + p + c` equal to the body record count, and the
+  unverifiable: <u> | promoted: <p> | carried: <c>` (then `| refuted: <r>` when the table holds `refuted` rows) with `b + m + w + u = n` and `b + p + c` equal to the body record count, and the
   close-out line `close-out: table rows <t> | file records <f> | body rows <b> | promoted <p> | carried <c> | body blocks <k> | linked blocks <j> |
-  invalid cells <i>` with `k = b + p + c`, `j = b + c`, `t = f + p + c` and `i = 0`, then, at an unchanged commit,
+  invalid cells <i>` with `k = b + p + c`, `j = b + c`, `t = f + p + c + r` — `r` the `refuted` rows, `0` in a run without
+  them — and `i = 0`, then, at an unchanged commit,
   `carried without source: <s>`. Then the ledger line
   `ledger: <k> distinct class|file:line keys among body rows | <j> of them present in the ledger`, both counted after
   the memory write — `k` the distinct keys among the table's `body` rows, not the ledger's row count (one writer stated the
@@ -1138,13 +1292,13 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   body <this run> vs <previous> | carried <c> | <mature | not mature>` — `k` the new keys of recheck item (12), the distinct ledger
   keys present after this run's write and absent from its pre-write copy, the number the memory run line's
   `new-confirmed` states, `f` the found-late
-  files of the base skill's Memory Protocol, the two `vs` pairs — `worker records` the table's row count, `body` the
+  files of the base skill's Memory Protocol, the two `vs` pairs — `worker records` counted from the table's rows, `body` the
   body blocks, the close-out's `b + p` and the histogram total, never the `body` rows alone, because rows follow how a
   writer split multi-route records into promoted rows while blocks follow the findings — counted from this run's
   close-out and, for `<previous>`,
   read from the `close-out:` line of the newest earlier report — the last file of the scan-plan's `earlier-reports:`
   row — as its `table rows` and `body blocks` values (`n/a` only when that row reads `earlier-reports: 0`), and `worker
-  records` for this run is the table's rows minus its `carried` rows. The streak is derived, never asserted: the previous run line's streak plus one when `f` is 0, `k` is at most 3 and the
+  records` for this run is the table's rows minus its `carried` and `refuted` rows. The streak is derived, never asserted: the previous run line's streak plus one when `f` is 0, `k` is at most 3 and the
   plan holds no `worker not run:` line — the union of findings has stopped growing, and a partition nobody read says nothing
   about it — else 0. The body
   count is no longer the measure: under the same-commit carry the body is the ledger's open keys plus this run's new
@@ -1336,7 +1490,9 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   the plan recorded `check failed` and no verdict, and that partition produced records at a third of the rate of the
   lightest one.
 - **Merges are constrained to identical entry point, sink and class because one writer merged 31 of 132 records,**
-  three of them across different entry points, where the run before merged 8 of 176.
+  three of them across different entry points, where the run before merged 8 of 176. The **Duplicates** rule's merges
+  across classes or sink lines keep that constraint's point — one entry point, the merged class named on the kept
+  block — and each is judged on a line of its own.
 - **The contract check asks for the two forms, not the template's sentences, because a paraphrased contract reached
   27 of 27** while an earlier contract that omitted the first-line form reached 0 of 15.
 - **The configuration phrases are narrowed because a flag named beside real code guards is not a clearance by
@@ -1546,7 +1702,7 @@ every withdrawn row; all three are items now, and the table rules say plainly th
   because ten re-scans of one commit produced bodies of 245, 280, 268, 261, 283, 280, 248, 172, 233 and 199 blocks
   while the ledger only grew**: a finding that passed the Judge and the adversarial step at this commit is as valid
   today as then, re-judging it measures the workers' consistency and nothing else, and a body that follows that
-  consistency can never hold still. Every block of the key in its newest report is carried, one per entry point, so a
+  consistency can never hold still. Every source block of the newest report holding the key is carried, one per entry point, so a
 sink several routes reach keeps every route; each carried block says on its second line that it was not re-judged, its source
   is named and checked, the ledger stays the record, and maturity now asks the one question the streak was for:
   has the union of findings stopped growing.
@@ -1594,3 +1750,66 @@ sink several routes reach keeps every route; each carried block says on its seco
   row, and two worker records headed `[LIKELY]` instead of a severity that the table had counted. A recheck that
   disputes its own rules sends a correct report to a repair that cannot fix a worker file; the headings without a
   severity are now reported beside the file-record count instead.
+- **A carried block citing a line past the end of its file is no source, and every citation is read against its file,
+  because one carried finding cited line 533 of a 496-line file across six reports**: the sink was in a file of the same
+  name one directory up, and at an unchanged commit the copy-byte-for-byte rule carried the error forward each run. The
+  first run to notice rewrote the blocks and re-keyed the ledger row, which the carry rule forbids, and then patched and
+  rechecked eight times with no rule that let it finish. A line that does not exist at the commit was never verified
+  there, so the block is passed over like one that fails a standing downgrade, and item (46) finds such a citation in
+  any block. A carried block citing a line that exists in the wrong file is beyond any count of lines: it is carried as
+  it stands, labelled not re-judged, and never re-cited — Citation & Evidence Verification does not re-open a carried
+  block, which is what let the writer and the carry rule disagree. A source is also a report of this commit: a
+  changed-commit run leaves `open` a row whose sink's file did not change, and the next run at the new commit would
+  otherwise carry it from a report of the old one, whose hops into files that did change were never checked at this one.
+- **A worker's refutation of a ledger finding is a fixed `ledger refuted:` line that STEP 3 tests, because one run
+  carried two findings labelled not re-judged while its worker had written that they no longer stood**: the note sat in
+  a free-text caller-enumeration row, which nothing read. A confirmed finding outranks one worker's reading, as it
+  outranks a clearance, so the line is a claim, and Step 6 — the step that already returns WITHDRAWN — decides it against
+  the guard it names, block by block since each block is its own entry point's finding: a withdrawn block is a
+  `refuted` row instead of a carried one, a key withdrawn in every block has its ledger row superseded, the rest are
+  carried as before; the appendix says which, and item (47) holds every such key to one outcome. A line the checker cannot read is shown
+  on item (47)'s line and its key carried as before: failing the worker's gate on it would cost a re-run and, past
+  three attempts, an uncovered partition — more than the carry costs.
+- **Duplicates are listed by the entry point a cell names, not its wording, and every pair is judged, because one run
+  carried twenty-nine pairs of one finding as two**: an added lens re-applies a base lens's classes, so the same defect
+  at one sink and entry point came from two workers worded `POST /items (items.ts:20)` and
+  `items.ts:20 — HTTP route — POST /items`, and the writer compared the words. Nothing is merged by rule: a test by
+  `file:line` merged `POST /import/commit (routes.ts:369)` into `preview` at `:353`, a nearby handler line, a GraphQL
+  operation or a cell naming two routes each named the wrong registration, and three of one report's near-line pairs
+  across classes were distinct defects. The writer reads the two records, keeps the higher severity, names the other
+  class on the kept block, and never merges away a key the ledger holds. A pair is read from each worker record's own
+  `Entry point:` line, never a merged row's cell, which no item reads and a writer could make agree. A record with no
+  `Entry point:` line is `unavailable` beside a record of its class and sink unless its own lines name the cell the
+  writer filled: one first run's checker listed none of four such pairs — an unpinned base image and three supply-chain
+  sinks, each reported by a base lens naming no entry point and an added lens naming one — two because one side was
+  `unavailable` and two because the writer had filled the entry-less record's cell from the list with a command the
+  record never named; the writer merged three of the pairs on its own reading and left the base image at two findings. A
+  cited `file:line` is the list entry on that line before any within three lines of it: the same run's `manage.py:344`
+  read as the registration at `:346`, two commands down. Listing every pair of one class and sink the list does not
+  place apart was tried and withdrawn: over one target's six runs it multiplied the writers' pairs by as much as twelve
+  and a half — 98 to 1,235 on one — and of a judged sample of the pairs it added about two in five were one finding, the
+  rest two routes, operations or handlers reaching one shared sink; a `same` pair needs its entry points shown one, or
+  one of them `unavailable`. The wider pairing stands at configuration and infrastructure lines alone: a config line is
+  one statement and its entry point a deployment surface in prose, and there it listed, on one target's latest run,
+  forty-three pairs of two lenses at one Dockerfile, CI job, manifest or server-config line and no pair at a code sink;
+  on another it paired the unpinned test image two lenses reported at one Helm template line, which the rule above left
+  two findings. Of sixty-four of its pairs judged from their records, over four targets, sixty-two were one finding and
+  two were two checks at one Dockerfile `FROM` line, an unpinned tag and no `USER`, so each pair is still judged. Every
+  page pair it listed on the runs judged was at a site's `index.html` shell, and no other page counts; an `index.html`
+  under a template directory stays out: one run held one disclosure at such a served template twice, once for each of
+  two servers' `GET /` routes that render it — one route to the list, so the routes rule could not keep them apart — and
+  the pairing would have listed the two as one pair. A route a cell names ends at the sentence around it: on one run a
+  cell ending `… that calls POST /x.` read as the route `/x.`, the two lenses' cells for one mutable job image named two
+  routes with none in common, and the pair was never listed; a trailing `.`, `:`, `!` or quote is the sentence's,
+  while a `?` stands as written — a route's own optional marker (`GET /:id?`) looks the same as a question's — and so
+  does an ellipsis. Two lenses file one configuration defect under two classes as well: an unpinned base image reported
+  as a container finding and as a supply-chain one at one `FROM` line was never listed, `near` needing one entry point.
+  Listing another class at one configuration line unless the list places the entry points apart added ninety pairs over
+  the saved runs of every target, and judged from their records, eighty-two were one defect under two names, five two
+  checks at one line — a consent gate and a missing integrity check on one `<script>`, a missing policy and a missing
+  frame guard — and three could not be read, so each such pair is still judged.
+  A `distinct` clause is judged in its own pair: one writer answered all hundred and sixteen pairs the checker listed
+  with one clause, `separate entry points, sink operations, classes, or guards`, merged none — a build secret two lenses
+  reported at one Dockerfile line among them — and the recheck read 0; over the earlier runs' answers a clause repeated
+  at most five times, always over one class pair, and one fresh run's clause answered eleven of its thirteen pairs over
+  eight.

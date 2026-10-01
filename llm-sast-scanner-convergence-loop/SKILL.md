@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.17.3"
+  version: "1.17.4"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -257,7 +257,8 @@ Launch one subagent:
 > (Adversarial Impact Validation)** ONCE over the full consolidated set with the `adv` value (default
 > `adv=critical,high,medium`), apply the STANDING / DOWNGRADED / DISPUTED / WITHDRAWN verdicts. Then, as an
 > **independent gate** (you did NOT author these per-lens findings), run the base skill's **Citation & Evidence
-> Verification** over every surviving finding: re-open each cited `file:line` and confirm the path exists, the
+> Verification** over every surviving finding — a `carried` record excepted, as that gate's Exception states: it is
+> copied word for word and never re-opened — re-open each cited `file:line` and confirm the path exists, the
 > line/snippet and function scope match, and the route/method + payload + preconditions are accurate — correct
 > mismatches, or downgrade to NEEDS CONTEXT / drop any finding whose evidence does not verify. Then run the
 > **NEGATIVE-VERDICT AUDIT** (false negatives hide in clearances, not in reported findings, so audit the
@@ -618,7 +619,8 @@ FINAL ADVERSARIAL PASS (run ONCE, after the loop is fully done)
   100%, take the FULL consolidated set of Judge-passed findings and run Adversarial Impact Validation (Step 6)
   ONE TIME over all of them with the `adv` value (default adv=critical,high,medium).
 - Apply the adversarial verdicts (STANDING / DOWNGRADED / DISPUTED / WITHDRAWN) to finalize severities.
-- Then run the base skill's **Citation & Evidence Verification** over every surviving finding: re-open each
+- Then run the base skill's **Citation & Evidence Verification** over every surviving finding — a `carried`
+  record excepted, as that gate's Exception states: it is copied word for word and never re-opened — re-open each
   cited `file:line` and confirm path/line/scope/route/payload/preconditions match the source; correct
   mismatches, or downgrade to NEEDS CONTEXT / drop any finding whose evidence does not verify. (Single-agent
   mode is self-review — be deliberately adversarial toward your own citations here.)

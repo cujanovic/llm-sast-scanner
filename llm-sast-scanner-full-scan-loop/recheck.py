@@ -214,6 +214,57 @@ def corrected_str(text: str, name: str) -> str:
     return (fixes[-1] if fixes else r_).replace("`", "").strip()
 
 
+# a worker's refutation of a ledger finding (STEP 2a): `ledger refuted: <class> | <sink file:line> — <the guard>`, read
+# wherever a line holds it — its own line, a list item, a table cell, a per-sink bullet — in bold or backticks, any
+# letter case, a range sink, a `:column` after the line, an em or en dash or a spaced hyphen for the dash
+REFUTE_AT = re.compile(r"(?i)ledger refuted[`*_]*:[`*_]*")
+REFUTE_BODY = re.compile(r"^[ \t]*[`*_]*([A-Za-z][A-Za-z0-9_]*)[`*_]*[ \t]*\|[ \t]*`?([^|`\s]+?)`?:(\d+(?:[-\u2013]\d+)?)(?::\d+)?`?(?:[ \t]*[\u2014\u2013][ \t]*|[ \t]+-{1,2}[ \t]+)(.*\S)")
+# what may stand before a claim, back to the line's start or the last `|`, `;` or dash: markup only — a word there
+# quotes, negates or supposes it (`considered … but rejected`, `not …`, `e.g. … would apply`), and it is no claim
+REFUTE_LEAD = re.compile(r"^[\s>*_`+\-\d.)#]*$")
+
+
+def refute_lines(text: str) -> tuple[list[tuple[str, str, str]], list[str]]:
+    """A worker file's `ledger refuted:` claims outside fenced code: (class, sink, guard) of each that parses, and the
+    lines holding one that looks like a claim (a `|` or a `:line` after the colon) and does not parse. A mention with a
+    word before it, or followed by a placeholder (`<class>`), by `none`, `n/a` or `0`, or by prose, is no claim; so is a
+    claim whose guard is `none`, `n/a`, `nothing` or a dash."""
+    ok_, bad_ = [], []
+    for l in unfenced(text).splitlines():
+        hits = list(REFUTE_AT.finditer(l))
+        unread = False
+        for i, h in enumerate(hits):
+            lead = re.split(r"[|;\u2014\u2013]", l[:h.start()])[-1]
+            if not REFUTE_LEAD.match(lead):
+                continue
+            seg = l[h.end():hits[i + 1].start() if i + 1 < len(hits) else len(l)]
+            body = seg.strip()
+            if not body or body.startswith(("<", "`<")) or re.match(r"(?i)[`*_ ]*(?:none|n/a|0)(?![\w/])", body):
+                continue
+            m = REFUTE_BODY.match(seg)
+            guard = m.group(4).strip(" `*|;,") if m else ""
+            if m and guard and not re.fullmatch(r"(?i)(?:none|n/a|nothing|[-\u2014\u2013]+)\.?", guard):
+                ok_.append((m.group(1).lower(), f"{m.group(2)}:{m.group(3).replace(chr(0x2013), '-')}", guard))
+            elif not m and ("|" in body or re.search(r":\d", body)):
+                unread = True
+        if unread:
+            bad_.append(l.strip()[:160])
+    return ok_, bad_
+
+
+def plan_base_sha(plan: str) -> str | None:
+    """The scan-plan's base-sha as the run last stated it — its last `→ corrected` value, else the row — the sha alone: a
+    full sha, else the first run of seven or more hex digits, else `unknown`; a `(HEAD)`, a word such as `to`, a note or
+    a comma around it, and backticks, are not the sha."""
+    v = corrected_str(plan, "base-sha:")
+    for rx in (r"(?<![0-9A-Za-z])([0-9a-fA-F]{40}|[0-9a-fA-F]{64})(?![0-9A-Za-z])", r"(?<![0-9A-Za-z])([0-9a-fA-F]{7,64})(?![0-9A-Za-z])",
+               r"(?<![0-9A-Za-z])(unknown)(?![0-9A-Za-z])"):
+        m = re.search(rx, v, re.I)
+        if m:
+            return m.group(1)
+    return None
+
+
 def unfenced(text: str) -> str:
     """The text with every line inside a fenced code block blanked, line numbers kept: a `## ` line in a quoted Makefile
     is the snippet's, never the report's heading."""
@@ -268,6 +319,53 @@ def file_of(block: str) -> str | None:
 def adversarial(block: str) -> str | None:
     m = re.search(r"^\**Adversarial:\**\s*(.*)$", block, re.M)
     return m.group(1).strip() if m else None
+
+
+CITE_SPLIT_RX = re.compile(r"\s+|->|=>|<-|\u2192|\u2190")
+CITE_TOK_RX = re.compile(r"^(?P<pre>[(\[`'\"*]*)(?P<path>\S+?):(?P<spec>\d{1,9}(?:[-\u2013\u2014]\d{1,9})?(?:,\d{1,9}(?:[-\u2013\u2014]\d{1,9})?)*)(?::\d+)?(?:\([^)\s]*\))?[)\]`'\",;.*]*$")
+
+
+def cited_locations(block: str) -> list[tuple[list[str], int, int, str, str]]:
+    """Every `path:line`, `path:line-line`, `path:line,line` and `path:line:col` a block's `File:` and `Flow:` lines cite, as
+    (the path read without and with the bracket or parenthesis its token opens with — `(auth)/page.tsx` is a name,
+    `(apps/x.ts:12)` an aside — first line, the last line it reaches, where, the lines as cited). `where` is `sink` for the
+    sink as item (37) reads it — the first `path:line` of the first `File:` line — `file` for another citation on a
+    `File:` line, `flow` for a `Flow:` hop. The block is read as item (40) reads it: to its first `#`, `##` or `###`
+    heading after its own, outside fenced code, a field line starting at the margin, so a section after the last block, a
+    snippet quoting `File:` and indented code are not its citations. Tokens split on whitespace and arrows, so a name
+    holding `$`, brackets or parentheses stays one path; a line number of ten digits or more is no line."""
+    lines = unfenced(block).split("\n")
+    body = lines[:1]
+    for line in lines[1:]:
+        if re.match(r"^#{1,3} ", line):
+            break
+        body.append(line)
+    text = "\n".join(body)
+    f_l = re.search(r"^\**Files?:\**\s*(.+)$", text, re.M)
+    f_s = re.search(r"([^\s|:,;()]+):(\d+)", re.sub(r"[`*]", "", f_l.group(1))) if f_l else None
+    norm = lambda x: re.sub(r"^(?:\./)+", "", rel(x.strip()))
+    sink37 = (norm(f_s.group(1)), int(f_s.group(2))) if f_s else None
+    # a record written absolute is met by its tail, and item (37)'s regex, which stops at a parenthesis, reads
+    # `app/(auth)/page.tsx` as `/page.tsx`: the cited path that ends with that is the one it read
+    same = lambda x, y: x == y or (y.startswith("/") and (y.endswith("/" + x) or x.endswith(y))) or (x.startswith("/") and x.endswith("/" + y))
+    out, sink_taken = [], False
+    for line in body[1:]:
+        m = re.match(r"^(?:[-*+]\s+)?\**(Files?|Flow)\**:\**\s*(.*)$", line)
+        if not m:
+            continue
+        kind = "flow" if m.group(1) == "Flow" else "file"
+        for tok in CITE_SPLIT_RX.split(m.group(2)):
+            t = CITE_TOK_RX.match(tok)
+            if not t:
+                continue
+            nums = [int(x) for x in re.findall(r"\d+", t.group("spec"))]
+            pre = t.group("pre").lstrip("`'\"*")
+            paths = [t.group("path")] + ([pre + t.group("path")] if pre else [])
+            where = kind
+            if kind == "file" and not sink_taken and sink37 and nums[0] == sink37[1] and any(same(norm(x), sink37[0]) for x in paths):
+                where, sink_taken = "sink", True
+            out.append((paths, nums[0], max(nums), where, t.group("spec").replace("\u2013", "-").replace("\u2014", "-")))
+    return out
 
 
 def find_skills(explicit: str | None, shipped: str | None) -> Path | None:
@@ -498,8 +596,8 @@ def gate_lines(target: Path, cache: Path, plan: str, skills: Path | None, only: 
         return m.group(1).strip() if m else None
     want = {(fm(s, "name"), fm(s, "version")) for s in ("llm-sast-scanner-convergence-loop", "llm-sast-scanner")}
     stems = {q.stem for q in (skills / "llm-sast-scanner" / "references").glob("*.md")} if skills else set()
-    plan_target = (row(plan, "target:") or "").strip()
-    plan_sha = ((row(plan, "base-sha:") or "").split() or [""])[0]
+    plan_target = corrected_str(plan, "target:")  # as the run last stated it, like the base-sha beside it
+    plan_sha = plan_base_sha(plan) or ""
     start = corrected(plan, "ledger rows at start:")
     pairs = [pr for _, body in re.findall(r"^wave roster (\d+):\s*(.*)$", plan, re.M) for pr in re.findall(r"[a-z-]+/p\d+", body)]
     if not pairs:
@@ -906,6 +1004,12 @@ def copy_commit(copy_text: str) -> tuple[str | None, str]:
     return None, ""
 
 
+def header_sha(report_text: str) -> str | None:
+    """A report's `Base SHA:` value as its header states it — the first such line before its first `## ` heading."""
+    m = re.search(r"^[^\w\n]*Base SHA:[^\w\n]*([0-9A-Za-z]+)", report_text.split("\n## ", 1)[0], re.M)
+    return m.group(1) if m else None
+
+
 def same_commit(copy_sha: str | None, base_sha: str | None) -> bool:
     """An unchanged commit: the copy's commit is this run's base-sha — never `unknown`, whose entries are all stale."""
     return bool(copy_sha) and bool(base_sha) and copy_sha == base_sha and base_sha.lower() != "unknown"
@@ -973,7 +1077,7 @@ def prompt_lines(path: Path, skills: Path, cache: Path | None = None) -> tuple[b
         st = re.search(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", row(plan_, "started:") or "")
         copy_ = read(cache / f"project-memory.md.pre-write-{st.group(0)}") if st else ""
         copy_sha, _ = copy_commit(copy_)
-        base_ = ((row(plan_, "base-sha:") or "").split() or [None])[0]
+        base_ = plan_base_sha(plan_)
         sec_ = copy_.split("## Confirmed findings ledger", 1)[1].split("\n## ", 1)[0] if "## Confirmed findings ledger" in copy_ else ""
         has_rows = any(LEDGER_RX.match(l.strip()) for l in sec_.splitlines())
         if same_commit(copy_sha, base_) and has_rows:
@@ -1066,9 +1170,11 @@ def main() -> int:
     ap.add_argument("--paths", nargs="+", metavar=("FILE", "PAIR"), help="STEP 2: test every path a worker prompt file names (the output path against `<lens>/p<n>`), print `paths <k>/<m>` and, when all pass, the `send:` line the worker is started with, and exit (0 all exist, 1 not)")
     ap.add_argument("--record", action="store_true", help="STEP 3, the session only: append this set to the scan plan — the recorded set; a run without it reads and records nothing")
     ap.add_argument("--checks", action="store_true", help="STEP 1: print the `checks:` line the scan plan must carry, from its entry list and the partition manifests, and exit (0 pass, 1 failed)")
+    ap.add_argument("--duplicates", action="store_true", help="STEP 3: print every pair of table rows item (48) asks the writer to judge — kind, worker records, VULN ids, worker severities, classes, sinks, whether each key is a ledger row of the pre-write copy, entry points and the answer written — and exit")
+    ap.add_argument("--ledger-start", action="store_true", help="STEP 1: print the `ledger rows at start:` row, counted in the pre-write copy the plan's `started:` row names, and exit (0 counted; 2 no copy, a plan past STEP 1, or a copy whose ledger rows differ in number from the memory's)")
     args = ap.parse_args()
-    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "roster", "gate", "checks", "paths")
-                       if getattr(args, n, None) is not None and getattr(args, n, None) is not False), None)  # `--roster 0` is a mode too
+    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "paths", "roster", "gate", "ledger-start", "checks", "duplicates")
+                       if getattr(args, n.replace("-", "_"), None) is not None and getattr(args, n.replace("-", "_"), None) is not False), None)  # `--roster 0` is a mode too
     if args.record and other_mode:
         sys.stderr.write(f"recorded: nothing — --record records a plain recheck set, and this run is {other_mode}\n")
     RECORD["on"] = bool(args.record) and not other_mode
@@ -1110,6 +1216,35 @@ def main() -> int:
         ok_g, lines_g = gate_lines(tgt, tgt / ".llm-sast-scanner-cache", read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md"), skills_g, args.gate)
         print("\n".join(lines_g) if lines_g else f"gate: no worker file for {args.gate}")
         return 0 if ok_g and lines_g else 1
+    if args.ledger_start:
+        # the row STEP 1 copies: counted, never composed — one session counted the previous run's copy and wrote its 363
+        # over a ledger of 448
+        cache_l = Path(args.target).resolve() / ".llm-sast-scanner-cache"
+        plan_l = read(cache_l / "scan-plan.md")
+        row_l = row(plan_l, "started:")
+        st_l = re.search(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", row_l or "")
+        st_l = st_l.group(0) if st_l else ((row_l or "").split() or [None])[0]  # the copy item (16) reads: the stamp, else the row's first word
+        cp_l = cache_l / f"project-memory.md.pre-write-{st_l}" if st_l else None
+        # a plan holding a `workers dispatched:` line is past STEP 1 — this run's at STEP 3, or the previous run's still in
+        # place, whose copy is that run's ledger: counting it is the miscount this command exists to prevent
+        if re.search(r"^workers dispatched:", plan_l, re.M):
+            print("ledger-start: error — the plan holds a `workers dispatched:` line, so it is past STEP 1: this run's plan takes the count recheck item (16) names, appended to the row as ` → corrected <n> at <date +%Y-%m-%d_%H-%M-%S>`; the previous run's plan, still in place, is copied to `previous-run-<started>/` — write this run's scan-plan.md with its `started:` row, copy project-memory.md to `project-memory.md.pre-write-<started>`, then run this again")
+            return 2
+        if not cp_l or not cp_l.exists():  # as item (16) reads it: a copy that exists but cannot be read counts 0
+            print("ledger-start: error — no `project-memory.md.pre-write-<started>` for the plan's `started:` row: write the plan's `started:` row, copy project-memory.md to that name (an empty file when it is absent), then run this again")
+            return 2
+        def ledger_n(text_: str) -> int:
+            sec_ = text_.split("## Confirmed findings ledger", 1)
+            return sum(1 for l_ in (sec_[1].split("\n## ", 1)[0] if len(sec_) > 1 else "").splitlines() if LEDGER_RX.match(l_.strip()))
+        n_l = ledger_n(read(cp_l))
+        # nothing before the dispatch adds a ledger row to project-memory.md (a first run's template holds none), so at
+        # STEP 1 the copy holds the memory's ledger: one that does not is an earlier run's, its plan still in place, or was
+        # made before a write it does not hold
+        if ledger_n(read(cache_l / "project-memory.md")) != n_l:
+            print("ledger-start: error — the copy the plan's `started:` row names holds a different number of ledger rows from project-memory.md now: the plan is an earlier run's, still in place, or the memory was written after the copy — write this run's scan-plan.md with its `started:` row, copy project-memory.md to `project-memory.md.pre-write-<started>`, then run this again")
+            return 2
+        print(f"ledger rows at start: {n_l}")
+        return 0
     if args.checks:
         tgt = Path(args.target).resolve()
         ok_c, parts_c, fails_c = partition_checks(read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md"), tgt / ".llm-sast-scanner-cache")
@@ -1117,6 +1252,24 @@ def main() -> int:
             print("checks: failed — no entry list or partition manifests to check")
             return 1
         print(f"checks: pass — {'; '.join(parts_c)}" if ok_c else f"checks: failed — {'; '.join(fails_c)} | {'; '.join(parts_c)}")
+        # a line share outside the band with no file above it by itself is left to the split and the moves, which only the
+        # session can run (the checker never reads units): say how, so it is not dispatched on untried; the plan carries the
+        # `checks:` line alone, and once no split and no move remains the line stands as printed
+        line_f = [f_ for f_ in fails_c if "of lines (outside 15% of one third)" in f_]
+        open_l = [f_.split(" holds ")[0] for f_ in line_f if "(one file: " not in f_]
+        # one file above 100% - 2 x (one third - 15%) of the lines by itself leaves the other two no room inside the band
+        crowded = any(100.0 * int(m_.group(1)) / max(int(m_.group(2)), 1) > 100 - 2 * (100 / 3 * 0.85)
+                      for f_ in line_f for m_ in [re.search(r"\(one file: .+ holds (\d+) of (\d+) lines\)", f_)] if m_)
+        if open_l and not crowded:
+            print(f"remedy: not final — {', '.join(open_l)} outside the line band with no `(one file: …)` on its failure: split the "
+                  "largest unit by lines one level deeper while it is not a single file, then move units one at a time — the "
+                  "partition with the most lines that has a movable unit gives the partition with the fewest the smallest "
+                  "movable unit whose move puts both inside the band, else its smallest movable unit, a unit being movable "
+                  "when it has more than zero lines, is smaller than the difference between the two partitions' lines and "
+                  "puts the receiving partition above neither 40% cap (source lines, entry points) — each moved unit's entry "
+                  "points with it (their list lines' partition column rewritten); rewrite the manifests and the unit lines, "
+                  "run --checks again, and copy only its `checks:` line into the plan; once no split and no move remains, "
+                  "the line stands as printed")
         return 0 if ok_c else 1
 
     target = Path(args.target).resolve()
@@ -1146,12 +1299,47 @@ def main() -> int:
     body_text = report.split("\n## Appendix", 1)[0]
     appendix = report[len(body_text):]
     blocks = [b for b in re.split(r"\n(?=(?:#+ )?\[(?i:CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\] VULN-)", body_text) if RECORD_RX.match(b)]
+    lines_memo: dict[str, int | None] = {}
+
+    def target_lines(p_: str) -> int | None:
+        """The line count of a file of the target, its newline characters and a last line without one; None for a path
+        that names no file under the target — a name the run cannot see is not judged here."""
+        q_ = rel(p_)
+        if q_ not in lines_memo:
+            n_ = None
+            norm_ = os.path.normpath(q_) if q_ else ""
+            if norm_ and not os.path.isabs(norm_) and norm_ != ".." and not norm_.startswith(".." + os.sep):
+                f_ = target / norm_
+                try:
+                    if f_.is_file():
+                        data_ = f_.read_bytes()
+                        n_ = data_.count(b"\n") + (1 if data_ and not data_.endswith(b"\n") else 0)
+                except OSError:
+                    n_ = None
+            lines_memo[q_] = n_
+        return lines_memo[q_]
+
+    def citations_of(block: str) -> tuple[int, list[tuple[str, int, str]]]:
+        """A block's citations that name a file of the target: how many, and those past its end — (as cited, the file's
+        lines, `sink` when the `File:` sink's first line is past it, `range` when only the sink's range ends past it, else
+        `hop`)."""
+        seen_, bad_ = 0, []
+        for paths_, a_, b_, where_, spec_ in cited_locations(block):
+            for p_ in paths_:
+                n_ = target_lines(p_)
+                if n_ is not None:
+                    seen_ += 1
+                    if max(a_, b_) > n_:
+                        kind_ = ("sink" if a_ > n_ else "range") if where_ == "sink" else "hop"
+                        bad_.append((f"{rel(p_)}:{spec_}", n_, kind_))
+                    break
+        return seen_, bad_
     dispatched_row = re.search(r"^workers dispatched:.*$", plan, re.M)
     block_id = {RECORD_RX.match(b).group(2).upper(): b for b in blocks}
 
     table_rows = []
     malformed = 0
-    DISPOSITIONS = {"body", "merged", "withdrawn", "unverifiable", "promoted", "carried"}
+    DISPOSITIONS = {"body", "merged", "withdrawn", "unverifiable", "promoted", "carried", "refuted"}
     for line in read(cache / "disposition-table.md").splitlines():
         s = line.strip()
         if "|" not in s or re.match(r"^\|?\s*(worker record|-{2,}|:?-+:?)\s*\|", s, re.I):
@@ -1165,6 +1353,7 @@ def main() -> int:
     body_rows = [c for c in table_rows if c[4].lower() == "body"]
     merged_rows = [c for c in table_rows if c[4].lower() == "merged"]
     carried_rows = [c for c in table_rows if c[4].lower() == "carried"]
+    refuted_rows = [c for c in table_rows if c[4].lower() == "refuted"]  # a ledger key Step 6 withdrew on a worker's `ledger refuted:` line
     body_by_id = {c[6].upper(): c for c in body_rows}
     carried_by_id = {c[6].upper(): c for c in carried_rows}
 
@@ -1203,14 +1392,31 @@ def main() -> int:
             for old_ in re.findall(r"\bwas ([a-z][a-z0-9_]*)", m.group(3).split(" | ")[0]):
                 stem_trail.setdefault((canon(m.group(2)), old_), m.group(1))
 
+    # a row the archive holds — a refuted key's, moved this run — still says which stem its title class became; the
+    # ledger's rows come first
+    arch_rows = [m for m in (LEDGER_RX.match(l.strip()) for l in archive_sec.splitlines()) if m]
+    refuted_sinks = {canon(rel(c[2])) for c in refuted_rows}
+    # only at a sink of this run's `refuted` rows: no older archive row changes how a key reads
+    arch_moved = [m for m in arch_rows if canon(m.group(2)) in refuted_sinks and m.group(3).split(" | ")[-1].strip(" |") == "superseded"]
+    for m in arch_moved:
+        if m.group(1) in stems:
+            if canon(m.group(2)) not in stem_at_sink:
+                stem_at_sink.setdefault(("archive", canon(m.group(2))), set()).add(m.group(1))
+            for old_ in re.findall(r"\bwas ([a-z][a-z0-9_]*)", m.group(3).split(" | ")[0]):
+                stem_trail.setdefault((canon(m.group(2)), old_), m.group(1))
+
     def corrected_key(cls: str, sink: str) -> str:
         if cls in stems or not stems:
             return key_of(cls, sink)
-        owners = stem_at_sink.get(canon(rel(sink)), set())
+        # a row's ` was <class>` trail names the stem the class became — read first, since a row archived this run leaves
+        # its sink's other stem the one owner the ledger shows
+        via = stem_trail.get((canon(rel(sink)), cls))
+        if via:
+            return key_of(via, sink)
+        owners = stem_at_sink.get(canon(rel(sink))) or stem_at_sink.get(("archive", canon(rel(sink))), set())
         if len(owners) == 1:
             return key_of(next(iter(owners)), sink)
-        via = stem_trail.get((canon(rel(sink)), cls))
-        return key_of(via, sink) if via else key_of(cls, sink)
+        return key_of(cls, sink)
 
     # new keys (item 12), needed by item 6's row equation as well
     def is_new(key: str) -> bool:
@@ -1292,7 +1498,8 @@ def main() -> int:
                 continue  # a basename two list files share names neither
             near = [e for e in ep_entries if e[0] in paths and e[1] <= ln + 3]  # a decorator sits up to three lines above
             if near:
-                e = max(near, key=lambda e: e[1])
+                # the entry on the cited line itself first: `manage.py:344` among entries at :344, :345 and :346 is :344
+                e = next((x for x in near if x[1] == ln), None) or max(near, key=lambda e: e[1])
                 return (e[0], e[1])
         words = set(re.findall(IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c)))
         named = {(e[0], e[1]) for e in ep_entries if e[2] in words}
@@ -1307,7 +1514,7 @@ def main() -> int:
             paths = {e[0] for e in ep_entries if e[0] == cited or e[0].endswith("/" + cited)}
             near = [e for e in ep_entries if e[0] in paths and e[1] <= ln + 3] if len(paths) == 1 else []
             if near:
-                e = max(near, key=lambda e: e[1])
+                e = next((x for x in near if x[1] == ln), None) or max(near, key=lambda e: e[1])
                 found.add((e[0], e[1]))
         if not found:
             words = set(re.findall(IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c)))
@@ -1323,16 +1530,287 @@ def main() -> int:
         for l in txt.splitlines():
             if re.match(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]", l, re.I):
                 inside = re.search(r"(?<![\w-])" + re.escape(m_id.group(3)) + r"(?![\w-])", l) is not None
+            elif inside and re.match(r"^#{1,6} ", l):
+                inside = False  # a heading that is no record's ends the record
             elif inside:
-                e = re.match(r"^\s*\**Entry point:\**\s*(.+)$", l)
+                # as workers write it: a list marker, bold around the label or the colon, any letter case
+                e = re.match(r"^\s*(?:[-*+]\s+)?\**Entry points?\**\s*:\**\s*(.+)$", l, re.I)
                 if e:
                     return e.group(1).strip()
         return None
+    def record_parts(row_id: str):
+        """The worker record a table row id names — its own heading, the id right after the severity tag — read to the next
+        `#` or `##` heading as item (37) reads it: None when its file holds none, else (its `Flow:` line, the file's other
+        lines naming its id, its `File:` sink as (path, line) or None, its `Entry point:` line or None) — what item (37)'s
+        `ep_meets` reads an entry point cell against."""
+        m_id = re.match(r"^([a-z][a-z-]*)/(p\d+)/(\S+)$", row_id.strip())
+        if not m_id:
+            return None
+        txt = next((v for k_, v in worker_text.items() if Path(k_).name == f"deep-{m_id.group(1)}-{m_id.group(2)}-results.md"), "")
+        id_rx = re.compile(r"(?<![\w-])" + re.escape(m_id.group(3)) + r"(?![\w-])")
+        own_rx = re.compile(r"^(?:#+ )?\**\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]\**\s+\**" + re.escape(m_id.group(3)) + r"(?![\w-])", re.I)
+        found, inside, flow, sink, entry, others = False, False, "", None, None, []
+        for l in txt.splitlines():
+            if re.match(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*|CONFIRMED|LIKELY)\]", l, re.I):
+                inside = own_rx.match(l) is not None
+                found = found or inside
+                continue  # a heading is no line naming the id, as item (37) reads them
+            if inside and re.match(r"^#{1,2} |^<!-- LLM-SAST-COMPLETE", l):
+                inside = False
+            if inside:
+                f_ = re.match(r"^\s*(?:[-*+]\s+)?\**Flow\**:\**\s*(.+)$", l, re.I)
+                if f_ and not flow:
+                    flow = f_.group(1)
+                f_l = re.match(r"^\**Files?:\**\s*(.+)$", l)
+                s_ = re.search(r"([^\s|:,;()]+):(\d+)", re.sub(r"[`*]", "", f_l.group(1))) if f_l else None
+                if s_ and sink is None:
+                    sink = (s_.group(1), int(s_.group(2)))
+                e_ = re.match(r"^\s*(?:[-*+]\s+)?\**Entry points?\**\s*:\**\s*(.+)$", l, re.I)
+                if e_ and entry is None:
+                    entry = e_.group(1).strip()
+            elif id_rx.search(l):
+                others.append(l)
+        return (flow, "\n".join(others), sink, entry) if found else None
+
+    # duplicates (48): one finding reported by two workers. Nothing is merged by rule — a rule that guessed an entry point
+    # once merged two routes — so the recheck lists the pairs, the writer judges each from its two records and answers it
+    # on a `duplicate candidate:` line, and a merge stands only as that answer and item (4) allow
+    ep_full = []
+    for l in ep_list_sec.splitlines():
+        f = l.split(" | ")
+        m = re.match(r"^(.+):(\d+)", f[0].strip().lstrip("|").strip().strip("`")) if len(f) >= 3 and not l.startswith("#") else None
+        if m:
+            ep_full.append((m.group(1), int(m.group(2)), f[2].strip()))
+    HTTP_RX = re.compile(r"(?i)\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[^\s()`,;]*)")
+    def route_path(p_):
+        """A path ends at the sentence around it: a trailing `.`, `:`, `!` or quote is prose, never the route's. A `?` is
+        left as written — a route's own optional marker (`/:id?`, `/abc?`) looks the same as a question's — as are `*`,
+        `]` and `>` (`/files/*`, `/[id]`, `/<int:id>`) and an ellipsis (`/api/...`), whatever follows it."""
+        if not re.search(r"\.\.[.:!?'\"]*$", p_):
+            p_ = p_.rstrip(".:!'\"")
+        return p_.rstrip("/") or "/"
+    routes_of = lambda t_: {f"{m_.group(1).upper()} {route_path(m_.group(2))}" for m_ in HTTP_RX.finditer(t_ or "")}
+    route_entries: dict = {}
+    for e_ in ep_full:
+        for r_ in routes_of(e_[2]):
+            route_entries.setdefault(r_, set()).add((e_[0], e_[1]))
+    # a route one list entry holds names that entry; `GET /:id`, which many routers hold, names none
+    unique_routes = lambda t_: {r_ for r_ in routes_of(t_) if len(route_entries.get(r_, ())) == 1}
+    PATH_CITE = re.compile(r"([\w./()\[\]@+-]+\.\w+):(\d+)")
+    memo48: dict = {}
+
+    def ep_strict(cell: str):
+        """The list entry a cell names by `file:line`: a path naming one list file, a line within three of exactly one
+        registration there, and a positive name match — every `METHOD /path` the cell names that registration's own, or,
+        naming none, the registration's operation name in the cell. None when anything is unsure."""
+        if ("strict", cell) in memo48:
+            return memo48[("strict", cell)]
+        c_ = re.sub(r"\s+", " ", (cell or "").replace("`", "")).strip()
+        found_ = set()
+        for m_ in PATH_CITE.finditer(c_):
+            ln_ = int(m_.group(2))
+            paths_ = set()
+            # a path may hold `(admin)` or `[id]` segments; a `(` or `[` before it is the prose's own
+            for cited_ in dict.fromkeys((m_.group(1).lstrip("./"), m_.group(1).lstrip("([").lstrip("./"))):
+                paths_ = {e_[0] for e_ in ep_full if e_[0] == cited_ or e_[0].endswith("/" + cited_)}
+                if paths_:
+                    break
+            if len(paths_) != 1:
+                continue
+            near_ = [e_ for e_ in ep_full if e_[0] in paths_ and abs(e_[1] - ln_) <= 3]
+            if len(near_) == 1:
+                found_.add(near_[0])
+        res_ = None
+        if len(found_) == 1:
+            e_ = next(iter(found_))
+            own_, named_ = routes_of(e_[2]), routes_of(c_)
+            if named_:
+                ok_ = bool(own_) and named_ <= own_
+            else:
+                last_ = (re.findall(IDENT, e_[2]) or [None])[-1]
+                ok_ = bool(last_) and last_ in set(re.findall(IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c_)))
+            res_ = (e_[0], e_[1]) if ok_ else None
+        memo48[("strict", cell)] = res_
+        return res_
+
+    def ep_loose(cell: str):
+        if ("loose", cell) not in memo48:
+            memo48[("loose", cell)] = ep_single(cell or "")
+        return memo48[("loose", cell)]
+    unavail = lambda cell: re.sub(r"[`*_\s.]", "", cell or "").lower() in ("unavailable", "", "—", "-", "n/a", "none")
+    cell_norm = lambda cell: " ".join(re.sub(r"[`*]", "", cell or "").lower().split())
+    sink_of = lambda c_: canon(rel(c_[2]))
+    file_line = lambda c_: (re.sub(r":\d+(?:-\d+)?$", "", sink_of(c_)), int((re.search(r":(\d+)(?:-\d+)?$", sink_of(c_)) or [0, 0])[1]))
+    copy_keys48 = {corrected_key(m.group(1), m.group(2)) for m in copy_rows}
+    SEV_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0.5, "INFORMATIONAL": 0.5}
+    wr_id = lambda c_: re.sub(r"[`*]", "", c_[0]).strip().upper()
+
+    def record_sev(row_id: str):
+        """The severity the worker record a row id names states in its heading — the one Step 6 saw."""
+        m_r = re.match(r"^([a-z][a-z-]*)/(p\d+)/(\S+)$", re.sub(r"[`*]", "", row_id).strip())
+        txt_ = next((v for k_, v in worker_text.items() if m_r and Path(k_).name == f"deep-{m_r.group(1)}-{m_r.group(2)}-results.md"), "")
+        h_ = re.search(r"(?m)^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]\** " + re.escape(m_r.group(3)) + r"(?![\w-])", txt_, re.I) if m_r else None
+        return h_.group(1).upper() if h_ else None
+    sev_rank = lambda c_: SEV_RANK.get(record_sev(c_[0]) or "", 0)
+
+    def ep_of(c_):
+        """A row's entry point as its worker record states it — the cell only when no record is found: a merged row's
+        cell, which no item reads, never makes two findings one."""
+        if ("ep", c_[0]) not in memo48:
+            memo48[("ep", c_[0])] = record_entry(re.sub(r"[`*]", "", c_[0]).strip()) or c_[1]
+        return memo48[("ep", c_[0])]
+
+    def ep_same(c_):
+        """As `ep_of`, for two rows of one class and sink: a record that states no `Entry point:` line leaves the writer
+        to fill its cell from the list, and that cell stands only when the record's own lines name it — every route the
+        cell names in its `Flow:` line or its file's lines naming its id, or the cell met there as item (37)'s `ep_meets`
+        reads a cell — else it is `unavailable`, so a pick the record does not bear out never keeps a pair from the
+        writer's judgement. The memo holds (reading, whether the record's silence set it)."""
+        if ("same", c_[0]) not in memo48:
+            rid_ = re.sub(r"[`*]", "", c_[0]).strip()
+            parts_ = None if record_entry(rid_) else record_parts(rid_)
+            if parts_ is None:
+                memo48[("same", c_[0])] = (ep_of(c_), False)
+            elif parts_[3]:
+                memo48[("same", c_[0])] = (parts_[3], False)  # an entry point under a sub-heading `record_entry` stops at
+            else:
+                own_ = parts_[0] + "\n" + parts_[1]
+                routes_ = routes_of(c_[1])
+                named_ = not unavail(c_[1]) and ((bool(routes_) and routes_ <= routes_of(own_)) or ep_meets(c_[1], "", parts_[0], parts_[1], parts_[2]))
+                memo48[("same", c_[0])] = (c_[1], False) if named_ else ("unavailable", not unavail(c_[1]))
+        return memo48[("same", c_[0])][0]
+
+    def no_line_(c_) -> bool:
+        """The row's worker record is found and states no `Entry point:` line anywhere in it."""
+        rid_ = re.sub(r"[`*]", "", c_[0]).strip()
+        parts_ = None if record_entry(rid_) else record_parts(rid_)
+        return parts_ is not None and not parts_[3]
+
+    # a configuration or infrastructure file: container and build recipes, CI, deployment manifests, server and
+    # environment config (a template of one too), a site's `index.html` shell — one statement at a line, reached through no
+    # route of its own, so two records of one class at one of its lines are one statement; no other page (a filename cannot
+    # tell a static page from a template rendered once per route), no page under a template, view, layout, partial or
+    # include directory, and no code file whatever its name
+    CONFIG_SINK = re.compile(r"(?i:(?:^|[/\\])(?:(?:[^/\\]+\.)?(?:dockerfile|containerfile)(?:\.[\w.-]+|[-_][\w-]+)?"
+                             r"|(?:gnu)?makefile(?:\.(?:am|in))?|[^/\\]+\.mk|jenkinsfile(?:\.[\w.-]+|-[\w-]+)?|procfile|caddyfile"
+                             r"|\.htaccess|(?:[^/\\]+)?\.env(?:\.[\w.-]+)?"
+                             r"|[^/\\]+\.(?:ya?ml|toml|ini|cfg|conf|tf|tfvars|hcl|bicep|properties)(?:\.(?:template|tpl|tmpl|j2))?"
+                             r"|index\.html?))$")
+    RENDER_DIR = re.compile(r"(?i)(?:^|[/\\])(?:[^/\\]*[-_.])?(?:templates?|views?|layouts?|partials?|includes?|jinja2)[/\\]")
+    CODE_FILE = re.compile(r"(?i)\.(?:py|pyi|js|mjs|cjs|jsx|ts|mts|cts|tsx|go|rb|rs|java|kts?|cs|php|swift|scala|c|cc|cpp|h|hpp"
+                           r"|mm?|sh|bash|ps1|pl|lua|dart|vue|svelte|groovy|gvy|ex|exs|erl|clj|cljs|hs|r|jl|fs|fsx|vb|sql)$")
+    config_sink = lambda f_: bool(CONFIG_SINK.search(f_)) and not CODE_FILE.search(f_) and not re.search(r"[\s,;]|:\d", f_) \
+        and not (re.search(r"(?i)\.html?$", f_) and RENDER_DIR.search(f_))
+
+    def dup_pair(a_, b_):
+        """How two record rows relate: `entry` (one class and sink, both cells naming one list entry by `file:line` and
+        name — one finding by the identity rule), `same` (one class and sink, entry points not told apart), `near`
+        (another class or sink line within five lines of one file, one entry point — or another class at one line of a
+        configuration file, entry points not told apart), or None."""
+        same_key = a_[3] == b_[3] and sink_of(a_) == sink_of(b_)
+        pa_, pb_ = (ep_same(a_), ep_same(b_)) if same_key else (ep_of(a_), ep_of(b_))
+        ra_, rb_ = routes_of(pa_), routes_of(pb_)
+        if ra_ and rb_ and not (ra_ & rb_):
+            return None  # two cells naming other routes: two entry points
+        ea_, eb_ = ep_strict(pa_), ep_strict(pb_)
+        ua_, ub_ = unique_routes(pa_), unique_routes(pb_)
+
+        def apart_(ea_, la_, ua_, eb_, lb_, ub_):
+            """The list resolves the two entry points — each to its strict entry, else its loose one, else the entries its
+            unique routes name — to entries with none in common."""
+            xs_ = lambda e_, l_, u_: {e_} if e_ else {l_} if l_ else {x_ for r_ in u_ for x_ in route_entries.get(r_, ())}
+            xa_, xb_ = xs_(ea_, la_, ua_), xs_(eb_, lb_, ub_)
+            return bool(xa_ and xb_ and not (xa_ & xb_))
+        both_un = unavail(pa_) and unavail(pb_)
+        text_eq = cell_norm(pa_) == cell_norm(pb_)
+        if same_key:
+            if ea_ and ea_ == eb_:
+                return "entry"
+            if ea_ and eb_:
+                return None  # two list entries: two findings
+            la_, lb_ = ep_loose(pa_), ep_loose(pb_)
+            if la_ and lb_ and la_ != lb_ and not (ua_ and ua_ == ub_):
+                return None
+            # an `unavailable` entry point cannot be told apart from any other: with one class and sink the pair is judged
+            one_ = unavail(pa_) or unavail(pb_) or text_eq or bool(la_ and la_ == lb_) or bool(ea_ and ea_ == lb_) or bool(eb_ and eb_ == la_) or bool(ua_ and ua_ == ub_)
+            if not one_ and config_sink(file_line(a_)[0]):
+                # a configuration line is one statement, its entry point a deployment surface in prose: two records of one
+                # class there are judged unless the list resolves their entry points to entries with none in common (strict,
+                # loose, or the entries a cell's routes name) — two cells naming routes, none of them shared, were ruled two
+                # findings above
+                one_ = not apart_(ea_, la_, ua_, eb_, lb_, ub_)
+            return "same" if one_ else None
+        (fa_, na_), (fb_, nb_) = file_line(a_), file_line(b_)
+        if fa_ == fb_ and abs(na_ - nb_) <= 5 and (both_un or text_eq or bool(ea_ and ea_ == eb_) or bool(ua_ and ua_ == ub_)):
+            return "near"
+        # two classes at one line of a configuration file are mostly one defect under two names, sometimes two checks: the
+        # pair is judged unless the list resolves the entry points apart, each read as for one class there — from the
+        # record's own `Entry point:` line, a record that states none `unavailable`
+        if fa_ == fb_ and na_ == nb_ and na_ > 0 and config_sink(fa_):
+            sa_, sb_ = ep_same(a_), ep_same(b_)
+            if not apart_(ep_strict(sa_), ep_loose(sa_), unique_routes(sa_), ep_strict(sb_), ep_loose(sb_), unique_routes(sb_)):
+                return "near"
+        return None
+
+    def also_line(block_: str, c_) -> bool:
+        """The block names row `c_` on an `Also: <class> — <worker record> at <sink>` line: its worker record and class as
+        whole tokens, its sink's file and line."""
+        wr_, cl_ = wr_id(c_), c_[3].lower()
+        f_, n_ = file_line(c_)
+        for l_ in re.findall(r"(?m)^\**Also:\**\s*(.+)$", block_ or ""):
+            t_ = re.sub(r"[`*]", "", l_)
+            if re.search(r"(?<![\w/-])" + re.escape(wr_) + r"(?![\w-])", t_, re.I) and re.search(r"(?<![\w-])" + re.escape(cl_) + r"(?![\w-])", t_, re.I) \
+                    and re.search(re.escape(f_.rsplit("/", 1)[-1]) + r":" + str(n_) + r"(?!\d)", t_):
+                return True
+        return False
+    ans48: dict = {}
+    for l_ in appendix.splitlines():
+        m_ = re.match(r"^[-*+\s]*\**duplicate candidate:\**\s*`?([^`\s/]+/p\d+/[^`\s]+)`?\s*/\s*`?([^`\s]+)`?\s*(?:[—–]|--|-)\s*(.+)$", l_.strip(), re.I)
+        if m_:
+            ans48.setdefault(frozenset({m_.group(1).upper(), m_.group(2).upper()}), []).append(m_.group(3).strip(" `*"))
+
+    def answered_into(c_, t_) -> bool:
+        """The pair's one answer line reads `merged into <t_'s VULN id>`."""
+        got_ = ans48.get(frozenset({wr_id(c_), wr_id(t_)}), [])
+        return len(got_) == 1 and re.match(r"(?i)merged into\s+`?" + re.escape(t_[6].strip()) + r"(?![\w-])", got_[0]) is not None
+
+    def xmerge_why(c_, t_):
+        """Why row `c_`, merged across keys into body row `t_`, is no valid duplicate merge, or None when it is."""
+        why_ = []
+        if not also_line(block_id.get(t_[6].upper(), ""), c_):
+            why_.append(f"the kept block `{t_[6]}` holds no `Also: {c_[3]} — {c_[0]} at {c_[2]}` line")
+        if corrected_key(c_[3], c_[2]) in copy_keys48:
+            why_.append(f"its key `{c_[3]}|{sink_of(c_)}` is a ledger row of the pre-write copy — it stays a `body` row and the pair is `linked`")
+        if sev_rank(c_) > sev_rank(t_):
+            why_.append(f"its worker record is {record_sev(c_[0])} and the kept one {record_sev(t_[0])} — the lower severity is the one merged")
+        return "; ".join(why_) or None
     bad_merge, merge_fix = 0, []
     for c in merged_rows:
         t = body_by_id.get(c[6].upper())
+        kind4 = None
+        if t and (ep_id(t[1]), canon(rel(t[2])), t[3]) == (ep_id(c[1]), canon(rel(c[2])), c[3]):
+            # the cells agree; the records must too: two list entries are two findings, a cell rewritten to match or not
+            es_c, es_t = ep_strict(ep_of(c)), ep_strict(ep_of(t))
+            if es_c and es_t and es_c != es_t:
+                bad_merge += 1
+                merge_fix.append(f"`{c[0]}`'s record names the entry `{es_c[0]}:{es_c[1]}` and the kept `{t[0]}`'s `{es_t[0]}:{es_t[1]}` — two list entries are two findings: undo `{c[0]}` into its own body block and table row, its cell its record's entry point")
+            continue
+        if t and (ep_id(t[1]), canon(rel(t[2])), t[3]) != (ep_id(c[1]), canon(rel(c[2])), c[3]):
+            # a duplicate the writer judged: its `duplicate candidate:` line reads `merged into` the kept row, and a merge
+            # across keys also keeps both classes visible, merges the lower severity and never a ledger key of the copy
+            kind4 = dup_pair(c, t)
+            if kind4 in ("entry", "same") and answered_into(c, t) and sev_rank(c) <= sev_rank(t):
+                continue
+            if kind4 == "near" and answered_into(c, t) and not xmerge_why(c, t):
+                continue
         if not t or (ep_id(t[1]), canon(rel(t[2])), t[3]) != (ep_id(c[1]), canon(rel(c[2])), c[3]):  # one sink, whichever line form each row cites
             bad_merge += 1
+            if t and kind4 and answered_into(c, t):
+                # judged a duplicate, recorded so, and short of what the merge needs
+                why4 = xmerge_why(c, t) if kind4 == "near" else (f"its worker record is {record_sev(c[0])} and the kept one {record_sev(t[0])} — the lower severity is the one merged" if sev_rank(c) > sev_rank(t) else None)
+                merge_fix.append(f"`{c[0]}` is merged into `{c[6]}` as a duplicate, but {why4}")
+                continue
+            dup_note4 = " — then judge the pair from `python3 .llm-sast-scanner-cache/recheck.py --duplicates`, never writing a line for a merge nobody judged" if t and kind4 else ""
             own_blk = block_id.get(c[6].upper()) if not t else None
             wr_line = re.search(r"^\**Worker record:\**\s*`?([^`\s]+)", own_blk or "", re.M)
             if own_blk and wr_line and wr_line.group(1).upper() == c[0].upper():
@@ -1346,10 +1824,134 @@ def main() -> int:
                 merge_fix.append(f"the entry-point cell of `{c[0]}` differs from its worker record's `Entry point:` ({rec_ep[:80]}) — copy the record's entry point into the cell, then read the merge again")
                 continue
             own = next((b[6] for b in body_rows if (ep_id(b[1]), canon(rel(b[2])), b[3]) == (ep_id(c[1]), canon(rel(c[2])), c[3])), None)
-            merge_fix.append(f"point `{c[0]}` at `{own}`, the body row with its own entry point, sink and class" if own else f"undo `{c[0]}` into its own body block and table row")
+            merge_fix.append((f"point `{c[0]}` at `{own}`, the body row with its own entry point, sink and class" if own else f"undo `{c[0]}` into its own body block and table row") + dup_note4)
     emit("merges with a different entry point", f"{bad_merge} (of {len(merged_rows)} merged rows; table rows {len(table_rows)} | malformed rows {malformed})", None, bad_merge == 0 and malformed == 0,
          "; ".join([x for x in ("; ".join(merge_fix[:6]) + (" …" if len(merge_fix) > 6 else "") + (", then re-count the histogram, the close-out and the ledger from what is written" if any(m.startswith("undo") for m in merge_fix) else ""),
                               "rewrite each malformed row as seven cells whose fifth is a disposition word" if malformed else "") if x]))
+
+    # 48. duplicates — every pair of `body`/`merged` rows that may be one finding has one `duplicate candidate:` line
+    # judging it, `merged into <the kept block's VULN id>`, `distinct: <what differs>` or `linked`, and the table bears
+    # the answer out; a pair the table already answers — one key, one row merged into the other, or both rows merged into
+    # one body row — needs none, and a line on it that agrees is no stray
+    rec_rows = [c for c in table_rows if c[4].lower() in ("body", "merged")]
+    by_file48: dict = {}
+    for c in rec_rows:
+        by_file48.setdefault(file_line(c)[0], []).append(c)
+    cand48, skip48 = {}, {}
+    for rows_ in by_file48.values():
+        for i_ in range(len(rows_)):
+            for j_ in range(i_ + 1, len(rows_)):
+                a_, b_ = rows_[i_], rows_[j_]
+                kind_ = dup_pair(a_, b_)
+                if not kind_:
+                    continue
+                pair_ = frozenset({wr_id(a_), wr_id(b_)})
+                into_ = any(x_[4].lower() == "merged" and y_[4].lower() == "body" and x_[6].upper() == y_[6].upper() and ep_id(x_[1]) == ep_id(y_[1]) for x_, y_ in ((a_, b_), (b_, a_)))
+                both_into = a_[4].lower() == b_[4].lower() == "merged" and a_[6].upper() == b_[6].upper()
+                if both_into or (into_ and a_[3] == b_[3] and sink_of(a_) == sink_of(b_)):
+                    skip48[pair_] = (kind_, a_, b_)
+                else:
+                    cand48[pair_] = (kind_, a_, b_)
+    if getattr(args, "duplicates", False):
+        # the writer's worklist: every pair to judge, with what it needs to tell `merged into` from `linked`
+        if not table_rows:
+            print("duplicates: error — no disposition table rows yet: write `.llm-sast-scanner-cache/disposition-table.md` first; nothing listed")
+            return 2
+        for pair_, (kind_, a_, b_) in sorted(cand48.items(), key=lambda x_: (x_[1][0], sorted(x_[0]))):
+            side_ = lambda c_: (f"{c_[0]} ({c_[6] if c_[4].lower() == 'body' else 'merged into ' + c_[6]}, {record_sev(c_[0]) or '?'}, {c_[3]} at {sink_of(c_)}, "
+                                f"{'ledger key of the copy' if corrected_key(c_[3], c_[2]) in copy_keys48 else 'no ledger key'}; entry point: {(ep_same(c_) if kind_ != 'near' else ep_of(c_))[:90]}"
+                                f"{' — its record states none and does not name its cell' if kind_ != 'near' and ep_same(c_) and memo48[('same', c_[0])][1] else ''}"
+                                f"{' — its record states none: this is its cell' if kind_ == 'near' and not unavail(c_[1]) and no_line_(c_) else ''})")
+            got_ = ans48.get(pair_, [])
+            print(f"duplicate pair {kind_}: {side_(a_)} <> {side_(b_)} | answer: {got_[0][:60] if len(got_) == 1 else ('none' if not got_ else f'{len(got_)} lines')}")
+        print(f"duplicate pairs: {len(cand48)} to answer | {len(skip48)} the table answers")
+        return 0
+    bad48, n_m, n_d, n_l, unans_l = [], 0, 0, 0, []
+    clause48: dict = {}  # each `distinct` clause, normalised, with the class pairs and ids of the pairs it answers
+    kinds48 = Counter(k_ for k_, _, _ in cand48.values())
+
+    def merged_to(x_, k_):
+        return (x_[4].lower() == "body" and x_[6].upper() == k_) or (x_[4].lower() == "merged" and x_[6].upper() == k_)
+    for pair_, (kind_, a_, b_) in sorted(cand48.items(), key=lambda x_: sorted(x_[0])):
+        got_ = ans48.get(pair_, [])
+        ids_ = f"{a_[0]} / {b_[0]}"
+        if len(got_) != 1:
+            unans_l.append(f"`{ids_}` ({kind_}: {a_[6]} {a_[3]} at {sink_of(a_)}; {b_[6]} {b_[3]} at {sink_of(b_)})" + (f" — {len(got_)} lines" if got_ else ""))
+            continue
+        ans_ = got_[0]
+        into_ = re.match(r"(?i)merged into\s+`?(vuln-[\w-]*\d)", ans_)
+        if into_:
+            n_m += 1
+            k_ = into_.group(1).upper()
+            if not (merged_to(a_, k_) and merged_to(b_, k_) and "merged" in {a_[4].lower(), b_[4].lower()}):
+                bad48.append(f"`{ids_}` reads `merged into {k_}`, but the table does not merge the pair into `{k_}` — each row `{k_}`'s body row or a `merged` row pointing at it")
+            elif any(x_[4].lower() == "merged" and y_[4].lower() == "body" and sev_rank(x_) > sev_rank(y_) for x_, y_ in ((a_, b_), (b_, a_))):
+                bad48.append(f"`{ids_}` merges the higher worker severity into the lower — the lower is the one merged")
+        elif re.match(r"(?i)distinct\b", ans_):
+            n_d += 1
+            if any(x_[4].lower() == "merged" and y_[4].lower() == "body" and x_[6].upper() == y_[6].upper() for x_, y_ in ((a_, b_), (b_, a_))):
+                bad48.append(f"`{ids_}` reads `distinct`, but one row is merged into the other")
+            elif not re.match(r"(?i)distinct:\s*\S", ans_):
+                bad48.append(f"`{ids_}` reads `distinct` with no clause saying what differs")
+            cl_ = re.match(r"(?i)distinct:\s*(.*\S)", ans_)
+            if cl_:
+                clause48.setdefault(" ".join(re.sub(r"[^\w\s]", " ", cl_.group(1).lower()).split()), []).append(
+                    (tuple(sorted((a_[3].lower(), b_[3].lower()))), ids_, cl_.group(1)))
+        elif re.match(r"(?i)linked\b", ans_):
+            n_l += 1
+            # linked: the record that would be merged away — the lower severity, either on a tie — holds a ledger key
+            away_ = [x_ for x_, y_ in ((a_, b_), (b_, a_)) if sev_rank(x_) <= sev_rank(y_)]
+            why_l = ([] if a_[4].lower() == b_[4].lower() == "body" else ["both rows stay `body`"]) \
+                + ([] if (a_[3], sink_of(a_)) != (b_[3], sink_of(b_)) else ["one key needs no ledger guard — the pair is `merged into` or `distinct`"]) \
+                + ([] if all(corrected_key(x_[3], x_[2]) in copy_keys48 for x_ in away_) else ["the record merged away would hold no ledger key of the copy — the pair is `merged into` or `distinct`"]) \
+                + ([] if also_line(block_id.get(a_[6].upper(), ""), b_) and also_line(block_id.get(b_[6].upper(), ""), a_) else [f"each block names the other on an `Also:` line"])
+            if why_l:
+                bad48.append(f"`{ids_}` reads `linked`, but " + "; ".join(why_l))
+        else:
+            bad48.append(f"`{ids_}` reads `{ans_[:40]}` — `merged into <VULN id>`, `distinct: <what differs>` or `linked`")
+    # a line on a pair the table answers agrees with it or is wrong; a line on no pair is a stray
+    for pair_, (kind_, a_, b_) in skip48.items():
+        for ans_ in ans48.get(pair_, []):
+            into_ = re.match(r"(?i)merged into\s+`?(vuln-[\w-]*\d)", ans_)
+            if not (into_ and merged_to(a_, into_.group(1).upper()) and merged_to(b_, into_.group(1).upper())):
+                bad48.append(f"`{a_[0]} / {b_[0]}` reads `{ans_[:40]}`, but the table merges the pair into `{a_[6] if a_[4].lower() == 'body' else b_[6] if b_[4].lower() == 'body' else a_[6]}`")
+            elif any(x_[4].lower() == "merged" and y_[4].lower() == "body" and sev_rank(x_) > sev_rank(y_) for x_, y_ in ((a_, b_), (b_, a_))):
+                bad48.append(f"`{a_[0]} / {b_[0]}` merges the higher worker severity into the lower — the lower is the one merged")
+    stray48 = sorted(" / ".join(sorted(k_)) for k_ in ans48 if k_ not in cand48 and k_ not in skip48)
+    # a clause that names what differs in its own pair fits no pair of other classes: one clause answering three or more
+    # pairs of two or more class pairs, across two or more groups of records its pairs join, judged none of them (an
+    # analogous pair's clause repeats over one class pair; one clause may name every difference in one group of records
+    # that pair with each other)
+    def groups48(v_):
+        root_: dict = {}
+        def find_(x_):
+            while root_.setdefault(x_, x_) != x_:
+                x_ = root_[x_]
+            return x_
+        for _, ids_, _ in v_:
+            a_, b_ = (s_.strip() for s_ in ids_.split(" / ", 1))
+            root_[find_(a_)] = find_(b_)
+        return len({find_(x_) for x_ in list(root_)})
+    rep48 = sorted(((c_, v_) for c_, v_ in clause48.items()
+                    if len(v_) >= 3 and len({k_ for k_, _, _ in v_}) >= 2 and groups48(v_) >= 2), key=lambda x_: -len(x_[1]))
+    if rep48:
+        c_, v_ = rep48[0]
+        bad48.append(f"{sum(len(w_) for _, w_ in rep48)} pair(s) answered by {len(rep48)} `distinct` clause(s) repeated across class pairs — "
+                     f"`distinct: {v_[0][2].replace('`', '')[:100]}` answers {len(v_)} pairs of {len({k_ for k_, _, _ in v_})} class pairs over {groups48(v_)} groups of records, so it names what differs in none of "
+                     "them: judge each such pair from its two records — `merged into` the kept block's VULN id when both name the same absent "
+                     "check on the same data path from one entry point, else `distinct: <the two entry points, checks, parameters or guards "
+                     "its own records name>`: " + ", ".join(f"`{i_}`" for _, i_, _ in v_[:6]) + (f" … and {len(v_) - 6} more" if len(v_) > 6 else ""))
+    if unans_l:
+        bad48.append(f"{len(unans_l)} pair(s) have no one `duplicate candidate:` line — judge each from its two records: one finding only when both name the same absent check on the same data path from one entry point, the lower severity then `merged into` the other's VULN id (the kept block's last line `Also: <class> — <worker record> at <sink>` when class or sink differ), never merging away a ledger key of the pre-write copy (then `linked`, both blocks naming each other on `Also:` lines), else `distinct: <what differs>`; `python3 .llm-sast-scanner-cache/recheck.py --duplicates` lists every pair with its ledger keys: "
+                     + ", ".join(unans_l[:10]) + (f" … and {len(unans_l) - 10} more" if len(unans_l) > 10 else ""))
+    if stray48:
+        bad48.append(f"`duplicate candidate:` lines at {', '.join('`' + x_ + '`' for x_ in stray48[:3])} — no pair: a line is written only for a pair `--duplicates` lists")
+    n_lines = sum(len(v_) for v_ in ans48.values())
+    stated48 = ints(r"^[-*\s]*\**duplicate candidates:\**\s*(\d+)", appendix)
+    if not ((stated48[0] == n_lines) if stated48 else not n_lines and not cand48):
+        bad48.append(f"the appendix line reads `duplicate candidates: {n_lines}`, the `duplicate candidate:` lines written")
+    emit("duplicates", f"pairs {len(cand48)} (entry {kinds48['entry']} | same {kinds48['same']} | near {kinds48['near']}) | answered merged {n_m} | distinct {n_d} | linked {n_l} | unanswered {len(unans_l)} | lines at no pair {len(stray48)} | pairs the table answers {len(skip48)} | repeated clauses {len(rep48)}",
+         str(stated48[0]) if stated48 else "absent", not bad48, "; ".join(bad48[:6]) + (" …" if len(bad48) > 6 else "") if bad48 else None)
 
     # 5. config clearances rewritten
     rec_head = re.compile(r"^(?:#+ )?\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\] VULN-", re.I)
@@ -1368,7 +1970,7 @@ def main() -> int:
                 inside = False
             if not inside:
                 yield n_, l
-    cfg_hits = [(name, n_) for name, t in worker_text.items() for n_, l in disposition_lines(t) if CONFIG_PHRASES.search(l) and CLEARANCE_MARK.search(l) and not FILE_LINE_RX.search(l)]
+    cfg_hits = [(name, n_) for name, t in worker_text.items() for n_, l in disposition_lines(t) if CONFIG_PHRASES.search(l) and CLEARANCE_MARK.search(l) and not FILE_LINE_RX.search(l) and not any(refute_lines(l))]
     phrase_lines = len(cfg_hits)
     rep_cfg = ints(r"^config clearances rewritten:\s*(\d+)", appendix)
     emit("config clearances rewritten", str(phrase_lines), str(rep_cfg[0]) if rep_cfg else "absent", bool(rep_cfg) and rep_cfg[0] == phrase_lines,
@@ -1394,7 +1996,7 @@ def main() -> int:
     before_ok = bool(rep_led) and rep_led[0] == len(copy_rows)
     merged_ok = rep_merged is not None and copy_dups <= rep_merged <= copy_dups + rekey_collisions
     # `archived` in the statement is the archive file's all-time count, so the rows that left THIS run are the copy keys
-    # with no row now (archived this run; none may leave at an unchanged commit — item 24 holds that)
+    # with no row now (archived this run; at an unchanged commit only a `refuted` key's may leave — items 24 and 47 hold that)
     gone_keys = sum(1 for k in {corrected_key(m.group(1), m.group(2)) for m in copy_rows} if k not in ledger_keys)
     equation_ok = bool(rep_led) and rep_merged is not None and rep_led[1] == rep_led[0] - rep_merged - gone_keys + new_keys
     rk_stated = ints(r"rekeyed to stem (\d+)", appendix)  # the hint's statement keeps the field as the report states it
@@ -1435,6 +2037,9 @@ def main() -> int:
     tot_carried = ints(r"^worker records: .*\| carried: (\d+)", appendix)
     if carried_rows or tot_carried:
         eq.append(("totals carried", bool(tot_carried) and tot_carried[0] == len(carried_rows)))
+    tot_refuted = ints(r"^worker records: .*\| refuted: (\d+)", appendix)
+    if refuted_rows or tot_refuted:
+        eq.append(("totals refuted", bool(tot_refuted) and tot_refuted[0] == len(refuted_rows)))
     failed = [name for name, ok_ in eq if not ok_]
     # 31. worker record ids — computed here, where the close-out hint needs it: the table's ids against the worker files'
     # records, both directions, one row each; a table whose ids the files do not hold joins nothing to its evidence
@@ -1448,7 +2053,7 @@ def main() -> int:
                 rec_seen[key_.upper()] += 1
                 rec_ids.setdefault(key_.upper(), key_)
     rec_dups = [rec_ids[k_] for k_, n_ in rec_seen.items() if n_ > 1]  # two records of one worker file under one id: that many rows
-    own_rows = [c for c in table_rows if c[4].lower() not in ("promoted", "carried")]
+    own_rows = [c for c in table_rows if c[4].lower() not in ("promoted", "carried", "refuted")]
     cell_id = lambda c: re.sub(r"[`*]", "", c[0]).strip()
     shown = {}
     for c in own_rows:
@@ -1463,7 +2068,7 @@ def main() -> int:
     fix_c = None
     if not (bool(eq) and not failed):
         fix_c = (f"the close-out line reads `close-out: table rows {len(table_rows)} | file records {file_records} | body rows {len(body_rows)} | promoted {promoted_n} | carried {len(carried_rows)} | body blocks {len(blocks)} | linked blocks {len(linked)} | invalid cells {invalid}` and the totals line "
-                 f"`worker records: {len(own_rows)} | body: {kinds['body']} | merged: {kinds['merged']} | withdrawn: {kinds['withdrawn']} | unverifiable: {kinds['unverifiable']} | promoted: {promoted_n} | carried: {len(carried_rows)}` as the table and the body stand now — after this set's other fixes, each number re-counted from them"
+                 f"`worker records: {len(own_rows)} | body: {kinds['body']} | merged: {kinds['merged']} | withdrawn: {kinds['withdrawn']} | unverifiable: {kinds['unverifiable']} | promoted: {promoted_n} | carried: {len(carried_rows)}{f' | refuted: {len(refuted_rows)}' if refuted_rows else ''}` as the table and the body stand now — after this set's other fixes, each number re-counted from them"
                  + (", the table first holding one row per worker record under its own id (`worker record ids` below)" if not ids_ok else ""))
     emit("close-out equations", ("pass" if eq and not failed else f"fail: {', '.join(failed) or 'lines absent'}") + f" (table {len(table_rows)}, file records {file_records}, record headings without a severity {malformed_headings}, body rows {len(body_rows)}, merged {len(merged_rows)}, carried {len(carried_rows)})", None, bool(eq) and not failed, fix_c)
     fix_i = []
@@ -1608,6 +2213,17 @@ def main() -> int:
         return (bool(m_c) and rec[0] is not None and rc_same(rc_path(m_c.group(1)), rec[0][0]) and int(m_c.group(2)) == rec[0][1]
                 and (cls_cell is None or cls_cell in rec[1] or not stem_named))
     rc_off, blk_off, ep_off, rc_n, rc_none = [], [], [], 0, 0
+    blk_off_ids: set = set()  # the body blocks whose `File:` or `Reference:` is not their record's: item (46) defers to this item
+    blk_off_rec: dict = {}  # and each such block's record sink (path, line), which item (46) reads before it says "render again"
+    rc_pe37: list = []  # rows whose record's own sink lies past the end of its file: withdrawn, never copied from the record
+    rc_pe37_rows = 0  # of them, rows whose cells are not the record's
+
+    def rec_pe37(rec_, rid_=None):
+        """For a record whose `File:` sink lies past the end of a file of the target: its row's hint (with `rid_`), or True."""
+        n_ = target_lines(rec_[0][0]) if rec_ and rec_[0] else None
+        if n_ is None or rec_[0][1] <= n_:
+            return None
+        return True if rid_ is None else f"`{rid_}`'s record states its sink `{rec_[0][0]}:{rec_[0][1]}`, past the end of that file's {n_} lines: the row is `withdrawn` with a `citation:` line, as item (46) reads it — never copied from the record"
     rc_rows: dict[str, list] = {}
     for c in table_rows:
         if c[4].lower() in ("body", "merged"):
@@ -1640,12 +2256,21 @@ def main() -> int:
                 rec = recs_[free_[0]]
                 if rec[0] is None:
                     rc_off.append(f"`{cell_id(c)}`'s record states no `path:line` on its `File:` line — the row is `unverifiable` with that reason, its block in the Unverifiable section")
+                elif rec_pe37(rec):
+                    rc_pe37.append(rec_pe37(rec, cell_id(c)))
+                    rc_pe37_rows += 1
                 else:
                     rc_off.append(f"`{cell_id(c)}` reads `{c[2] if len(c[2]) <= 60 else c[2][:57] + '…'}` / `{c[3]}` where its record states `{rec[0][0]}:{rec[0][1]}` / `{' or '.join(rec[1]) or 'no reference file'}`")
             b_ = block_id.get(c[6].upper()) if c[4].lower() == "body" and rec[0] is not None else None
             if b_:  # the block against the record, whether or not the row's cells are right
                 bs_, _, bn_ = rc_read(b_)
                 if not (bs_ and rc_meets(f"{bs_[0]}:{bs_[1]}", None, rec)) or (any(k_ in stems for k_ in rec[1]) and not any(n_ in rec[1] for n_ in bn_)):
+                    blk_off_ids.add(c[6].upper())
+                    blk_off_rec[c[6].upper()] = rec[0]
+                    if rec_pe37(rec):  # the record itself is past the end: its row's hint says withdraw; not re-rendered
+                        if not any(x_.startswith(f"`{cell_id(c)}`'s record states its sink") for x_ in rc_pe37):
+                            rc_pe37.append(rec_pe37(rec, cell_id(c)))
+                        continue
                     blk_off.append(f"`{c[6]}` states `{(bs_[0] + ':' + str(bs_[1])) if bs_ else 'no path:line on its File: line'}` / `{bn_[0] if bn_ else 'no reference file'}` where its record `{cell_id(c)}` states `{rec[0][0]}:{rec[0][1]}` / `{' or '.join(rec[1])}`")
     fix37 = []
     if rc_off:
@@ -1656,10 +2281,12 @@ def main() -> int:
         fix37.append(("the table's entry point cells are rebuilt from the worker files — " if len(ep_off) * 2 > rc_n else "")
                      + f"a body row's entry point cell names its worker record's entry point, as the scan-plan's `## Entry points` list names it — its `<file:line>` and name — or in the record's own words when the list holds none, never a word no record wrote: {', '.join(ep_off[:3])}{' …' if len(ep_off) > 3 else ''}"
                      + " — and each body block's `Entry point:` line is its row's cell; then every merge is read again, a merge being one entry point, sink and class")
+    if rc_pe37:
+        fix37.append("; ".join(rc_pe37[:3]) + (" …" if len(rc_pe37) > 3 else ""))
     if blk_off:
         fix37.append(f"a body block's `File:` and `Reference:` are its row's record's: {', '.join(blk_off[:3])}{' …' if len(blk_off) > 3 else ''} — the block is rendered from its record")
-    emit("record cells", f"{rc_n - len(rc_off)} of {rc_n} body and merged rows keep their record's sink and class | rows that do not {len(rc_off)} | body blocks off their record {len(blk_off)} | body entry point cells off their record {len(ep_off)}" + (f" | rows naming no record or beyond their id's records {rc_none} (item 31's)" if rc_none else ""),
-         None, not rc_off and not blk_off and not ep_off, "; ".join(fix37) or None)
+    emit("record cells", f"{rc_n - len(rc_off) - rc_pe37_rows} of {rc_n} body and merged rows keep their record's sink and class | rows that do not {len(rc_off) + rc_pe37_rows} | body blocks off their record {len(blk_off)} | body entry point cells off their record {len(ep_off)}" + (f" | rows naming no record or beyond their id's records {rc_none} (item 31's)" if rc_none else ""),
+         None, not rc_off and not rc_pe37 and not blk_off and not ep_off, "; ".join(fix37) or None)
 
     # 9. header versions
     analyzer = row(report, "Analyzer:") or ""
@@ -1673,9 +2300,15 @@ def main() -> int:
         detail.append(f"{s.replace('llm-sast-scanner-', '').replace('llm-sast-scanner', 'scanner')} v{v}:{'ok' if in_analyzer else 'NO'}")
     wrap_v = frontmatter_version(skills / SKILLS[0]) if skills else None
     wrap_ok = bool(wrap_v) and corrected_str(plan, "wrapper:").endswith(f"v{wrap_v}")
-    if matches == 3 and not wrap_ok:
+    # the header's `Base SHA:` is the plan's base-sha, the sha alone: the next run's same-commit carry reads it to tell a
+    # report of its commit, so a rewritten one would pass this report's findings over there
+    plan_sha9 = plan_base_sha(plan)
+    rep_sha9 = header_sha(report)
+    sha_ok9 = rep_sha9 == plan_sha9 if plan_sha9 else True  # without a base-sha row there is nothing to copy
+    if matches == 3 and sha_ok9 and not wrap_ok:
         PLAN_ONLY.add("header versions")
-    emit("header versions", f"{matches}/3 in Analyzer ({'; '.join(detail)}) | wrapper row {'ok' if wrap_ok else 'NO'}", None, matches == 3 and wrap_ok)
+    emit("header versions", f"{matches}/3 in Analyzer ({'; '.join(detail)}) | wrapper row {'ok' if wrap_ok else 'NO'} | Base SHA {'ok' if sha_ok9 else (rep_sha9 or 'absent')}", None, matches == 3 and wrap_ok and sha_ok9,
+         None if sha_ok9 else f"the header's `Base SHA:` line reads `Base SHA: {plan_sha9}`, the scan-plan's `base-sha`, the sha alone — the next run's same-commit carry reads it to tell a report of its commit")
 
     # 10. headings
     heads = re.findall(r"^## (.*)$", report, re.M)
@@ -1694,8 +2327,8 @@ def main() -> int:
     prev_co_early = closeout_of(read(target / max(earlier_listed, key=lambda x: x[0])[0])) if earlier_listed else None  # the newest listed report's line
     exp_prev = (str(prev_co_early[0]), str(prev_co_early[4])) if prev_co_early else ("n/a", "n/a")
     prev_ok = bool(prev_pair) and (prev_pair.group(1), prev_pair.group(2)) == exp_prev
-    worker_rows = len(table_rows) - len(carried_rows)
-    emit("maturity worker records", f"{worker_rows} (table rows {len(table_rows)} minus carried {len(carried_rows)}) | previous pair {exp_prev[0]}/{exp_prev[1]} {'stated' if prev_ok else 'NOT stated'}", str(wr[0]) if wr else "absent", bool(wr) and wr[0] == worker_rows and prev_ok,
+    worker_rows = len(table_rows) - len(carried_rows) - len(refuted_rows)
+    emit("maturity worker records", f"{worker_rows} (table rows {len(table_rows)} minus carried {len(carried_rows)}{f' and refuted {len(refuted_rows)}' if refuted_rows else ''}) | previous pair {exp_prev[0]}/{exp_prev[1]} {'stated' if prev_ok else 'NOT stated'}", str(wr[0]) if wr else "absent", bool(wr) and wr[0] == worker_rows and prev_ok,
          None if (bool(wr) and wr[0] == worker_rows and prev_ok) else f"the maturity line's pairs read `worker records {worker_rows} vs {exp_prev[0]} | body {len(blocks)} vs {exp_prev[1]}` — this run's table rows and body blocks against the newest earlier report's close-out")
 
     # 12. new keys
@@ -1865,7 +2498,7 @@ def main() -> int:
     emit("ledger rows at start", f"{len(copy_rows)} over {copy_path.name if copy_path else 'absent'} ({'present' if copy_path and copy_path.exists() else 'ABSENT'})"
          + (f" | the cache is an earlier run's: {ref_[1]} left {ref_[0]} ledger rows" if ref_ else ""),
          str(start_val) if start_val is not None else "absent", start_val is not None and copy_path is not None and copy_path.exists() and start_val == len(copy_rows) and (not rep_led or rep_led[0] == len(copy_rows)) and carry_ok,
-         None if carry_ok else f"a STEP 1 line: the pre-write copy holds {len(copy_rows)} ledger rows where {ref_[1]} left {ref_[0]} — project-memory.md was re-created, rewritten or removed before STEP 1 copied it, and the ledger it held is not this run's to carry; an existing memory is copied before anything reads or writes it, never initialised from the template, and a run that finds this restores the cache or starts fresh with the cache deleted")
+         (None if start_val == len(copy_rows) or copy_path is None or not copy_path.exists() else f"a STEP 1 line: the row reads `ledger rows at start: {len(copy_rows)}` — the count in {copy_path.name}, never in another run's copy, as STEP 1's `python3 <this skill's directory>/recheck.py --ledger-start` prints it" + (f" — and the row is corrected by appending ` → corrected {len(copy_rows)} at <date +%Y-%m-%d_%H-%M-%S>` to the end of its line, never by retyping it" if start_val is not None else "")) if carry_ok else f"a STEP 1 line: the pre-write copy holds {len(copy_rows)} ledger rows where {ref_[1]} left {ref_[0]} — project-memory.md was re-created, rewritten or removed before STEP 1 copied it, and the ledger it held is not this run's to carry; an existing memory is copied before anything reads or writes it, never initialised from the template, and a run that finds this restores the cache or starts fresh with the cache deleted")
 
     # 17. non-stem classes
     non_ledger = sum(1 for m in ledger if m.group(1) not in stems)
@@ -1882,7 +2515,8 @@ def main() -> int:
         old_cls, sink = m.group(1), canon(m.group(2))
         if old_cls in stems:
             continue
-        now_rows = [r for r in ledger_by_sink.get(sink, []) if r.group(1) in stems]
+        # the ledger's stem rows at the sink, and a row this run archived there (a refuted key's), its trail kept
+        now_rows = [r for r in ledger_by_sink.get(sink, []) if r.group(1) in stems] + [r for r in arch_moved if canon(r.group(2)) == sink and r.group(1) in stems]
         if now_rows:
             rekeyed += 1
             if not any(f" was {old_cls}" in r.group(3).split(" | ")[0] for r in now_rows):
@@ -1969,7 +2603,8 @@ def main() -> int:
     # its brief gains `not re-found <date>`; a row that lost its finding without the mark is a miss nobody recorded
     run_date = (started or "")[:10]
     carried_keys = {corrected_key(c[3], c[2]) for c in carried_rows}
-    unfound = [k for k in {corrected_key(m.group(1), m.group(2)) for m in copy_rows} if k not in body_keys and k not in carried_keys]
+    refuted_keys = {corrected_key(c[3], c[2]) for c in refuted_rows}  # withdrawn by Step 6 on a worker's line: item (47)'s, its row archived
+    unfound = [k for k in {corrected_key(m.group(1), m.group(2)) for m in copy_rows} if k not in body_keys and k not in carried_keys and k not in refuted_keys]
     marked = sum(1 for k in unfound if k in ledger_keys and any(f"not re-found {run_date}" in m.group(3) for m in ledger if key_of(m.group(1), m.group(2)) == k))
     gone = sum(1 for k in unfound if k not in ledger_keys)
     emit("not re-found", f"{marked}/{len(unfound)} rows without a body record this run carry `not re-found {run_date}` | rows gone from the ledger {gone}", None, marked == len(unfound) and gone == 0)
@@ -2153,18 +2788,32 @@ def main() -> int:
     last_sha, sha_how = copy_commit(copy_text)
     sha_note = {"run line": " | commit read from the copy's newest run line (the copy has no last-scanned-sha)",
                 "unreadable": " | the copy has no last-scanned-sha and no run line that names a commit"}.get(sha_how, "")
-    base_sha = ((row(plan, "base-sha:") or "").split() or [None])[0]  # the sha itself; `(HEAD)` or a note after it is ignored
+    base_sha = plan_base_sha(plan)  # the sha itself; `(HEAD)` or a note after it is ignored
     unchanged = same_commit(last_sha, base_sha)
     without_src = ints(r"^carried without source:\s*(\d+)", appendix)
     without_src = without_src[0] if without_src else 0
     if unchanged:
         open_copy = {corrected_key(m.group(1), m.group(2)) for m in copy_rows if m.group(3).split(" | ")[-1].strip() == "open"}
-        judged_keys = {key_of(c[3], c[2]) for c in table_rows if c[4].lower() != "carried"}  # any disposition a worker's record received
+        judged_keys = {key_of(c[3], c[2]) for c in table_rows if c[4].lower() not in ("carried", "refuted")}  # any disposition a worker's record received
+        # a `refuted` row is a source block Step 6 withdrew on a worker's `ledger refuted:` line: the key's other blocks are
+        # still carried, and a key whose every block is withdrawn carries none (item 47 holds the rest)
+        ref26 = Counter(corrected_key(c[3], c[2]) for c in refuted_rows)
         unjudged = sorted(k for k in open_copy if k not in judged_keys)
         # source: the newest earlier report holding blocks with the key's sink and a compatible reference stem; EVERY such
         # block is carried (one per entry point), each word for word — heading id, `Worker record:` and `Carried:` lines
         # aside, whitespace collapsed — and no source block twice
         # src_blocks: the listed earlier reports' blocks, built once for item 14 above
+        # a source is a report written at this commit, its header's `Base SHA:` this run's base-sha: a report of another
+        # commit judged other code — a row it confirmed that a changed-commit run left `open`, its sink's file unchanged,
+        # may cite hops that moved since — so its blocks are no source (item 14 still reads them for verdicts)
+        def report_sha(name_):
+            return header_sha(read(target / name_))
+
+        def at_this_commit(sha_):
+            """A header sha naming this run's commit: the base-sha, or seven or more of its leading hex digits either way."""
+            a_, b_ = (sha_ or "").lower(), (base_sha or "").lower()
+            return bool(re.fullmatch(r"[0-9a-f]{7,64}", a_) and re.fullmatch(r"[0-9a-f]{7,64}", b_)) and (a_.startswith(b_) or b_.startswith(a_))
+        src26 = {name_: bl_ for name_, bl_ in src_blocks.items() if at_this_commit(report_sha(name_))}
 
         def carry_norm(b):
             out = []
@@ -2181,31 +2830,75 @@ def main() -> int:
                 out.append(s)
             return out
 
-        def key_candidates(k):
+        def holds_key(sb, cls, sink):
+            if file_of(sb) != sink:
+                return False
+            stem = re.search(r"references/([a-z0-9_]+)\.md", sb)
+            # at a sink whose downgrade stands, only a block that honours it can be the source
+            return (not stem or stem.group(1) == cls) and ((sink, cls) not in prev_dd or honours(adversarial(sb) or "", (sink, cls)))
+
+        def key_candidates(k, pool=None):
             cls, sink = k.split("|", 1)
-            for name in reversed(list(src_blocks)):
-                cands = []
-                for sb in src_blocks[name]:
-                    if file_of(sb) == sink:
-                        stem = re.search(r"references/([a-z0-9_]+)\.md", sb)
-                        # at a sink whose downgrade stands, only a block that honours it can be the source
-                        if (not stem or stem.group(1) == cls) and ((sink, cls) not in prev_dd or honours(adversarial(sb) or "", (sink, cls))):
-                            cands.append(carry_norm(sb))
+            pool = src26 if pool is None else pool
+            for name in reversed(list(pool)):
+                # a block citing a line past the end of a file of the target is no source: at an unchanged commit that line
+                # never existed, so the block was never verified where it points
+                cands = [carry_norm(sb) for sb in pool[name] if holds_key(sb, cls, sink) and not citations_of(sb)[1]]
                 if cands:
                     return name, cands
             return None, []
 
+        def past_end_sources(k):
+            """The blocks of the key that cite past the end of a file and were passed over: in every listed report of this
+            commit from the newest holding the key down to and including its source, or in all of them when it has none."""
+            cls, sink = k.split("|", 1)
+            passed = []
+            for name in reversed(list(src26)):
+                held = [sb for sb in src26[name] if holds_key(sb, cls, sink)]
+                passed += [sb for sb in held if citations_of(sb)[1]]
+                if any(not citations_of(sb)[1] for sb in held):
+                    break
+            return passed
+
         cand = {k: key_candidates(k) for k in unjudged}
         computed_without = sum(1 for k in unjudged if not cand[k][1])
-        expected = sum(len(c) for _, c in cand.values())
+        past_end26 = sum(len(past_end_sources(k)) for k in unjudged)
+        expected = sum(max(0, len(c) - ref26.get(k, 0)) for k, (_, c) in cand.items())
         copy_lines: dict[str, set] = {}  # twin rows (`:20` and `:20-24`) share a canonical key: a carried row's line must be one of them
         for m in copy_rows:
             copy_lines.setdefault(corrected_key(m.group(1), m.group(2)), set()).add(m.group(0))
         verified = 0
         verbatim = 0
         claimed = set()
-        unver26, unverb26, nosrc26_rows = [], [], []  # the blocks that fail, with what their label or text should be, for the hint
+        unver26, unverb26, nosrc26_rows, pe26 = [], [], [], []  # the blocks that fail, with what their label or text should be, for the hint
+        pe_norm_memo: dict = {}
+
+        other_memo: dict = {}
+
+        def other_note(k_):
+            """Why a key with a block of its own in a listed report has no source: its source blocks are all in reports of another commit."""
+            if k_ not in other_memo:
+                other_memo[k_] = " — its only source blocks are in reports of another commit, whose `Base SHA:` is not this run's base-sha" if k_ and key_candidates(k_, src_blocks)[0] else ""
+            return other_memo[k_]
+
+        def pe_norms(k_):
+            """The past-end blocks of a key's source report, as carry_norm reads them — or of every report of this commit
+            holding it when it has no source. A carried copy of one of these is no source; a copy of a newer report's past-end block, the key
+            carried from an older one, is re-copied from that report instead."""
+            if k_ not in pe_norm_memo:
+                cls_, sink_ = k_.split("|", 1)
+                found_, all_pe = None, []
+                for name in reversed(list(src26)):
+                    held = [sb for sb in src26[name] if holds_key(sb, cls_, sink_)]
+                    pe_ = [sb for sb in held if citations_of(sb)[1]]
+                    all_pe += pe_
+                    if len(pe_) < len(held):
+                        found_ = pe_
+                        break
+                pe_norm_memo[k_] = [carry_norm(sb) for sb in (found_ if found_ is not None else all_pe)]
+            return pe_norm_memo[k_]
         for b in carried_blocks:
+            bad_b = citations_of(b)[1]
             lab = re.search(r"^Carried: confirmed (\S+) at (\S+) — not re-judged this run — source (\S+)", b, re.M)
             crow = next((c for c in carried_rows if c[6].upper() == RECORD_RX.match(b).group(2).upper()), None)
             key = corrected_key(crow[3], crow[2]) if crow else None  # canonical, class-corrected: a range or title-class cell still names the key
@@ -2214,6 +2907,10 @@ def main() -> int:
             lv_cells = {ln.split(" | ")[-2].strip() for ln in copy_lines.get(key, set()) if len(ln.split(" | ")) >= 6} if key else set()
             label_ok = bool(lab) and lab.group(1) in lv_cells and lab.group(2) == base_sha
             bid26 = RECORD_RX.match(b).group(2)
+            # a copy of a source block that is none: its key may keep other sources, but this block is not carried
+            pe_copy = bool(bad_b) and key is not None and carry_norm(b) in pe_norms(key)
+            if bad_b and (pe_copy or not newest):
+                pe26.append(f"`{bid26}` cites `{bad_b[0][0]}`, past the end of that file's {bad_b[0][1]} lines" + (" — a copy of a block that is no source, beside its key's source blocks" if newest else ""))
             if label_ok and newest and lab.group(3) == newest:
                 verified += 1
                 hit26 = False
@@ -2225,7 +2922,7 @@ def main() -> int:
                             verbatim += 1
                             hit26 = True
                             break
-                if not hit26:
+                if not hit26 and not pe_copy:
                     n_lab = len(re.findall(r"^Carried: confirmed ", b, re.M))
                     if n_lab > 1:
                         unverb26.append(f"`{bid26}` holds {n_lab} `Carried:` lines — one")
@@ -2236,7 +2933,8 @@ def main() -> int:
             elif not crow:
                 unver26.append(f"`{bid26}` has no `carried` row")
             elif not newest:
-                nosrc26_rows.append(f"`{bid26}` at `{key}`" + (" — its row counts in `carried without source`" if key in cand else ""))
+                if not bad_b:  # a block citing past the end is told why above, with the legal path
+                    nosrc26_rows.append(f"`{bid26}` at `{key}`" + (" — its row counts in `carried without source`" if key in cand else "") + other_note(key))
             else:
                 want_lv = sorted(lv_cells)[0] if lv_cells else None
                 if not lab:
@@ -2245,8 +2943,11 @@ def main() -> int:
                 else:
                     diff = ([f"date {lab.group(1)} where the copy row's `last-verified` reads {want_lv}" if want_lv else f"date {lab.group(1)} where the copy holds no `last-verified` cell for `{key}`"] if lab.group(1) not in lv_cells else []) \
                         + ([f"sha {lab.group(2)} where base-sha reads {base_sha}"] if lab.group(2) != base_sha else []) \
-                        + ([f"source {lab.group(3)} where the newest listed report holding `{key}` is {newest}"] if lab.group(3) != newest else [])
+                        + ([f"source {lab.group(3)} where the newest listed report holding a block of `{key}` that is a source is {newest}"
+                             + (" — the report it names is of another commit, its `Base SHA:` not this run's base-sha" if lab.group(3) in src_blocks and lab.group(3) not in src26 else "")] if lab.group(3) != newest else [])
                     unver26.append(f"`{bid26}` names " + " and ".join(diff))
+                    if newest and cands and carry_norm(b) not in cands and not pe_copy:  # the whole fix at once: the one repair re-labels and re-copies
+                        unverb26.append(f"`{bid26}` differs from every block of `{key}` in {newest} — it is copied anew from that report, its row's verdict cell, its heading and its severity section following the copied block and every count taken again")
         # a carried row's ledger line is left as it stands: the same line, byte for byte, in the copy and in the file
         # rows compared with their sink cell read by first line: a lone range row whose sink the writer wrote as its first line,
         # every other cell intact, is the same row
@@ -2263,7 +2964,9 @@ def main() -> int:
         # the one row their merge left: its sha, last-verified and status cells those of one twin, its brief holding every
         # twin's brief (STEP X joins them with `; `)
         def row_altered(k):
-            now, was = now_lines.get(k, set()), copy_lines.get(k, set())
+            return row_changed(now_lines.get(k, set()), copy_lines.get(k, set()))
+
+        def row_changed(now, was):
             if not now:
                 return True
             # a merge (range twins) or a class correction (a copy row under a non-stem class) leaves one row: its sha,
@@ -2278,21 +2981,72 @@ def main() -> int:
                 return not (any(row[3:] == w[3:] for w in olds) and all(w[2].strip() in row[2] for w in olds))
             return not now <= was
         altered_keys = sorted(k for k in {corrected_key(c[3], c[2]) for c in carried_rows} if row_altered(k))
+        # a key without source is not carried and stays as the pre-write copy holds it, `open`, its brief gaining only
+        # `not re-found <date>`: one run re-statused such a row `superseded` and rewrote its brief, and nothing read it
+        # a row merged from range twins, or one STEP X rekeyed to its stem, is read as a carried key's is (row_changed)
+        # a mark in any form item (24) reads — after `; `, a dash, a colon or a space, in brackets, with a trailing period
+        mark_rx = re.compile(r"[\s;,.:\u2014\u2013-]*[(\[]?\s*not re-found (\d{4}-\d{2}-\d{2})\s*[)\]]?\.?")
+        edge_ = " ;,.:\u2014\u2013-"
+
+        def unmarked(line_: str) -> tuple[str, set]:
+            """The row with its brief's `not re-found <date>` marks taken out, the brief's edges trimmed, and the marks' dates."""
+            cells_ = line_.split(" | ")
+            if len(cells_) < 3:
+                return line_, set()
+            dates_ = set(mark_rx.findall(cells_[2]))
+            b_ = mark_rx.sub(" ; ", cells_[2])
+            b_ = re.sub(r"\s*;(\s*;)+", ";", " ".join(b_.split()))
+            cells_[2] = b_.strip(edge_)
+            return " | ".join(cells_), dates_
+
+        def brief_parts(b_: str, trails=()) -> set:
+            """A brief as the set of its `; `-joined parts, every ` was <class>` trail STEP X appends for a class it corrects
+            taken out — never another ` was <word>`, which is the brief's own text."""
+            for c_ in trails:
+                b_ = re.sub(r"\s+was " + re.escape(c_) + r"\b", "", b_)
+            return {x_.strip(edge_) for x_ in b_.split(";") if x_.strip(edge_)}
+
+        def nosrc_changed(k_):
+            now_, was_ = now_lines.get(k_, set()), copy_lines.get(k_, set())
+            if not now_:
+                return False  # a row gone is item (24)'s
+            nu_ = [unmarked(x_) for x_ in now_]
+            wu_ = [unmarked(x_) for x_ in was_]
+            marks_now = set().union(*(d_ for _, d_ in nu_))
+            marks_was = set().union(*(d_ for _, d_ in wu_))
+            # every mark the copy held stays, and the only mark added is this run's
+            if not (marks_was <= marks_now and marks_now <= marks_was | {run_date}):
+                return True
+            corrected_ = any(w_.split(" | ")[0].strip() not in stems for w_ in was_) if stems else False
+            if len(nu_) == 1 and (len(wu_) > 1 or corrected_):
+                # the one row a twin merge or a class correction left: `open`, the sha and last-verified of a copy row, and
+                # a brief made of the copy rows' briefs and nothing else — stricter than a carried key's, which only
+                # holds them
+                row_ = nu_[0][0].split(" | ")
+                olds_ = [w_.split(" | ") for w_, _ in wu_]
+                if len(row_) < 6 or any(len(w_) < 6 for w_ in olds_):
+                    return True
+                trails_ = sorted({w_[0].strip() for w_ in olds_ if stems and w_[0].strip() not in stems})
+                return not (row_[5].strip() == "open" and any(row_[3:5] == w_[3:5] for w_ in olds_)
+                            and brief_parts(row_[2], trails_) == set().union(*(brief_parts(w_[2], trails_) for w_ in olds_)))
+            return not {x_ for x_, _ in nu_} <= {x_ for x_, _ in wu_}
+        nosrc_alt = sorted(k_ for k_ in unjudged if not cand[k_][1] and nosrc_changed(k_))
         altered = len(altered_keys)
         mat_carried = ints(r"^maturity: .*\| carried (\d+) \|", appendix)
         mat_carried = mat_carried[0] if mat_carried else 0
         ok26 = (len(carried_rows) == expected and len(carried_blocks) == len(carried_rows) and verified == len(carried_blocks)
-                and verbatim == len(carried_blocks) and altered == 0 and mat_carried == len(carried_rows) and without_src == computed_without)
+                and verbatim == len(carried_blocks) and altered == 0 and not nosrc_alt and mat_carried == len(carried_rows) and without_src == computed_without)
         ws = f"{without_src}" if without_src == computed_without else f"{without_src} (computed {computed_without})"
         # the fix, key by key: what each source report holds against what is carried, then each block that does not check
         per_key = Counter(corrected_key(c[3], c[2]) for c in carried_rows)
         short26, extra26 = [], []
         for k_ in unjudged:
             src_, cs_ = cand[k_]
-            if cs_ and per_key.get(k_, 0) != len(cs_):
-                short26.append(f"`{k_}`: {src_} holds {len(cs_)} block(s) at that sink and class — one per entry point — and {per_key.get(k_, 0)} carried")
+            if cs_ and per_key.get(k_, 0) != max(0, len(cs_) - ref26.get(k_, 0)):
+                short26.append(f"`{k_}`: {src_} holds {len(cs_)} source block(s) at that sink and class — one per entry point — and {per_key.get(k_, 0)} carried"
+                               + (f", {ref26[k_]} withdrawn as `refuted` rows" if ref26.get(k_) else ""))
         for k_ in sorted(set(per_key) - set(unjudged)):
-            extra26.append(f"`{k_}` is carried though " + ("a worker's record reached it this run — its row is that record's disposition" if k_ in judged_keys else "no open row of the pre-write copy holds it"))
+            extra26.append(f"`{k_}` is carried though " + ("Step 6 withdrew it on a worker's `ledger refuted:` line — its `refuted` rows are its disposition" if any(corrected_key(c[3], c[2]) == k_ for c in refuted_rows) else "a worker's record reached it this run — its row is that record's disposition" if k_ in judged_keys else "no open row of the pre-write copy holds it"))
         nosrc26 = [k_ for k_ in unjudged if not cand[k_][1]]
         cb_ids26 = {RECORD_RX.match(b).group(2).upper() for b in carried_blocks}
         all_ids26 = {RECORD_RX.match(b).group(2).upper() for b in blocks}
@@ -2303,21 +3057,23 @@ def main() -> int:
                 continue
             k_ = corrected_key(c[3], c[2])
             if not (cand[k_] if k_ in cand else key_candidates(k_))[0]:  # no source: the row goes, it gains no block
-                nosrc26_rows.append(f"`{c[6]}` at `{k_}`" + (" — its row counts in `carried without source`" if k_ in cand else ""))
+                nosrc26_rows.append(f"`{c[6]}` at `{k_}`" + (" — its row counts in `carried without source`" if k_ in cand else "") + other_note(k_))
             else:
                 norow26.append(f"`{c[6]}` " + ("has a block without the `Carried:` label" if c[6].upper() in all_ids26 else "has no block"))
         fix26 = [x_ for x_ in (
-            ("every block the newest listed report holds at the sink and class of an open key no worker re-confirmed is carried, each its own row and block: " + "; ".join(short26[:4]) + (" …" if len(short26) > 4 else "")) if short26 else "",
+            ("every source block of an open key no worker re-confirmed — the blocks at its sink and class of the newest listed report holding one that is a source — is carried, each its own row and block: " + "; ".join(short26[:4]) + (" …" if len(short26) > 4 else "")) if short26 else "",
             "; ".join(extra26[:3]) + (" …" if len(extra26) > 3 else "") if extra26 else "",
-            (f"`carried without source: {computed_without}` — the open keys no worker re-confirmed and no listed report holds a block for" + (f": {', '.join('`' + k_ + '`' for k_ in nosrc26[:4])}" if nosrc26 else "") + f" (it reads {without_src})") if without_src != computed_without else "",
+            (f"`carried without source: {computed_without}` — the open keys no worker re-confirmed and no listed report holds a block that is a source for" + (f": {', '.join('`' + k_ + '`' + other_note(k_) for k_ in nosrc26[:4])}" if nosrc26 else "") + f" (it reads {without_src})") if without_src != computed_without else "",
             (f"each carried row renders one block, labelled `Carried: confirmed …`: {len(carried_rows)} rows, {len(carried_blocks)} blocks" + (f" — {', '.join(norow26[:4])}{' …' if len(norow26) > 4 else ''}" if norow26 else "")) if norow26 or (len(carried_blocks) != len(carried_rows) and not nosrc26_rows) else "",
-            ("a row whose key no listed report holds as a block cannot be carried: " + "; ".join(nosrc26_rows[:4]) + (" …" if len(nosrc26_rows) > 4 else "")) if nosrc26_rows else "",
+            ("a row whose key no listed report holds a block that is a source for cannot be carried: " + "; ".join(nosrc26_rows[:4]) + (" …" if len(nosrc26_rows) > 4 else "")) if nosrc26_rows else "",
+            (f"a block citing a line past the end of its file is no source: it is not carried, and not re-cited or re-keyed — its row and block go, and a key left with no source counts in `carried without source`, its ledger row `open` as the pre-write copy holds it with `not re-found {run_date}` added: " + "; ".join(pe26[:4]) + (" …" if len(pe26) > 4 else "")) if pe26 else "",
             ("each carried block's label names the copy row's `last-verified`, this run's base-sha and its source: " + "; ".join(unver26[:3]) + (" …" if len(unver26) > 3 else "")) if unver26 else "",
             ("each carried block is its source block word for word — its heading id, `Worker record:` and `Carried:` lines aside: " + "; ".join(unverb26[:3]) + (" …" if len(unverb26) > 3 else "")) if unverb26 else "",
             f"a carried key's ledger row stands as the pre-write copy holds it, its status `open` and its cells unchanged: {', '.join('`' + k_ + '`' for k_ in alt26[:4])}{' …' if len(alt26) > 4 else ''}" if alt26 else "",
+            f"a key without source keeps its ledger row as the pre-write copy holds it — or the one row a range-twin merge or STEP X's class correction left — `open`, every mark it held kept and its brief gaining only `not re-found {run_date}`, never re-statused or rewritten: {', '.join('`' + k_ + '`' for k_ in nosrc_alt[:4])}{' …' if len(nosrc_alt) > 4 else ''}" if nosrc_alt else "",
             f"the maturity line's `carried` reads {mat_carried} and the close-out's {co_carried}, the carried rows {len(carried_rows)}" if (mat_carried != len(carried_rows) or co_carried != len(carried_rows)) else "") if x_]
         ok26_all = ok26 and co_carried == len(carried_rows)
-        emit("carried", f"{len(carried_rows)} rows | blocks {len(carried_blocks)} | sources verified {verified}/{len(carried_blocks)} | verbatim {verbatim}/{len(carried_blocks)} | without source {ws} | expected {expected} | ledger rows altered {altered}{sha_note}", f"{co_carried} (close-out) / {mat_carried} (maturity line)", ok26_all,
+        emit("carried", f"{len(carried_rows)} rows | blocks {len(carried_blocks)} | sources verified {verified}/{len(carried_blocks)} | verbatim {verbatim}/{len(carried_blocks)} | without source {ws} | sources citing past the end {past_end26} | expected {expected} | ledger rows altered {altered} | rows without source altered {len(nosrc_alt)}{sha_note}", f"{co_carried} (close-out) / {mat_carried} (maturity line)", ok26_all,
              None if ok26_all or not fix26 else "; ".join(fix26))
     else:
         why26 = ("base-sha unknown: no commit to compare" if (base_sha or "").lower() == "unknown"
@@ -2326,6 +3082,111 @@ def main() -> int:
                  else f"base-sha {base_sha} differs from the copy's last-scanned-sha {last_sha}")
         emit("carried", f"not applicable ({why26}) | carried rows {len(carried_rows)}{sha_note}", None, len(carried_rows) == 0,
              None if not carried_rows else f"nothing is carried here ({why26}): the Same-commit carry holds only at an unchanged commit, so the {len(carried_rows)} carried row(s) and their blocks go, and every count that read them is taken again")
+
+    # 47. refutations — at an unchanged commit a worker's `ledger refuted:` line at an open key no row of another
+    # disposition holds is a claim STEP 3 tests with Step 6, block by block, before the key is carried: a withdrawn block
+    # is a `refuted` row instead of a carried one; every block withdrawn, the key's ledger row is archived `superseded`
+    # and a false-positive pattern holds it; none withdrawn, it is carried as (26) reads it; without a source block it
+    # stays a row without source. One outcome per key, one appendix line naming it.
+    refute47, unparsed47 = [], []  # (pair, class, sink, guard); lines that do not parse
+    for pth_, txt_ in worker_text.items():
+        m_f = re.match(r"^deep-(.+)-(p\d+)-results\.md$", Path(pth_).name)
+        if not m_f:
+            continue
+        ok_, bad_ = refute_lines(txt_)
+        refute47 += [(f"{m_f.group(1)}/{m_f.group(2)}", c_, s_, g_) for c_, s_, g_ in ok_]
+        unparsed47 += [f"{m_f.group(1)}/{m_f.group(2)}: `{l_}`" for l_ in bad_]
+    stated47 = ints(r"^[-*\s]*\**refutations:\**\s*(\d+)", appendix)
+    app47: dict = {}
+    for l_ in appendix.splitlines():
+        m_ = re.match(r"^[-*+\s]*\**refuted:\**\s*`?([a-z][a-z0-9_]*)`?\s*\|\s*`?([^|`\s]+?:\d+(?:-\d+)?)`?[,;.]?(?:\s*[\u2014\u2013]\s*|\s+-{1,2}\s+)(.+)$", l_.strip())
+        if not m_:
+            continue
+        out_ = re.split(r"\s*[\u2014\u2013]\s*|\s-{1,2}\s", m_.group(3))[-1].strip(" `*")
+        word_ = next((w_ for w_ in ("partly withdrawn", "withdrawn", "stands", "no source") if out_.startswith(w_)), out_[:30])
+        app47.setdefault(corrected_key(m_.group(1), m_.group(2)), []).append((word_, out_))
+    if unchanged:
+        record_keys = {key_of(c[3], c[2]) for c in table_rows if c[4].lower() not in ("carried", "refuted")}
+        copy_keys47 = {corrected_key(m.group(1), m.group(2)) for m in copy_rows}
+        car_ids: dict = {}
+        for c in carried_rows:
+            car_ids.setdefault(corrected_key(c[3], c[2]), set()).add(re.sub(r"[`*]", "", c[6]).strip().upper())
+        live47: dict = {}
+        off47 = []  # a parsed line naming no open key of the copy: the worker's error
+        for pair_, cls_, sink_, guard_ in refute47:
+            k_ = corrected_key(cls_, sink_)
+            if k_ in open_copy and k_ not in record_keys:
+                live47.setdefault(k_, []).append((pair_, guard_))
+            elif k_ not in copy_keys47:
+                off47.append(f"{pair_}: `{cls_} | {sink_}`")
+        ref_at = Counter(corrected_key(c[3], c[2]) for c in refuted_rows)
+        car_at = Counter(corrected_key(c[3], c[2]) for c in carried_rows)
+        arch_status: dict = {}
+        for m_a in arch_rows:
+            arch_status.setdefault(corrected_key(m_a.group(1), m_a.group(2)), set()).add(m_a.group(3).split(" | ")[-1].strip(" |"))
+        fp_sec = memory.split("## Confirmed false-positive patterns", 1)[1].split("\n## ", 1)[0] if "## Confirmed false-positive patterns" in memory else ""
+        fp_keys = set()
+        for l in fp_sec.splitlines():
+            m_p = re.match(r"^\s*(?:[-*]\s+)?`?([a-z][a-z0-9_]*)`? \| `?([^|`]+?:\d+(?:-\d+)?)`?\s*\|", l)
+            if m_p:
+                fp_keys.add(corrected_key(m_p.group(1), m_p.group(2)))
+        outcome, bad47 = {}, []
+        for k_ in sorted(live47):
+            n_src = len(key_candidates(k_)[1])
+            r_, c_ = ref_at.get(k_, 0), car_at.get(k_, 0)
+            if not n_src:
+                outcome[k_] = "no source" if not (r_ or c_) else None
+                if r_ or c_:
+                    bad47.append(f"`{k_}` has no source block, so nothing of it is carried or withdrawn — it stays a row without source")
+            elif r_ == n_src and not c_:
+                outcome[k_] = "withdrawn"
+                miss_ = (["its ledger row still in the ledger"] if k_ in ledger_keys else []) \
+                    + (["no archive row with status `superseded`"] if "superseded" not in arch_status.get(k_, set()) else []) \
+                    + (["no false-positive pattern row at its class and sink"] if k_ not in fp_keys else [])
+                if miss_:
+                    bad47.append(f"`{k_}` withdrawn in every block: " + ", ".join(miss_))
+            elif not r_ and c_:
+                outcome[k_] = "stands"
+            elif 0 < r_ < n_src and r_ + c_ == n_src:
+                outcome[k_] = "partly withdrawn"
+                if k_ not in ledger_keys:
+                    bad47.append(f"`{k_}` is withdrawn in {r_} of its {n_src} source blocks: the rest are carried, so its ledger row stays in the ledger as the copy holds it")
+            else:
+                outcome[k_] = None
+                bad47.append(f"`{k_}` has {r_} `refuted` and {c_} carried row(s) for {n_src} source block(s) — each block is one or the other: Step 6's withdrawn blocks are `refuted` rows, the rest carried")
+            got_ = [w_ for w_, _ in app47.get(k_, [])]
+            if outcome[k_] and got_ == [outcome[k_]]:
+                txt_ = app47[k_][0][1]
+                ids_ = {x_.upper() for x_ in re.findall(r"(?i)VULN-[A-Za-z0-9-]*\d", txt_)}
+                want_ids = car_ids.get(k_, set())
+                nm_ = re.match(r"partly withdrawn:\s*(\d+)\s+of\s+(\d+)", txt_)
+                if outcome[k_] == "partly withdrawn" and not (nm_ and int(nm_.group(1)) == r_ and int(nm_.group(2)) == n_src):
+                    bad47.append(f"`{k_}`'s appendix line reads `{txt_[:60]}` where it reads `partly withdrawn: {r_} of {n_src} blocks, …`")
+                if outcome[k_] in ("stands", "partly withdrawn") and ids_ != want_ids:
+                    bad47.append(f"`{k_}`'s appendix line names {', '.join(sorted(ids_)) or 'no VULN id'} where the key's carried blocks are {', '.join(sorted(want_ids))}")
+            if outcome[k_] and got_ != [outcome[k_]]:
+                tail_ = {"stands": ", carried as <VULN ids>", "partly withdrawn": ": <n> of <m> blocks, carried as <VULN ids>", "no source": ", not tested"}.get(outcome[k_], "")
+                bad47.append(f"`{k_}`'s appendix line " + (f"reads {', '.join('`' + g_ + '`' for g_ in got_)}" if got_ else "is absent") + f" where it names `{outcome[k_]}` — one line for the key, `refuted: <class> | <sink> — <lens>/p<n>[, …]: <the guards, joined with `; `> — {outcome[k_]}{tail_}`")
+        stray_rows = sorted(k_ for k_ in ref_at if k_ not in live47)
+        stray_lines = sorted(k_ for k_ in app47 if k_ not in live47)
+        if stray_rows:
+            bad47.append(f"`refuted` rows at {', '.join('`' + k_ + '`' for k_ in stray_rows[:4])} — no worker's `ledger refuted:` line names that open key, or a row of another disposition holds it this run: the row goes, and the key reads as it would without it")
+        if stray_lines:
+            bad47.append(f"`refuted:` lines at {', '.join('`' + k_ + '`' for k_ in stray_lines[:4])} — a line is written only for an open key a worker's `ledger refuted:` line names and no row of another disposition holds")
+        if not ((stated47[0] == len(live47)) if stated47 else not live47):
+            bad47.append(f"the appendix line reads `refutations: {len(live47)}`, the open keys a worker's `ledger refuted:` line names that no row of another disposition holds")
+        # a worker's line the checker cannot read, or one naming no row of the copy, is shown, never a mismatch: its key is
+        # carried as a key no line names, as before refutations were read
+        worker47 = bool(unparsed47 or off47)
+        unacc47 = sum(1 for k_ in live47 if outcome.get(k_) is None)
+        counts47 = Counter(v_ for v_ in outcome.values() if v_)
+        emit("refutations", f"{len(live47)} | withdrawn {counts47['withdrawn']} | partly withdrawn {counts47['partly withdrawn']} | stands {counts47['stands']} | no source {counts47['no source']} | refuted rows {len(refuted_rows)} | unaccounted {unacc47}"
+             + (f" | worker lines unread {len(unparsed47)} | naming no ledger row {len(off47)} ({'; '.join((unparsed47 + off47)[:2])})" if worker47 else ""),
+             str(stated47[0]) if stated47 else "absent", not bad47,
+             "; ".join(bad47[:6]) + (" …" if len(bad47) > 6 else "") if bad47 else None)
+    else:
+        emit("refutations", f"not applicable (a refutation is tested only at an unchanged commit) | refuted rows {len(refuted_rows)} | lines {len(refute47)}", None, not refuted_rows,
+             None if not refuted_rows else f"nothing is carried here, so nothing is refuted: the {len(refuted_rows)} `refuted` row(s) go and each key reads as it would without them")
 
     # 36. memory header — the written memory keeps the base skill's header above its ledger: `scanner-version`,
     # `last-scanned-sha` the plan's base-sha (what the next run's same-commit test reads), `last-updated` a date of this
@@ -2640,6 +3501,37 @@ def main() -> int:
     emit("routed hand-offs", f"handoff-table.md {'present' if ho_file.exists() else 'ABSENT'} | {len(ho_rows)} rows", str(ho_st[0]) if ho_st else "absent", ho_ok,
          None if ho_ok else f"`handoff-table.md` holds one row per STEP Y hand-off, each with its final disposition, and the appendix's `routed: <n>` counts those rows: {len(ho_rows)} in the file" + ("" if ho_file.exists() else " — the file is absent: write it, a header alone when there were none"))
 
+    # 46. citations — every `file:line` a block's `File:` and `Flow:` lines cite in a file of the target lies within it: one
+    # carried block cited line 533 of a 496-line file across six reports, and a repair that corrected it had no legal path
+    cit_n, cit_bad = 0, []
+    for b in blocks:
+        seen46, bad46 = citations_of(b)
+        cit_n += seen46
+        carried46 = bool(re.search(r"^Carried: confirmed ", b, re.M))
+        cit_bad += [(RECORD_RX.match(b).group(2), c_, n_, carried46, k_) for c_, n_, k_ in bad46]
+    cb46 = sorted({i_ for i_, _, _, c_, _ in cit_bad if c_})
+    sinks46 = {i_ for i_, _, _, c_, k_ in cit_bad if not c_ and k_ == "sink"}
+    pr46 = sorted(i_ for i_ in sinks46 if i_.upper() in promoted_ids)
+    def rec_past46(i_):  # the record's own sink lies past the end: rendering the block again would cite it still
+        r_ = blk_off_rec.get(i_.upper())
+        n_ = target_lines(r_[0]) if r_ else None
+        return n_ is not None and r_[1] > n_
+    rend46 = sorted(i_ for i_ in sinks46 if i_.upper() in blk_off_ids and i_.upper() not in promoted_ids and not rec_past46(i_))
+    sink46 = sorted(sinks46 - set(pr46) - set(rend46))
+    fix46_ids = sorted({i_ for i_, _, _, c_, k_ in cit_bad if not c_ and k_ != "sink"} - sinks46)
+    ids46 = lambda xs: ", ".join("`" + x_ + "`" for x_ in xs[:6]) + (" …" if len(xs) > 6 else "")
+    rec46 = {c[6].upper(): cell_id(c) for c in table_rows if c[4].lower() == "body"}
+    ids46r = lambda xs: ", ".join("`" + x_ + "`" + (f" (`{rec46[x_.upper()]}`)" if x_.upper() in rec46 else "") for x_ in xs[:6]) + (" …" if len(xs) > 6 else "")
+    fix46 = [x_ for x_ in (
+        (f"a worker's record whose `File:` sink lies past the end of its file fails Citation & Evidence Verification: its row is `withdrawn` with `withdrawn: <its worker record> — citation: <file>:<line> lies past the end of its <n> lines`, never re-cited — item (37) reads the sink against the record — every `merged` row whose own sink is that sink and whose body record is that VULN id is withdrawn the same way (one merged into it from another sink becomes its own `body` row, and a `duplicate candidate:` line naming a withdrawn row goes, `duplicate candidates:` taken again), and a key the pre-write copy holds keeps its ledger row with `not re-found <date>` added: {ids46r(sink46)}") if sink46 else "",
+        (f"a body block whose `File:` sink is not its record's is rendered from its record — item (37): {ids46(rend46)}") if rend46 else "",
+        (f"a promoted row's block whose sink lies past the end is rendered from its record when the record states a line that exists, else — and for a promotion with no record — the promoted row and its block go, with the record's withdrawal when it has one — never a second `withdrawn` row for one record, item (31): {ids46(pr46)}") if pr46 else "",
+        (f"a `Flow:` hop or a `File:` range end past the end of its file is corrected from the source, as Citation & Evidence Verification requires, or the record withdrawn the same way: {ids46(fix46_ids)}") if fix46_ids else "",
+        (f"a carried block citing a line past the end of its file — item (26) names what its key carries: {ids46(cb46)}") if cb46 else "") if x_]
+    emit("citations", f"checked {cit_n} in {len(blocks)} blocks | past the end of their file {len(cit_bad)}"
+         + (": " + ", ".join(f"{i_} {c_} ({n_} lines)" for i_, c_, n_, _, _ in cit_bad[:6]) + (" …" if len(cit_bad) > 6 else "") if cit_bad else ""),
+         None, not cit_bad, "; ".join(fix46) or None)
+
     # 27. summary table — the Executive Summary's severity table against the records under each heading and the histogram
     SEVS = ["Critical", "High", "Medium", "Low", "Informational"]
     summ_m = re.search(r"^## Executive Summary\s*$", body_text, re.M | re.I)
@@ -2667,7 +3559,37 @@ def main() -> int:
     summ_parts = [f"{s.lower()} {table_counts.get(s, 'absent')}={body_counts[s]}={hist_counts.get(s, 'absent')}" for s in SEVS]
     summ_total = table_counts.get("Total")
     summ_ok = all(s in table_counts and table_counts[s] == body_counts[s] == hist_counts.get(s) for s in SEVS) and summ_total == sum(body_counts.values()) and summ_dup == 0
-    emit("summary table", f"{'present' if table_counts else 'absent'} | " + " | ".join(summ_parts) + f" | total {summ_total if summ_total is not None else 'absent'} = {sum(body_counts.values())}" + (f" | duplicated rows {summ_dup}" if summ_dup else ""), None, summ_ok)
+    # the table's Confirmed and Likely columns split each severity by the confidence tag that closes its records' headings
+    # (`[CONFIRMED]` or `[LIKELY]`), found by the header's own names so the columns may stand in either order
+    hdr = next((l_ for l_ in summ_tbl.splitlines() if l_.strip().startswith("|")), "")
+    cols = [re.sub(r"[*`_]", "", c_).strip().lower() for c_ in hdr.strip().strip("|").split("|")]
+    i_c = cols.index("confirmed") if "confirmed" in cols else None
+    i_l = cols.index("likely") if "likely" in cols else None
+    conf_body = {s: [0, 0, 0] for s in SEVS}  # confirmed, likely, untagged
+    for b in blocks:
+        tag = RECORD_RX.match(b).group(1).upper()
+        sev_ = "Informational" if tag.startswith("INFO") else tag.capitalize()
+        ct = re.findall(r"\[(CONFIRMED|LIKELY)\]", b.splitlines()[0].upper())
+        conf_body[sev_][0 if ct and ct[-1] == "CONFIRMED" else 1 if ct else 2] += 1
+    conf_tbl = {}
+    if i_c is not None and i_l is not None:
+        for l_ in summ_tbl.splitlines():
+            cells = [re.sub(r"[*`]", "", c_).strip() for c_ in l_.strip().strip("|").split("|")]
+            lab = cells[0].capitalize() if cells else ""
+            if lab in SEVS + ["Total"] and len(cells) > max(i_c, i_l) and cells[i_c].isdigit() and cells[i_l].isdigit():
+                conf_tbl.setdefault(lab, (int(cells[i_c]), int(cells[i_l])))
+    conf_want = {s: (conf_body[s][0], conf_body[s][1]) for s in SEVS}
+    conf_want["Total"] = (sum(v[0] for v in conf_want.values()), sum(v[1] for v in conf_want.values()))
+    untagged = sum(v[2] for v in conf_body.values())
+    conf_ok = bool(conf_tbl) and all(conf_tbl.get(k) == conf_want[k] for k in SEVS + ["Total"]) and untagged == 0
+    summ_ok = summ_ok and conf_ok
+    fmt_c = lambda k: (f"{conf_tbl[k][0]}/{conf_tbl[k][1]}" if k in conf_tbl else "absent") + f"={conf_want[k][0]}/{conf_want[k][1]}"
+    conf_part = (" | confirmed/likely " + " ".join(f"{k.lower()} {fmt_c(k)}" for k in SEVS + ["Total"]) if (i_c is not None and i_l is not None)
+                 else " | confirmed/likely columns absent") + (f" | records without a [CONFIRMED] or [LIKELY] tag {untagged}" if untagged else "")
+    summ_fix = None if conf_ok else ("the Executive Summary's severity table reads `| Severity | Findings | Confirmed | Likely |`, each row's Confirmed and Likely the records under that heading whose heading closes with `[CONFIRMED]` or `[LIKELY]`, the two summing to its Findings, Total's their sums: "
+                                     + ", ".join(f"{k} {conf_want[k][0]}/{conf_want[k][1]}" for k in SEVS + ["Total"])
+                                     + ("" if not untagged else f" — and every record's heading closes with its confidence tag: {untagged} do not"))
+    emit("summary table", f"{'present' if table_counts else 'absent'} | " + " | ".join(summ_parts) + f" | total {summ_total if summ_total is not None else 'absent'} = {sum(body_counts.values())}" + (f" | duplicated rows {summ_dup}" if summ_dup else "") + conf_part, None, summ_ok, summ_fix)
 
     # 28. previous run residual — STEP 1 preserved the previous plan as previous-run-<started>/scan-plan.md and recorded its
     # last `recheck: mismatches` line as `previous run residual: <n> — <items>` (or `none` on a run with no earlier plan)
@@ -2874,7 +3796,7 @@ def run() -> int:
         tb = traceback.extract_tb(exc.__traceback__)
         own = [fr for fr in tb if os.path.abspath(fr.filename) == os.path.abspath(__file__)]
         where = f"line {(own or tb)[-1].lineno}" if tb else "unknown line"
-        mode = next((a for a in sys.argv[1:] if a.split("=")[0] in ("--gate", "--contracts", "--roster", "--prompt", "--paths", "--checks")), None)
+        mode = next((a for a in sys.argv[1:] if a.split("=")[0] in ("--gate", "--contracts", "--roster", "--prompt", "--paths", "--checks", "--ledger-start", "--duplicates")), None)
         if mode:
             # a STEP 1 or STEP 2 command checks no report: its failure is its own error line, never a report mismatch
             print(f"{mode.split('=')[0][2:]}: error — script error {type(exc).__name__}: {str(exc)[:160]} at {where}; nothing checked")

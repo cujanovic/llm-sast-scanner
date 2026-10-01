@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.17"
+  version: "1.50.20"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -90,13 +90,26 @@ to steer iterative re-scans). It is state, not a skill.
 - Coverage discipline is unchanged: read every in-scope line and evaluate every applicable class regardless of
   what memory says.
 - One exception, for the report writer only and only at an unchanged commit — `git rev-parse HEAD` equal to the
-  file's `last-scanned-sha`: an `open` ledger row that no detection run re-confirmed this time is carried into the
-  report as `carried` records — one per block that the earlier report which confirmed it holds at that sink, each
-  copied from that report and labelled on its
-  second line `Carried: confirmed <date> at <sha> — not re-judged this run — source <report>`. The code it was judged
-  on is the code being reported on, so the judgement stands; the label keeps the reader informed; the row's
-  `last-verified` keeps the date of the judgement it carries. Detection runs never carry anything: they read memory as
-  hints and write their own evidence.
+  file's `last-scanned-sha`: an `open` ledger row whose key no finding in the detection results this report
+  consolidates holds — a key a finding holds, a detection record or one the report step promotes from a clearance or
+  a note, is not carried, whatever its verdict; a clearance or a note left standing is no finding — is carried into
+  the report as `carried` records. Its source blocks are the blocks at its sink and class in the earlier reports
+  written at this commit — those whose `Base SHA:` line names HEAD, in full or by seven or more leading digits — save
+  a block whose `File:` or `Flow:` line cites a line past the end of a file of the target (its lines counted as
+  `grep -c ''` counts them), which is no source. The newest of those reports, by the timestamp in its name, that
+  holds a source block of the row gives one `carried` record per source block, each copied word for word — never
+  re-cited or corrected: only a detection run judges a finding anew — and labelled on its second line
+  `Carried: confirmed <the row's last-verified> at <HEAD's full sha> — not re-judged this run — source <report>`,
+  replacing any `Carried:` line the block already held; a row with no source block is not carried and stays `open`. A
+  row a detection result explicitly refutes — a line naming the row's class and sink and the guard, type fact or
+  deployment fact that defeats it; a clearance is no refutation — is tested by the report step as Step 6 tests a
+  finding, block by block and whatever `adv=`, before it is carried: a block withdrawn is not carried; with every
+  block withdrawn the row's status becomes `superseded` and a false-positive pattern records the guard, while a row
+  withdrawn only in part keeps its status and gains no pattern, since its sink is still reached; the rest are carried
+  as above. The code it was judged on is the code being reported on, so the judgement stands and Citation & Evidence
+  Verification does not re-open a carried record; the label keeps the reader informed; the row's `last-verified`
+  keeps the date of the judgement it carries. Detection runs never carry anything: they read memory as hints and
+  write their own evidence.
 
 **Writing it — single writer (the report/consolidation step only):** after the final pass, update the file in
 place. The file has exactly the sections of the template below; a run adds or edits rows inside them and never
@@ -717,7 +730,7 @@ Adversarial Verdict: STANDING / DOWNGRADED / DISPUTED / WITHDRAWN — <rationale
 
 #### Citation & Evidence Verification (mandatory pre-report gate)
 
-Before writing any finding to the report, re-verify its evidence **against the source** — this is a factual-accuracy gate distinct from the Judge (validity) and the Adversarial pass (impact). For EVERY finding that will be reported, re-open each cited location and confirm:
+Before writing any finding to the report, re-verify its evidence **against the source** — this is a factual-accuracy gate distinct from the Judge (validity) and the Adversarial pass (impact). For EVERY finding that will be reported — a `carried` record excepted, as the Exception below states — re-open each cited location and confirm:
 
 - [ ] The cited **file path exists** and each `file:line` in `File:` and `Flow:` **matches the described code** (line not drifted; snippet appears verbatim).
 - [ ] The **function/scope name** around each cited line is correct.
@@ -727,6 +740,14 @@ Before writing any finding to the report, re-verify its evidence **against the s
 - [ ] The `Reference:` line names the correct reference file **with its `(vX.Y)` version tag** (taken from that reference's frontmatter `version`).
 
 On any mismatch: correct the citation if the real evidence is found, or **downgrade to NEEDS CONTEXT / drop** the finding — never ship an unverified `file:line`. **Independence:** in multi-agent runs this verification SHOULD be performed by an agent that did **not** produce the finding (the author re-checking their own work misses their own blind spots); see the full-scan-loop's consolidation gate. This operationalizes the **No fabricated evidence** principle below into a required action.
+
+**Exception — a `carried` record** (Project Memory Protocol, unchanged commit) is not re-opened, because it is
+carried: its finding was judged and verified at this commit by an earlier run, and its label says it is not re-judged.
+It is checked only by the source tests that chose it — the Protocol's two, that the report it is copied from was
+written at this commit (its `Base SHA:` line names HEAD, as the Protocol reads it) and that no line its `File:` or
+`Flow:` lines cite lies past the end of a file of the target (lines counted as `grep -c ''` counts them), and any an
+orchestrator's carry rule adds. A block that fails them is no source and is left out; one that passes is copied word
+for word, never re-cited or corrected.
 
 #### Severity Classification
 
@@ -824,17 +845,18 @@ Invocation: <invocation>
 Base SHA: <sha>
 
 ## Executive Summary
-| Severity | Findings |
-|---|---:|
-| Critical | <n> |
-| High | <n> |
-| Medium | <n> |
-| Low | <n> |
-| Informational | <n> |
-| Total | <n> |
+| Severity | Findings | Confirmed | Likely |
+|---|---:|---:|---:|
+| Critical | <n> | <c> | <l> |
+| High | <n> | <c> | <l> |
+| Medium | <n> | <c> | <l> |
+| Low | <n> | <c> | <l> |
+| Informational | <n> | <c> | <l> |
+| Total | <n> | <c> | <l> |
 <2-3 sentences: most critical issue, what the numbers mean for the reader. The table's five counts are the records under
-the matching severity headings — the same counts the Severity Histogram reports — and Total is their sum; a warning a
-flow requires the summary to open with (non-convergence) precedes the table>
+the matching severity headings — the same counts the Severity Histogram reports — and Total is their sum; Confirmed and
+Likely split each row by the confidence tag that closes its records' headings (`[CONFIRMED]` or `[LIKELY]`), so the two
+add up to that row's Findings; a warning a flow requires the summary to open with (non-convergence) precedes the table>
 
 ## Critical Findings
 ## High Findings
