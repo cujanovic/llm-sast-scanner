@@ -1,7 +1,7 @@
 ---
 name: iac_security
-version: "0.4"
-description: Infrastructure-as-Code misconfiguration detection for cloud resource definitions (Terraform, CloudFormation, ARM/Bicep, Pulumi) and Ansible playbooks/roles (become privilege escalation, no_log secret leakage, validate_certs/http, file mode, unpinned packages, allow_unsafe_lookups, Vault); AWS Cognito identity/user pool misconfig (guest/unauthenticated identity pools, identity-pool role escalation, self-service sign-up, Cognito admin-action privesc); non-production cloud API endpoint URLs that keep IAM auth but bypass customer audit trails
+version: "0.7"
+description: Infrastructure-as-Code misconfiguration detection for cloud resource definitions (Terraform, CloudFormation, ARM/Bicep, Pulumi) and Ansible playbooks/roles (become privilege escalation, no_log secret leakage, validate_certs/http, file mode, unpinned packages, allow_unsafe_lookups, Vault); AWS Cognito identity/user pool misconfig (guest/unauthenticated identity pools, identity-pool role escalation, self-service sign-up, Cognito admin-action privesc); non-production cloud API endpoint URLs that keep IAM auth but bypass customer audit trails; resource policies that admit a cloud provider's service principal with no condition pinning a source account, organization or resource (cross-account confused deputy)
 ---
 
 # Infrastructure-as-Code Security
@@ -50,6 +50,7 @@ Grep IaC trees for structural misconfig patterns. Recon is attribute/value prese
 | State exposure | `backend\s+"s3"`, `encrypt\s*=\s*false`, missing `server_side_encryption_configuration`, `acl\s*=\s*"public-read"`, `pulumi\.StackReference` with secrets in plain outputs |
 | Drift / suppress | `lifecycle\s*{[^}]*ignore_changes\s*=\s*\[[^\]]*(encrypt\|acl\|public\|cidr\|policy)`, `prevent_destroy\s*=\s*true` on security resources without review, duplicate inline + managed policy with `"*"` |
 | IMDSv1 / user-data secrets | `http_tokens\s*=\s*"optional"`, `aws_instance`/`aws_launch_template` blocks with **no** `metadata_options`, `user_data` / `user_data_base64` containing `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`password`/`BEGIN .* PRIVATE KEY` |
+| Unconditioned service principal | `Principal:` / `"Principal"` naming `Service: <svc>.amazonaws.com` or a bare `<svc>.amazonaws.com` string (`AWS::Lambda::Permission`), `principals { type = "Service" }`, `aws_lambda_permission` `principal = "<svc>.amazonaws.com"`, CDK `ServicePrincipal('<svc>.amazonaws.com')` or `grantPublish(` / `grantSendMessages(` / `addPermission(` with a service principal — in an SNS topic policy, SQS queue policy, S3 bucket policy or Lambda permission — then read the same statement for a `Condition` on `aws:SourceArn`, `aws:SourceAccount`, `aws:SourceOwner`, `aws:SourceOrgID` or `aws:SourceOrgPaths` (Lambda permission: `SourceArn` / `SourceAccount`) and what its value pins |
 | Ansible intrinsic | `validate_certs:\s*(no\|false)`, `become:\s*true` / `become_user:\s*root`, `state:\s*latest`, `mode:\s*["']?07[0-7]7`, `allow_unsafe_lookups\s*=\s*True`, `url:\s*["']?http://`, `(shell\|command):\s*.*\{\{`, plaintext `password:`/`api_key:` in `vars:`/`group_vars`/`host_vars` (no `no_log:\s*true`) |
 
 **File extensions**: `*.tf`, `*.tfvars`, `*.hcl`, `*.yaml`, `*.yml`, `*.json`, `*.bicep`, `*.bicepparam`, `Pulumi.*`, `__main__.py` (Pulumi), `index.ts`/`index.js` (CDK/Pulumi).
@@ -72,6 +73,7 @@ Grep IaC trees for structural misconfig patterns. Recon is attribute/value prese
 - `lifecycle { ignore_changes = [...] }` hides drift on ACL, encryption, CIDR, or policy attributes
 - EC2 instance / launch template allows IMDSv1 (no `metadata_options` block, or `http_tokens = "optional"`) — an app-layer SSRF can then steal the instance-role credentials from `169.254.169.254`
 - Long-lived credentials, passwords, or private keys embedded in EC2 `user_data` / `user_data_base64` — retrievable at runtime via the metadata service (`/latest/user-data`)
+- A resource policy admits a cloud provider's **service principal** (`ses.amazonaws.com`, `s3.amazonaws.com`, …) without a condition pinning its source — rated by the service-principal shared block below (cross-account confused deputy)
 
 ## Safe Patterns
 
@@ -150,6 +152,108 @@ resource "aws_security_group_rule" "ssh" {
   "Resource": "arn:aws:s3:::my-bucket/app/*"
 }
 ```
+
+### Service principal without a source condition (cross-account confused deputy, CWE-441) — VULN vs SAFE
+
+A service principal is not this account: `ses.amazonaws.com` publishes for every AWS customer's SES and
+`s3.amazonaws.com` notifies for every customer's bucket, so a grant to it that pins no source lets any account at the
+provider point its own configuration at the resource. The shared block after the examples rates every such grant.
+
+**VULN** — SES may publish to the events topic from any account:
+```yaml
+EventsTopicPolicy:
+  Type: AWS::SNS::TopicPolicy
+  Properties:
+    Topics: [!Ref EventsTopic]
+    PolicyDocument:
+      Statement:
+        - Effect: Allow
+          Principal: { Service: ses.amazonaws.com }
+          Action: sns:Publish
+          Resource: !Ref EventsTopic
+```
+
+**SAFE** — bound to this account and its configuration set (AWS documents `aws:SourceAccount` with `aws:SourceArn` — the
+identity's ARN for feedback notifications, the configuration set's for event publishing; for a topic in another account
+it shows the legacy `aws:SourceOwner`, which is account-bound below):
+```yaml
+          Condition:
+            StringEquals: { "aws:SourceAccount": !Ref AWS::AccountId }
+            ArnLike: { "aws:SourceArn": !Sub "arn:aws:ses:${AWS::Region}:${AWS::AccountId}:configuration-set/${ConfigSet}" }
+```
+
+**VULN** — any bucket's notifications can invoke the function:
+```hcl
+resource "aws_lambda_permission" "from_s3" {
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ingest.function_name
+  principal     = "s3.amazonaws.com"
+}
+```
+**SAFE** — `source_arn = aws_s3_bucket.ingest.arn` and `source_account = data.aws_caller_identity.current.account_id`.
+
+<!-- BEGIN shared block: service-principal grants — identical in iac_security.md and webhook_integration_security.md -->
+**Service-principal grants** — a resource policy or Lambda permission that admits a cloud provider's service principal
+(`ses.amazonaws.com`, `s3.amazonaws.com`, …). CWE-441; the record's `File:` is the grant's principal line — the line
+naming the service principal (`- ses.amazonaws.com`, `Service: sns.amazonaws.com`, `principal = "s3.amazonaws.com"`,
+`identifiers = ["ses.amazonaws.com"]`), as the base skill's Deduplication & Sink Location rule has it — whichever class
+reports it, so the records of whom one grant admits name one line and merge as one finding for each consumer the grant
+feeds (one when none is in scope): a grant finding's entry point is that consumer, named as the scan's entry-point list
+names it, else by its handler's `file:line` — `none in scope` when there is none.
+- **Which services deliver for other accounts.** SES (an event destination or a feedback notification that another
+  account's configuration set or identity names), S3 event notifications (to a topic, queue or function), API Gateway (a
+  Lambda permission for `apigateway.amazonaws.com` lets another account's API integrate the function, and that API
+  writes the whole event — a non-proxy integration's template sets every field, `requestContext` included — so no event
+  field is a provider-set origin or sending account; AWS's own setup binds the grant by an `aws:SourceArn` naming the
+  API), and CloudTrail, AWS Config and log delivery (`delivery.logs.amazonaws.com`) writing to a bucket do. These do not
+  through the service principal alone, so a grant to them is account-bound at most: SNS — until the endpoint's owner
+  confirms a subscription made by another account's topic, that topic can place only `SubscriptionConfirmation` messages
+  in the queue or function (unbound only when the consumer itself confirms a `SubscribeURL`); EventBridge — another
+  account's rules reach a target only through an execution role the target's policy admits by account ID, and a grant to
+  `events.amazonaws.com` serves rules of the same account; S3 server access logging (`logging.s3.amazonaws.com`) —
+  buckets of the same account only. A service not named here delivers for other accounts unless the provider's
+  documentation, read in this run, says otherwise; one you cannot check is unbound at LIKELY.
+- **Unbound** — no condition pins an account: none of `aws:SourceArn`, `aws:SourceAccount`, `aws:SourceOwner`,
+  `aws:SourceOrgID`, `aws:SourceOrgPaths` (a Lambda permission: `SourceArn`, `SourceAccount`), or every value leaves the
+  account open (`*`, `arn:aws:ses:*`, `arn:aws:ses:*:*:configuration-set/x`, a topic or function name any account can
+  create) — at a service that delivers for other accounts. An S3 bucket name is global: `arn:aws:s3:::<bucket>` and
+  `arn:aws:s3:*:*:<bucket>` pin that bucket (the S3 bullet below); an API Gateway id is a label AWS assigns (the
+  `<api-id>.execute-api.<region>.amazonaws.com` host) that no account can choose, so an `arn:aws:execute-api:…` value
+  whose id segment is written out in full — no `*` or `?` in it — pins that API even with the account or region left
+  open (resource-bound below). The rating is the class default: **High** when an event the attacker's configuration
+  produces makes the consumer change data or behaviour beyond that event's own record — a recipient blocked or
+  suppressed, a record updated or deleted, privileged code invoked — keyed by a value the event chooses (a recipient
+  address, an object key); **Medium** otherwise (each event only appended to a log or archive, or a fixed action no
+  event value steers); with no consumer in scope, Medium at LIKELY.
+- **Account-bound** — a condition pins an account or organization (this one, or a sending account or organization the
+  grant names: `aws:SourceAccount`, the legacy `aws:SourceOwner`, `aws:SourceOrgID`, `aws:SourceOrgPaths`; a Lambda
+  permission's `SourceAccount`) but not the resource meant to deliver; or the consumer checks only the sending account
+  (`mail.sendingAccountId`); or the service delivers only within its own account (above). What remains needs a principal
+  inside that account: the Severity Downgrade Rule's privileged position, applied once — one level below the unbound
+  rating of the same consumer. The record names it
+  `privileged position: an IAM principal inside the account the grant at <file:line> pins (a role held, not a hop)`,
+  `<file:line>` being the record's own `File:` line (a verdict cell names an identifier from its record), at the end of
+  its `Judge:` line, after `; `, and, when Step 6 runs on it, on its `Adversarial:` line as well — as a `DOWNGRADED`
+  verdict's trigger and named thing while the account pin holds, or in the rationale of a `DISPUTED` one — and no later
+  step demotes it again for that position.
+- **Resource-bound** — no finding: a condition pins the one resource meant to deliver (its ARN; an S3 bucket ARN together
+  with `aws:SourceAccount`), or the consumer rejects, before acting, every event whose provider-set origin is not that
+  resource — the identity ARN (`mail.sourceArn`; an event without it rejected too), the bucket with its owner. A
+  configuration-set name, a message tag or anything else the sender chooses is no origin check; an SES identity binds
+  whoever can verify its domain or address. When only the consumer's check binds and the grant itself pins nothing, the
+  unpinned grant is a Hardening Note.
+- **S3 bucket ARN without `aws:SourceAccount`** — a Hardening Note, no severity, when this repository creates that bucket:
+  the pin holds while the bucket exists, and a deleted bucket's name can be recreated by any account. When the
+  repository does not create it, nothing shows who owns the name: unbound, at LIKELY.
+- **Never grounds to lower these ratings** — no downgrade, NEEDS CONTEXT, DISPUTED or UNCERTAIN mark: holding an account
+  at the provider; knowing the resource's ARN, account ID or bucket name (AWS treats them as non-secret); the provider's
+  gate on the attacker's own account (SES production access, a sending quota), which is part of opening that account —
+  the record may mention it in Impact.
+<!-- END shared block -->
+
+Outside this section: a KMS key-policy statement for a service (see Common False Alarms), and an IAM role trust policy
+(`sts:AssumeRole`) or an identity-policy `iam:PassedToService` condition naming a service — rate those from the
+service's documentation, not by the shared block.
 
 ### Hardcoded secrets — VULN vs SAFE
 
@@ -349,6 +453,7 @@ Quick VULN→SAFE attribute references per cloud. Flag the VULN attribute; confi
 | `aws_instance` / `aws_launch_template` | no `metadata_options`, or `http_tokens = "optional"` (IMDSv1 → SSRF steals role creds) | `metadata_options { http_tokens = "required"; http_put_response_hop_limit = 1 }` |
 | `provider "aws"` | `access_key`/`secret_key` inline | `shared_credentials_file` / `profile` / env |
 | `aws_iam_role` | `Principal = {AWS = "*"}` on `sts:AssumeRole` | restricted account/role ARN principal |
+| `aws_sns_topic_policy` / `AWS::SNS::TopicPolicy`, `aws_sqs_queue_policy`, `aws_s3_bucket_policy`, `aws_lambda_permission` | service principal (`ses`/`s3.amazonaws.com`, …) with no condition pinning a source account, organization or resource | `aws:SourceArn` naming the delivering resource plus `aws:SourceAccount`; Lambda `source_arn` + `source_account` — the service-principal shared block rates the rest (an account-only pin is account-bound, not SAFE) |
 | `aws_cognito_identity_pool` | `allow_unauthenticated_identities = true` (guest → anonymous STS creds via GetId/GetCredentialsForIdentity), `allow_classic_flow = true` | `= false`; if guest access is required, scope + `aud`/`amr`-condition the unauth role |
 | `aws_cognito_identity_pool_roles_attachment` | unauth/auth role with real data-plane perms **even scoped to ARNs**; `ambiguous_role_resolution = "AuthenticatedRole"` without `mapping_rule` | least-privilege roles; explicit `mapping_rule`s; pin role trust-policy `cognito-identity.amazonaws.com:aud`/`amr` |
 | `aws_cognito_user_pool` | `admin_create_user_config { allow_admin_create_user_only = false }` (self-service sign-up → account creation + username oracle) | `= true` when registration should be closed |
@@ -414,6 +519,8 @@ Nomad's `tls` block can enable encrypted HTTP/RPC while still omitting server id
 
 - `0.0.0.0/0` on port 443/80 for a documented public load balancer or CDN origin — confirm target is LB tier, not admin/DB tier
 - `"Principal": "*"` inside a bucket policy **deny** statement or conditioned with `aws:SourceVpc`, `aws:SourceIp`, or MFA — read full policy JSON
+- A service-principal grant the service-principal shared block rates resource-bound — not a confused deputy
+- A KMS key-policy statement letting a service principal use the key (`kms:Decrypt`, `kms:GenerateDataKey`) is no finding of its own: the service uses the key for a resource that already admits it, so the finding, when there is one, is that resource's grant
 - `public_access_block` absent in a module that always invokes the block resource in a parent stack — trace module outputs/wiring
 - Encryption attribute omitted where provider default is encrypt-on (verify provider/version docs; flag as Info if default is secure)
 - `sensitive = true` on variables populated from CI secrets — not a hardcoded secret finding

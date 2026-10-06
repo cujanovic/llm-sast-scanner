@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.25.8"
+  version: "2.26.7"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -240,8 +240,13 @@ Every finding in the report body is one complete Finding Format record (base ski
 (source -> sink hops as `file:line` steps), Evidence code block, Judge verdict, CWE, severity with a one-line
 rationale, and entry point. The count of records under each severity heading is what the Severity Histogram
 reports; the appendix's Body/histogram reconciliation (below) shows the two side by side, and the Executive Summary
-holds the base skill's severity table — the same five counts and their total — ahead of its sentences (a
-non-convergence warning, when D3 requires one, still comes first).
+holds the base skill's severity table — the same five counts and their total — and, after its Total row,
+`| Unverifiable | <u> | n/a | n/a |`, `u` the entries of the Unverifiable section, which Total does not count — each
+entry's line opens with its id, after any `#` marks and its `[UNVERIFIABLE]` tag, then ` — ` and its title
+(`### [UNVERIFIABLE] UNV-001 — <title>`), and its `needs context:` lines are no entries. The sentences after the table
+name each Unverifiable entry by its id and title (`UNV-001 — <title>`; a range such as `UNV-001–UNV-010` names only its
+two ends), so the start of the report shows what could not be decided beside what was found (a non-convergence
+warning, when D3 requires one, still comes first).
 
 **STEP 2** — Dispatch every lens x 3 partitions, in waves of at most 15 workers (WORKER DISPATCH, below). Each subagent gets exactly ONE lens and ONE
 partition and runs its own full convergence loop over only that partition's files. Write results to
@@ -303,11 +308,16 @@ names that file (the path test below):
 > that exists under the target — its `:line` dropped, each tested with `test -f <path>` from the target directory, never
 > recalled. A record
 > that fails is corrected before the sentinel: the gate re-runs the whole worker for one wrong path, and one worker once
-> cited its sink under the wrong module directory. The gate is a command you can run: from the target directory,
+> cited its sink under the wrong module directory. No line of your file outside a fenced code block is longer than
+> 2000 bytes (UTF-8 — an em dash counts three): a file reader keeps only a longer line's first 2,000 bytes and the
+> writer reads your file with one, so a record's field stays one line and is shortened — an `Also at:` list that would
+> run longer continues on a further `Also at:` line right after it, no sink dropped — and any other text — an
+> entry-point coverage or disposition list, a clearance, a pass log — is broken across lines between its items; the
+> gate names each such line. The gate is a command you can run: from the target directory,
 > `python3 <skills root>/llm-sast-scanner-full-scan-loop/recheck.py --gate <lens>/p<n>` prints your file's gate line —
 > every field but the sentinel, which you have not written yet, must read `ok` or its full count — `absolute` and
-> `entry pipes` are counts the writer handles and `digest` a value the gate compares, never a fail — and `copied` below
-> 80% or `n/a`, before you write it.
+> `entry pipes` are counts the writer handles and `digest` a value the gate compares, never a fail — `copied` below
+> 80% or `n/a`, and `long lines` 0, before you write it.
 > The final line, written only after coverage verification passes, is
 > `<!-- LLM-SAST-COMPLETE lens=<lens> partition=p<n> files=<f>/<mf> lines=<l>/<ml> passes=<p> convergence=<converged | NOT CONVERGED (...)> -->`
 > — `f` and `l` the files and lines you covered, `mf` and `ml` the partition manifest's file and line counts, `p` the
@@ -357,7 +367,9 @@ the WORKER DISPATCH text itself, every sentence of it with its slots filled — 
 characters, or one that summarizes the template, is flagged with the first sentence it lacks, as all twenty-seven
 prompts of one run were before a re-run rebuilt them — the prompt's first line to name that lens and partition, no other pair's `partition-p<n>-manifest.txt` or
 `<lens>-agent-procedure.md` in it, the first-line form at its end with its placeholders intact, and a file written by this run, never one older than
-`started:`. The file is
+`started:` — and no line of it longer than 2000 bytes (UTF-8, an em dash three): a file reader keeps a longer line's first
+2,000 bytes and the worker reads only its start, so the prompt keeps the template's line breaks (one fresh run wrote every
+prompt as a single line of 6,800 characters and re-ran thirteen workers). The file is
 corrected until the command exits 0, and the worker is then started with the text after `send: ` on the one line the
 command prints on a pass — `You are the <lens> worker for partition p<n>. Your prompt is
 <target>/.llm-sast-scanner-cache/prompts/<lens>-p<n>.md. Read it in full before anything else; if that path cannot be
@@ -438,7 +450,7 @@ dispatch line's `(re-run: …)` reason keeping the failure on record, so the pla
 and recheck item (29) reads that line:
 `gate: <lens>/p<n> — header <ok | fail> | pinned <ok | fail> | phrase <ok | fail> | sentinel files <f>/<mf> lines <l>/<ml>
 passes <p> | paths <k>/<m> resolve | headings <s>/<m> | absolute <a> | references <r>/<m> | entry pipes <e> | copied
-<c>%[ from <directory>] | digest <d>` — its `copied` field `copied n/a` for a file too short to tell — where `m` is the file's record count, counted as its `File:` lines
+<c>%[ from <directory>] | digest <d> | long lines <n>` — its `copied` field `copied n/a` for a file too short to tell — where `m` is the file's record count, counted as its `File:` lines
 and its record lines written behind a list marker, a blockquote `>` or indentation
 — every record has one, read with
 its backticks removed and any `:line` or `:line-line` suffix dropped, and a record is counted by that line, never by
@@ -476,8 +488,13 @@ than 100 of them reads `copied n/a` — too little prose to tell a copy from a r
 run's twenty-seven workers once handed back their predecessors' files with a line or a record changed, in five to
 seven minutes, their sentinels' coverage and pass counts copied with them, while no file of a run whose workers did the work
 held more than three fifths of its predecessor's phrases. `d` is the first twelve hex digits of the file's SHA-256 as
-the gate reads it (`unreadable` for a file the gate cannot read): a write to the file after its gate changes it. A worker file with no `gate:` line, or whose line shows a `fail`, `k`
-below `m`, `s` below `m`, `c` at 80 or above, or sentinel values below their manifest counts, has not passed the gate, and STEP 3 does not start — unless its pair is recorded `worker not run:`, whose gate line is still written and still counted — a pair with no
+the gate reads it (`unreadable` for a file the gate cannot read): a write to the file after its gate changes it. `n` is
+the number of the file's lines longer than 2000 bytes (UTF-8) outside a fenced code block: a file reader keeps a longer
+line's first 2,000 bytes, so the writer reads only its start, and `n` above 0 fails the gate and re-runs the worker —
+worker files of 116 of 173 earlier runs held such lines, most of them entry-point coverage lists written as one
+paragraph; `--gate <lens>/p<n>` names each such line on its error output, never in the gate line. A recorded line
+written before the field existed has none and is read by the fields it has. A worker file with no `gate:` line, or whose line shows a `fail`, `k`
+below `m`, `s` below `m`, `c` at 80 or above, `n` above 0, or sentinel values below their manifest counts, has not passed the gate, and STEP 3 does not start — unless its pair is recorded `worker not run:`, whose gate line is still written and still counted — a pair with no
 worker file at all has no gate line, so the two counts still agree; the consolidation writer's first action is to count `gate:` lines against worker files and to stop, writing nothing, if
 they differ. The gate also searches the whole target for any `deep-*-results.md` outside the cache — under a
 misspelled cache name, the repository root, or any other directory — and removes each one, recording
@@ -622,9 +639,13 @@ contains that expression verbatim; (3) `first-line tags` — every body block's 
 ending `[CONFIRMED]` or `[LIKELY]`; (4) `merges with a different entry point` — the number of `merged` rows whose entry point, sink `file:line` or class differs from their target body row's, required to be 0,
 a duplicate the writer judged under the **Duplicates** rule aside — its `duplicate candidate:` line `merged into` the kept row,
 the lower worker severity merged and, across keys, the kept block's `Also:` line and the merged key no ledger row of the copy —
+and a group overlap aside — one class and entry point, the merged record's sink on the kept record's `Also at:` line or the
+kept record's sink on the merged record's, two workers' records of one missing check —
 each entry point cell read as the list entry it names — a cited `file:line` as the entry at it or up to three lines
 below it in that file, a bare name as the one entry holding it, a name two entries share as written; (5) `config clearances rewritten` — the phrase search over the
-worker files' disposition lines, a finding record's own lines (its `Judge:`, its `Impact:`) not among them; (6) `ledger rows after` and `archived` — `ledger rows after` is the number of lines in `project-memory.md`'s
+worker files' disposition lines, a finding record's own lines (its `Judge:`, its `Impact:`) not among them, nor a phrase
+inside an absence claim (`no … non-production endpoint surface`), shown as `(absence claims <a>)`; a report that counted
+those too reads either count; (6) `ledger rows after` and `archived` — `ledger rows after` is the number of lines in `project-memory.md`'s
 confirmed-findings ledger section matching `^[a-z][a-z0-9_]* \| [^|]+:[0-9]+(-[0-9]+)? \|` — a class may carry digits,
 and a sink may be cited as a line or a line range — `archived` the same count over the archive
 file, `duplicate-key rows` the number of those lines beyond the first for any one `class | file:line` key — a key's line
@@ -647,7 +668,8 @@ pre-write copy, keys compared by the sink's first line (a range twin of a copy r
 reads both files and applies STEP X's class correction to the copy's keys; the
 maturity line's `new keys`, the STEP X ledger equation and the
 memory's new run line `new-confirmed` all equal it — row arithmetic is not this number, since rows merge and archive
-while keys only appear; (13) `required lines` — each of these opens a line in the report, counted `<k>/<k>`:
+while keys only appear — and no new key is a line only a finding's `Also at:` line names, `| rows written for `Also at:`
+lines <n>` shown when not 0; (13) `required lines` — each of these opens a line in the report, counted `<k>/<k>`:
 `Maturity:`, `checks:`, `contracts checked:`, `stale worker files moved:`, `dispatch lines late:`, `earlier reports:`,
 `entry points dispositioned`, `config clearances rewritten:`, `class clearances`, `ledger rows before`, `ledger:`,
 `verdicts carried`, `close-out:`, `maturity:`; (14) `verdicts carried` — the number of body rows whose `File:` sink
@@ -688,7 +710,7 @@ scan-plan's `continuity join: <n> rows carry a previous verdict — <ids>` again
 carried, voided and bare, with `n` equal to the ids listed and `listed rows bare <x>` — listed rows whose block's
 `Adversarial:` line is a bare `STANDING` — required to be 0; a join line without its ids is a count nobody can walk, and
 a run whose `earlier-reports:` row reads `0` has nothing to join, so its absent join line reads as `0`; (23) `sentinel` — the report's last non-empty line is `<!-- LLM-SAST-COMPLETE -->`; (24) `not re-found` — every key of
-the pre-write copy — read after STEP X's class correction — that holds neither a body record, a carried row nor a `refuted` row this run still has its ledger row and its brief carries
+the pre-write copy — read after STEP X's class correction — that holds neither a body record — at its `File:` sink, or, at its class, a line its record's `Also at:` line names — a carried row (or a line a carried block's `Also at:` line names) nor a `refuted` row this run still has its ledger row and its brief carries
 `not re-found <this run's date>`, counted `<marked>/<such keys>` with `rows gone <g>`, required equal and `0`: the
 same-commit rule's mark is how a later reader tells a miss from a fix, and one write left one hundred and
 twenty-eight missed sinks unmarked while the run ended clean; (25) `wave rosters` — the scan-plan's `wave roster <k>:`
@@ -703,7 +725,9 @@ worker had ended, may have been rebuilt since and is not read — and a first-at
 full `date` output is named on the line, since it cannot be read; a `wave <k> complete: <time>` line of its own is read as that wave's `complete`
 when its `wave <k>:` line carries none; (26)
 `carried` — at an unchanged commit, as the Same-commit carry paragraph reads it, the `carried` rows equal the blocks that the copy's `open` keys — read after STEP X's
-class correction — without a row of any other disposition this run, a `refuted` row aside, hold in the newest earlier report holding a block of the key that is a source, less the key's `refuted` rows — a block citing a line past the end of a file of the target, or held by a report whose `Base SHA:` does not name the scan-plan's `base-sha`, being no source, and `sources citing past the end <p>` counting the past-end blocks of those keys passed over, from the newest report of this commit holding a key down to and including its source, or in all of them at this commit when it has none — `s` the count of such keys no earlier report holds in a block that is a source (recomputed from the reports), every carried row has its block, every block's `Carried:` line carries the row's
+class correction — without a row of any other disposition this run (a key a record's `Also at:` line names, at its class,
+held by that record's row; a key the newest report names only on an `Also at:` line goes with that block, as the
+One missing check's other lines paragraph reads it), a `refuted` row aside, hold in the newest earlier report holding a block of the key that is a source, less the key's `refuted` rows — a block citing a line past the end of a file of the target, or held by a report whose `Base SHA:` does not name the scan-plan's `base-sha`, being no source, and `sources citing past the end <p>` counting the past-end blocks of those keys passed over, from the newest report of this commit holding a key down to and including its source, or in all of them at this commit when it has none — `s` the count of such keys no earlier report holds in a block that is a source (recomputed from the reports), every carried row has its block, every block's `Carried:` line carries the row's
 `last-verified` cell as the copy holds it and the scan-plan's `base-sha` and names the newest earlier report that holds a block with the same sink whose reference stem is the row's class, whose verdict honours the key's standing downgrade and that is a source, the block's
 other lines match one of that report's blocks of the key word for word (heading id, `Worker record:` and `Carried:` lines
 aside, whitespace collapsed) with no source block copied twice, and every carried row's ledger line is the copy's line
@@ -771,13 +795,14 @@ record's severity carries the `DOWNGRADED` or `DISPUTED` verdict that lowered it
 tag, and none outside the five severity sections and the Unverifiable section; (40) `block layout` — every body and
 promoted block reads the one layout below: its `Worker record:` and `Entry point:` lines its row's, its Evidence a
 fenced code block, no other line between its fields, and its `Adversarial:` line the row's cell followed by the
-rationale, three words at least; (41) `appendix table` — the appendix holds every row of `disposition-table.md` as the
+rationale, three words at least — and a body block's `Also at:` line naming the sinks its record's names, `| Also at not
+the record's <n>` shown when not 0; (41) `appendix table` — the appendix holds every row of `disposition-table.md` as the
 file holds it; (42) `scope exclusions` — the appendix reproduces every row of `scope-excluded.txt`, and
 `excluded: <p> paths / <l> lines` has `p` its row count and `l` the lines of the regular files it names, counted from
 them; (43) `class clearances` — `class clearances <n>` is the number of lines across the worker files that hold
 `SAFE in p<n> — no <surface>`; (44) `pass log` — one entry per pair, its passes the worker file's sentinel `passes=`;
 (45) `routed hand-offs` — `handoff-table.md` exists and `routed: <n>` counts its rows; (46) `citations` — every `file:line`
-a body, promoted or carried block cites on its `File:` or `Flow:` line in a file of the target lies within that file,
+a body, promoted or carried block cites on its `File:`, `Flow:` or `Also at:` line in a file of the target lies within that file,
 `checked <c> in <b> blocks | past the end of their file <k>`, `k` required `0`, each block read to its next `#`, `##` or `###` heading and outside fenced code, a file's lines counted as `grep -c ''` counts them: a worker's record whose `File:` sink lies past
 the end fails the base skill's Citation & Evidence Verification and is `withdrawn` with a `citation:` line, never
 re-cited, since (37) reads the sink against the record, and every `merged` row whose own sink is that sink and whose
@@ -788,7 +813,7 @@ row when the record is withdrawn or has none, one `withdrawn` row per record; a 
 requires, or the record withdrawn the same way; and a carried block citing past the end is (26)'s — its key carried
 from its source, or counted without one; (47) `refutations` — at an unchanged commit, the worker files' `ledger refuted:`
 lines, outside fenced code, whose class and sink name an `open` key of the copy that no row of another disposition
-holds, each such key accounted for once, every source block of it either a `refuted` row or a carried row: all
+holds — at its `File:` sink or on its record's `Also at:` line — each such key accounted for once, every source block of it either a `refuted` row or a carried row: all
 `refuted`, the key gone from the ledger, its row in the archive with status `superseded` and a false-positive pattern
 row at its class and sink; some, its ledger row kept; none, carried as (26) reads it; or, with no source block, neither
 — and the appendix's one `refuted:` line for it naming that outcome, no `refuted` row or `refuted:` line at any other
@@ -799,18 +824,47 @@ unread <n> | naming no ledger row <o>` — and is no mismatch, its key read as o
 item reads `not applicable` and requires zero `refuted` rows; (48) `duplicates` — every pair `--duplicates` lists, computed
 from the table's `body` and `merged` rows and the plan's `## Entry points` list, has one `duplicate candidate:` line whose
 answer the table bears out — `merged into` the kept block's VULN id with each row of the pair that row or merged into it,
-`distinct: <clause>` with neither merged into the other, `linked` for two `body` rows at two keys whose record to merge
-away holds a ledger key of the copy and whose blocks name each other on `Also:` lines — a line on a pair the table
+`distinct: <clause>` with neither merged into the other nor both held by kept blocks whose own pair reads `linked`, `linked` for two `body` rows at two keys whose record to merge
+away holds a ledger key of the copy and whose blocks name each other on `Also:` lines, a row merged into such a block
+read as that block and the kept blocks' own pair, when listed, answered `linked` too — a line on a pair the table
 answers agreeing with it, and `duplicate candidates: <n>` counting the lines, `pairs <p> (entry <e> | same <s> | near
 <x>) | answered merged <m> | distinct <d> | linked <l> | unanswered <u> | lines at no pair <z> | pairs the table answers
 <t> | repeated clauses <r>`, `u`, `z` and `r` required `0` — `r` counting the `distinct` clauses that each answer three or
 more pairs of two or more class pairs over two or more groups of the records those pairs join; nothing is merged by the
-item, so a pair answered with its own `distinct` clause stands. Two lines are readings, not items: `recorded sets <n> | lone mismatches lines <k>`, a lone line being a subagent's own run appended to the plan, and
+item, so a pair answered with its own `distinct` clause stands; (49) `needs context` — every line `--needs-context` lists, a line of a worker file
+outside its finding records that names a NEEDS CONTEXT judgement — the words NEEDS CONTEXT, `Unverifiable candidate`
+or UNVERIFIABLE in capitals — or heads one of the worker's own `[UNVERIFIABLE]` records, has one `needs context:` line in the Unverifiable section answering it in one of its three forms, `lines <n> |
+answered observation <o> | carried <c> | mention <m> | unanswered <u> | lines at no marker <z> | answers in no form <f> |
+repeated mentions <r>`, `u`, `z`, `f` and `r` required `0` — an observation's cite first, a file of the target outside the
+scanner's own cache and reports and a line within it, two words or more after it; a `carried by` id one the report
+gives a candidate — a body block's or record heading's id, a `body record` cell, the id opening an Unverifiable entry
+line — and every id after a `carried by` anywhere in the answer the same, an id read by its prefix, one the report's ids
+use, so a weakness or hash name beside it is the text's; a cite before `carried by` or `mention:`, when one is written,
+held as an observation's is, whatever separates them; on a line of several answers, each later one's file cite — a bare
+`:<line>` read in the file cited before it — held so too; a `mention:` two words or more; and
+`r` counting the `mention:`
+texts naming no line key or id that each answer three or more lines of two or more worker files; (50) `unverifiable summary` —
+the Executive Summary's severity table holds, after Total, an `Unverifiable` row counting the Unverifiable section's
+entries, and the summary's sentences name each entry by its id and title (the id is what is read), `entries <n> | table
+row <m> | named in the summary <k>/<n>[ | ids no entry line opens <j>]`, `m` and `k` required equal to `n` — with no entry
+the row reads 0 or stands absent. `j`, shown when not 0, counts the `UNV-` ids that open no entry line — on the section's
+lines that are neither entries nor `needs context:` answers, and in `unverifiable` rows' `body record` cells; with `j`
+above 0 the item fails while the row stands absent or counts more than `n`; (51) `merge severity` — every `merged`
+row whose kept `body` block stands: the block's severity is at least its merged record's, less the one level a
+`DOWNGRADED` or `DISPUTED` verdict on the block names, `merged records above their kept block <n> | unreadable <u> |
+merged rows read <m>`, `n` required 0 — a merged record or block whose severity cannot be read is counted in `u`, not
+judged; (52) `long lines` — no line of the report outside a fenced code block is longer than 2000 bytes (UTF-8), which a
+file reader would cut: `<n> over 2000 bytes outside code blocks`, `n` required 0 — a block's field stays one line and
+is shortened, an `Also at:` list continues on a further `Also at:` line with no sink dropped, a table row is shortened
+cell by cell (a disposition-table row in `disposition-table.md`, then copied again and its block re-rendered), any other
+line is broken between its sentences or items, and a carried block's lines, an earlier report's words, are not counted;
+a fence left open counts as none. Two lines are readings, not items: `recorded sets <n> | lone mismatches lines <k>`, a lone line being a subagent's own run appended to the plan, and
 `recheck: repair none — …`, printed when every mismatch in the set reads a STEP 1 or STEP 2 line.
 
 Before it starts the writer, the session writes the writer's prompt to `.llm-sast-scanner-cache/writer-prompt.md`,
 runs `python3 <this skill's directory>/recheck.py --prompt .llm-sast-scanner-cache/writer-prompt.md` from the target,
-corrects the file until the command prints `ok` — it requires the Writer self-check paragraph below and, at an
+corrects the file until the command prints `ok` — it requires no line longer than 2000 bytes (UTF-8), which a file
+reader would cut, the Writer self-check paragraph below and, at an
 unchanged commit whose pre-write copy holds ledger rows, the Same-commit carry paragraph, both verbatim, and for every
 worker file one recorded `gate:` line that the file still reads — its digest and the counts its own text decides (its
 sentinel, records, headings, absolute paths, references and entry pipes) — a file changed after it was gated having its
@@ -902,7 +956,9 @@ repeats the check on the table as written. Here `worker record` is
 `[MEDIUM] VULN-001` in `deep-access-auth-p2-results.md` is `access-auth/p2/VULN-001`, never an id composed from the lens
 or the partition. A record is one row, and a record's own finding is always that row — `body`, or `merged` into the
 `body` row with its entry point, sink and class — never a `promoted` row: a `promoted` row is a STEP X or buried-sink
-promotion, or a finding at another entry point of a record that names several. Every cell holds exactly one of these: a worker record id, an entry
+promotion, or a finding at another entry point of a record that names several — a read trigger of a store a route or handler
+writes, named beside that writer, is a hop of its Flow (base skill, finding identity), never a promoted row, the
+grant-only writers' finding at that trigger excepted. Every cell holds exactly one of these: a worker record id, an entry
 point (route, handler, tool or consumer name), a `path:line` sink, a class name, a disposition word, a verdict as
 defined below, or a VULN id;
 a cell holding anything else — a cross-reference, a placeholder, a blank, a description, a sink without its `:line`,
@@ -916,7 +972,9 @@ defined below, is not a worker record's and carries its own word):
   entry point read as the `## Entry points` entry it names, never by its wording, so `POST /x (a.ts:20)` and
   `a.ts:20 — HTTP route — POST /x` are one — or it is the same defect as a `body` row by the **Duplicates** rule below;
   `body record` holds that row's VULN id. A record whose entry point differs from every `body` row is never
-  `merged`;
+  `merged`. Of two records that are one finding, the one of the higher worker severity is the `body` row and the other
+  is `merged` into it, so a block never reads below a record merged into it, except by the one level a `DOWNGRADED` or
+  `DISPUTED` verdict on the block names — recheck item (51);
 - `withdrawn` — Step 6 returned WITHDRAWN, or Citation & Evidence Verification failed, and nothing else — a record that
   repeats a `body` row's entry point, sink and class is `merged`; `body record` holds the word
   `withdrawn`, and the appendix lists one line per such row, `withdrawn: <worker record> — <Step 6 | citation>: <one
@@ -958,7 +1016,10 @@ record's class or sink differs, so neither class leaves the report, or when it n
 ` — <that fix>` after it. A record whose own key is a ledger row of the pre-write copy is never merged into another key —
 merged, that row would read as not re-found — so when the record to be merged away holds one, both stay `body` and the
 pair is `linked`: two findings in the counts, the price of keeping the ledger row, each block's last line after
-`Reference:` naming the other on an `Also:` line. The appendix answers every listed pair on one line,
+`Reference:` naming the other on an `Also:` line. A pair one or both of whose records are merged into blocks `linked`
+to each other — three or four records of one defect over two keys — reads `linked` too: the link its two kept blocks
+hold, read between those kept records — the lower worker severity, the ledger key, the `Also:` lines naming each other —
+with the kept records' own pair, when listed, answered `linked` as well; `merged into` and `distinct` are wrong there. The appendix answers every listed pair on one line,
 `duplicate candidate: <worker record> / <worker record> — merged into <the kept block's VULN id>`,
 `— distinct: <what differs>` or `— linked`, then `duplicate candidates: <n>`, the number of those lines; a pair the table already
 answers — one key whose two rows name one entry point, one merged into the other, or two rows merged into one body row —
@@ -966,11 +1027,45 @@ is not listed, and a line on it that agrees is no stray; a merge whose two recor
 whatever their cells read. A wrong `merged into` folds a distinct finding into the kept one — its record and row stay,
 its block and count do not — so a pair is merged only on the records' own evidence. A merge is made before the body, the histogram and the counts are taken, like every
 merge. One run carried twenty-nine `entry` pairs as separate findings, the same defect at two severities.
+`--duplicates` also prints a `merge severity:` line for every `merged` row whose worker record outranks its kept row's
+— a same-key merge the table answers included — and the writer turns each round before the body is rendered: the
+higher record becomes the `body` row and the other is `merged` into it.
+
+**Needs context.** A worker that cannot decide a candidate for want of a fact outside the repository writes NEEDS
+CONTEXT in its clearances, or calls the candidate an `Unverifiable candidate` or UNVERIFIABLE, or writes its own
+`[UNVERIFIABLE]` record, its tag before or after the heading's title,
+where no table row carries it, and the base skill reports such a judgement under Unverifiable.
+`python3 .llm-sast-scanner-cache/recheck.py --needs-context`, run from the target once the table is written and again
+after the Unverifiable section is, lists every line of a worker file outside its finding records that names one —
+`<lens>/p<n>:<line>`, the line as `grep -n` numbers it, a worker's `[UNVERIFIABLE]` record by its heading line alone, the
+record running over the field lines under it (`File:`, `Blocked by:`, `Judge:` and the like) — its text, and the answer
+the report holds. The writer reads each line where it stands and answers it on one line of the
+Unverifiable section, after the section's entries and any prose, writing the section when the report has none:
+`needs context: <lens>/p<n>:<line> — <path:line> — <what is missing>`, the cite first — the sink of the candidate the
+line leaves undecided, as a record's `File:` would name it, its path from the target directory; a path the line omits,
+as in `:217`, is read from the worker file's nearest full cite above it; a line that cites no sink is answered at the
+sink the worker file or the code shows it judging, never the cite nearest its words, which was the sink in ten of
+nineteen; a judgement about something the repository lacks cites the file and line whose content it judges — then two
+words or more naming the fact outside the repository that would decide it; `— carried by <id>` in place of the missing
+fact, the sink's cite before it or none, the id after `carried by` or a word or three later, when the report already
+reports that candidate, the id the report gives it — the `body record` cell of its row, or the `UNV-<nnn>` that heads its
+Unverifiable entry — never a worker record's own `VULN-` id, which names another finding of the report; or `— mention:
+<what the line restates>`, likewise after the cite or without it, for a line that judges nothing itself — a pass-log, class-table or coverage line restating a
+judgement — two words or more, naming the line key or id that answers the judgement it restates where one exists. Lines that judge one
+candidate, of one worker or several, are answered alike, each on its own line; a line leaving two candidates undecided
+answers both on its one line, `; ` between them, each in its form, every cite and id of it checked. An answer line is the report's note of that
+judgement and takes no `UNV-` id and no table row. The answers are this run's: an earlier report's `needs context:` lines
+are never copied, their keys naming lines of the earlier run's worker files. The Executive Summary counts the section's
+entries in an `| Unverifiable | <u> | n/a | n/a |` row after its severity table's Total, and its sentences name each entry
+by its id and title — recheck item (50). A judgement a reader of the report could act on is never a `mention:`:
+one `mention:` text naming no line key or id that answers three or more lines of two or more worker files says what none
+of them is, and recheck item (49) counts it; one missing fact may decide several sinks, each its own observation.
 
 `verdict` is Step 6's result for the row, written into the table before any body block is rendered: `STANDING`,
 `STANDING — downgrade voided: <named thing> is hop <n> of the Flow`, `DOWNGRADED — <trigger>: <the named thing the
 attacker must hold>`, or `DISPUTED — <one clause>` for every `body` row whose worker record's severity — the severity
-Step 6 saw, before any downgrade — is in `adv=`; `not run` for a `body` row whose record's severity is outside `adv=`,
+Step 6 saw, before any downgrade — is in `adv=`, and every `promoted` row whose severity as promoted, before Step 6, is;
+`not run` for a `body` row whose record's severity, or a `promoted` row whose severity as promoted, is outside `adv=`,
 so a record Step 6 disputed or downgraded below `adv=` keeps the verdict that lowered it; a `carried` row's cell is the copied block's `Adversarial:` verdict as it stands; a `refuted` row's is
 `WITHDRAWN — <the guard its worker's line names>`; `n/a` for every other row. Any other content is an invalid cell, and so is a cell that is
 specific in form but not in substance: every `DOWNGRADED` and `DISPUTED` cell contains at least one identifier in
@@ -980,7 +1075,7 @@ no `file:line`, or whose identifiers appear in no line of the record, is an inva
 `invalid cells <c>` counts exactly those cells. Identical text on two rows is valid only when each row's record holds
 the identifier. Verdicts are written per finding, never per category, and they carry across runs, and continuity is
 the first write into the verdict column, not a repair after the recheck: before Step 6 runs, the writer joins the
-table's `body` rows on their sink `file:line` — backticks removed — and class with the body records of every report the
+table's `body` and `promoted` rows on their sink `file:line` — backticks removed — and class with the body records of every report the
 scan-plan's `earlier-reports:` row lists, oldest to newest: a `DOWNGRADED` or `DISPUTED` verdict at a sink and class
 stands from the report that gave it until a later report's block at that sink and class opens `STANDING — previous
 downgrade voided:` — a bare `STANDING` in between does not clear it (one run rendered a downgraded sink bare, its repair
@@ -997,7 +1092,19 @@ names whose cell is later found bare is the writer's, not a joiner's, omission �
 while twenty-three of them were rendered bare. A carried verdict is copied, not re-run: it applies whatever the row's
 severity and whatever `adv=` covers, so a row at a previously downgraded sink never reads `not run` — a class that came
 in at its downgraded severity is exactly the row the previous verdict was about, and twenty-seven such rows once read
-`not run (severity outside adv=)` under a join line that listed them as carrying. A voided cell is held to the same
+`not run (severity outside adv=)` under a join line that listed them as carrying. A copied downgrade still meets the
+base skill's Downgrade validity check: Step 6 tests a carried `DOWNGRADED` cell's named thing against this run's
+record, whatever `adv=` covers, and voids one that is a hop of the Flow, never a trigger, or one this run's record
+shows does not hold; it voids a carried `DISPUTED` cell, whatever `adv=` covers, only on a ground the base skill bars (the grounds its note after
+Step 6's verdict table lists: the non-default-configuration trigger's setting or a deprecated or `legacy` label, the
+population of a store the repository does not show, or that writers of content the code executes are trusted or their
+authority not shown), or as the restated-cell rule below voids one specific in form but not in substance. The void reads
+`STANDING — previous downgrade voided: <clause>`, an identifier in the clause before any em dash within it (recheck
+item (2)) — for a barred ground, the clause naming the store, grant or default `file:line` the record's `Description:` line names,
+or, where it names none, the store's read `file:line` or the setting or label in backticks — the row then rated as the base
+skill's Downgrade validity check rates a voided record and counted under `voided`; where
+the row's `Judge:` line names a trigger that holds, the cell reads `DOWNGRADED — <that trigger>: <named thing>`
+instead, its block's rationale naming the voided ground, one level below and counted under `verdicts carried`. A voided cell is held to the same
 identifier rule as a downgrade cell — `STANDING — previous downgrade voided: <clause>` names, in backticks or as
 `file:line`, the thing from the row's own record that changed the judgement — and identical clause text across rows is
 valid only when each row's record holds the identifier; recheck item (2) counts a voided cell without one as invalid,
@@ -1005,9 +1112,30 @@ because a repair once voided twenty-seven carried verdicts with one sentence tha
 a `File:` line or sink cell written as an absolute path under the target is rewritten relative to it by the writer when
 the table is built, because the ledger, the earlier reports and the join all speak in relative paths and fifteen
 absolute ones once made fifteen keys that matched nothing. Step 6 may then replace such a cell only with
-`STANDING — previous downgrade voided: <one clause naming what changed>`; a bare `STANDING` on such a row is an invalid
+`STANDING — previous downgrade voided: <one clause naming what changed>`, or with a `DOWNGRADED` or `DISPUTED` cell as
+the base skill's Downgrade validity check gives, its block's rationale naming the voided ground and, for `DISPUTED`,
+its doubt besides, counted under `verdicts carried`, or with a cell the two rules below give; a bare `STANDING` on such a row is an invalid
 cell, and a run whose join line is missing rendered its verdicts without looking: one writer rendered thirty previously
-downgraded sinks as bare `STANDING` and restored them only when the recheck named them.
+downgraded sinks as bare `STANDING` and restored them only when the recheck named them. A carried `DOWNGRADED` or
+`DISPUTED` cell that neither the Downgrade validity check nor the barred-ground test above voids, both tested first,
+but whose clause fails the identifier rule — no backticked identifier or `file:line` this row's record holds ahead of
+any em dash, an earlier report's clause written without one or citing a line the code has since moved — is restated,
+never on a new ground: a `DOWNGRADED` cell keeps its trigger and named thing, cited as this record cites that same
+thing — its moved `file:line`, or in backticks as the record words it; a `DISPUTED` cell keeps its doubt, citing ahead of it the
+identifier this record holds for what the doubt concerns — the route, consumer, role, setting, store or line of the
+Flow it is about (`DISPUTED — <file:line>: <the same doubt>`), the sink `file:line` only for a doubt about the code at
+that line, as its `Evidence:` shows it. A restated cell is still a carried verdict, its row on the join line and counted under `verdicts
+carried`. Where this record names the `DOWNGRADED` cell's named thing nowhere, or holds nothing the `DISPUTED` cell's
+doubt concerns, the cell is specific in form but not in substance and is voided, never restated at a line it does not
+concern: `STANDING — previous downgrade voided: <sink file:line>: <the named thing or doubt> is named nowhere in this
+run's record`, the sink standing for the record that changed the judgement, counted under `voided` — or, where the
+row's `Judge:` line names a trigger that holds, `DOWNGRADED — <that trigger>: <named thing>` as above, counted under
+`verdicts carried`. A carried `DOWNGRADED` cell naming the non-default configuration that the rules above leave
+standing, on a record already at `Low` or below without it once Step 6's voids are made, lowers it no level — the
+base skill's Severity Downgrade Rule counts the configuration last — so it reads `DOWNGRADED` for a trigger other than
+the configuration that holds and that the row's `Judge:` line or Step 6 names, counted under `verdicts carried`, and
+otherwise `STANDING — previous downgrade voided: <the default's file:line its Description: names>: the configuration
+lowers this record no further`, counted under `voided`: the configuration still holds, but its level is gone.
 Step 6 and citation verification update the `disposition` and `verdict` cells of this table — never a carried row's,
 whose cells are its block's. The body is then
 rendered from the table: one Finding Format record per `body` row, in severity order, carrying the row's VULN id.
@@ -1018,7 +1146,11 @@ Reference — with no other line between them; and the `Adversarial:` line opens
 the verdict word, and for a downgrade its trigger and named thing, for a voided downgrade its hop — followed by ` — `
 and the base skill's one-sentence rationale, which is never omitted; a `not run` row's line reads
 `Adversarial: not run (severity outside adv=)`. A block whose opening differs from its row's cell, or whose line ends
-at the cell with no rationale, is an invalid block. The table is the only source of
+at the cell with no rationale, is an invalid block. Every field line outside a carried block (copied as its source holds
+it), like every other line of the report outside a fenced code block, stays within 2000 bytes (UTF-8), which a file
+reader keeps whole: a field that would run longer is
+shortened, never wrapped, and an `Also at:` list that would run longer continues on a further `Also at:` line right
+after it, no sink dropped — recheck item (52). The table is the only source of
 verdicts: a re-rendering of the body for any reason — a repair, a completion pass, a second writer — copies them
 from the table and never re-adjudicates, defaults or omits one. Body records that STEP X or the BURIED-SINK AUDIT promoted from a
 clearance or a note are `promoted` rows under the table, each naming its source lens/partition, and are rendered
@@ -1107,6 +1239,26 @@ never described. The Severity Histogram is counted from the body. A
 worker record that is absent from the body without a `merged`, `withdrawn` or `unverifiable` row is a STEP 3
 error, not a de-duplication.
 
+**One missing check's other lines.** A worker record that collapses one missing check of one entry point — the base
+skill's Deduplication & Sink Location rule — carries, right after `Reference:`, an `Also at: <path>:<line>, …` line naming
+its other sink lines, one `<path>:<line>` each, never a range. Its body or promoted block keeps that line after
+`Reference:` with the same sinks, and with the lines of each record of its class merged into it — a merged group's lines
+travel on the kept block, or the next run would read them as missed — each line one the checker can read, a file of the
+target: recheck item (40). Two records of one class and entry point whose groups overlap — one's `File:` sink on the
+other's `Also at:` line — are one finding: `--duplicates` prints a `group overlap:` line for each, and the writer merges
+one into the other before the body is rendered, a merge item (4) reads as one finding's; a block cannot leave its
+record's `Also at:` line, so keeping both counts one defect twice (item (48)), and one run whose two lenses grouped one
+schema check under two lead lines stopped on that mismatch. Its key is its `File:` sink alone: no ledger row is written for a line only an `Also at:`
+line names — item (12). At its class, each such line is a key the record holds when the record is a finding this run (a
+`body`, `merged` or `promoted` row's): a row of the pre-write copy at one of them is re-found by it — not carried, not
+marked `not re-found`, its `last-verified` this run's — items (24), (26) and (47), whose `ledger refuted:` reading counts
+it as that record's. A withdrawn or unverifiable record's lines are read as its `File:` key is. A carried block keeps its
+`Also at:` line as its source holds it, and the lines it names are held by that carried row; a key the newest earlier
+report at this commit names only on `Also at:` lines goes with the block that names it — carried with it when any such
+block's own key is carried this run, whatever their order; else, or when that block's key is refuted, a key without
+source — and no older per-line block is carried for it beside the group. A source block's `Also at:` cites count as its
+`File:` cites do: one past the end of a file makes it no source, and item (46) reads them as it reads `File:`'s.
+
 A prior report, the project-memory ledger, and a previous run's histogram are inputs to re-verify, never sources
 of records or counts: a worker record that matches a ledger row is a body record of this run, and the ledger's
 status is updated from it. Route families are entry points: two routes reaching one sink are two body records. A
@@ -1157,14 +1309,26 @@ Note, a Positive Pattern, a `safe-because` clause, never a `ledger refuted:` lin
 `default configuration`, `environment-gated`, `non-production`, `only when the flag` or `unless configured` rests on
 configuration and is not a clearance, unless the same line also names a code guard that holds regardless of
 configuration — an authorization middleware, an ownership check, a validator, by name or by `file:line`. A flag or
-setting listed beside such a guard is a guard list, not a clearance by configuration, and does not trigger. The base skill's Severity Downgrade Rule makes a non-default configuration a downgrade
-trigger, so the negative-verdict re-derivation rewrites each such line's sink as a body record at its class severity
-and Step 6 downgrades it naming that configuration. `config clearances rewritten: <k>` equals the number of such lines
+setting listed beside such a guard is a guard list, not a clearance by configuration, and does not trigger; nor does a
+phrase inside an absence claim — its clause opens `no`, `none of`, `neither` or `nor` and lists what the partition lacks
+(`SAFE in p3 — no IaC resource-attribute … or vendor non-production endpoint surface in this partition`) — which names a
+class found absent, not a configuration a clearance rests on. The base skill's Severity Downgrade Rule makes a non-default configuration a downgrade
+trigger, so the negative-verdict re-derivation rewrites each such line's sink as a body record at its class severity,
+its `Description:` line naming the setting and each `file:line` that sets its default — in the code and in every
+deployment config the repository ships that sets it — and Step 6 tests that trigger as on any record in `adv=`: where
+the finding needs a configuration the code and every deployment config the repository ships show is not the default,
+and the trigger lowers the record — one level, after its other triggers, never below `Low`, as the base skill's
+Severity Downgrade Rule counts it — Step 6 downgrades it naming that configuration on its `Adversarial:` line, and
+otherwise rates it as Step 6 rates any record, the phrase its clearance used being no trigger; a record whose class
+severity is outside `adv=` is `not run`, a verdict the continuity join carries excepted, and otherwise stays at it,
+which under the default `adv=` is only a `Low` or `Informational` record, one the trigger never lowers. `config clearances rewritten: <k>` equals the number of such lines
 without a `file:line` guard, found by searching the worker files for those phrases, and the appendix lists each as
 `<lens>/p<n>: <its text> → <body VULN id>`; a `0` while the search finds such lines is a STEP 3 error.
 
-Then every line of the scan-plan's `## Entry points` list is looked up by name across the worker files. An entry
-point named in no finding's `Entry point:` line and in no Clearance Record was read but never analyzed — a worker
+Then every line of the scan-plan's `## Entry points` list is looked up by name or `file:line` across the worker files. An entry
+point named in no finding's `Entry point:` line, as no stored-content finding's read trigger (a finding whose Flow
+reads the attacker's content back from a store — on its `Flow:` line or named in its `Description:`), and in no
+Clearance Record was read but never analyzed — a worker
 that cites lines 587 and 599 of a file has not examined the method at line 386 — and is a STEP Y hand-off to its
 partition's owning lens; one still unresolved when the report closes is listed by name with the disposition
 `unanalyzed`. A finding is never written for an entry point nobody traced.
@@ -1232,7 +1396,7 @@ under these names, with nothing else at the `##` level after the body:
   shows a gap here. Report the number you get. It is a reading of the run, not a bar the run has to clear.
   Then `entry points dispositioned <n>/<m>` — `m` the line count of the scan-plan's `## Entry points` list, taken by
   a command and never `0` while the list has lines, `n` those
-  named in a finding's `Entry point:` line or in a Clearance Record — followed by one line per entry point named in neither, `<file:line> | <name> | p<n> | unanalyzed` — possible only in a
+  named in a finding's `Entry point:` line, as a stored-content finding's read trigger (on its `Flow:` line or named in its `Description:`), or in a Clearance Record — followed by one line per entry point named in none of them, `<file:line> | <name> | p<n> | unanalyzed` — possible only in a
 partition holding a `worker not run:` pair, since a worker that passed its gate dispositioned every entry point it owns — and then `config clearances rewritten: <k>`.
 - Added lenses: the added-lens derivation table from `scan-plan.md`, reproduced in full, then one line per lens
   beyond the base six — the lens name, the classes it owns, and the rule that chose it. Then
@@ -1726,6 +1890,9 @@ sink several routes reach keeps every route; each carried block says on its seco
 - **A carried verdict ignores `adv=` and sinks compare target-relative because a join listed sixty-six rows of which
   twenty-seven read `not run` and fifteen cited absolute paths**: a copied verdict is not a Step 6 run, so scope cannot
   skip it, and a key written absolute is a key no ledger row and no earlier report can meet.
+- **A copied downgrade still meets the validity check because one run's Step 6 kept a downgrade that read the attacker's
+  own provider account as a privileged position**: copied verbatim, that verdict would outlive every later worker that
+  rates the finding at its class default; a copy keeps a judgement, not its errors.
 - **The continuity join names its rows because a writer wrote `continuity join: 54` and filled twenty-nine cells**:
   a count is a promise; a list of ids is a worklist the recheck can walk row by row, and a named row found bare has one
   owner.
@@ -1770,6 +1937,12 @@ sink several routes reach keeps every route; each carried block says on its seco
   carried as before; the appendix says which, and item (47) holds every such key to one outcome. A line the checker cannot read is shown
   on item (47)'s line and its key carried as before: failing the worker's gate on it would cost a re-run and, past
   three attempts, an uncovered partition — more than the carry costs.
+- **A block never reads below a record merged into it because 126 of 1,978 same-key merges in past reports kept the
+  lower record**: a pair the table answers is listed to no one, so the record kept was whichever the writer took first —
+  a HIGH injection record folded into a MEDIUM block read `STANDING`, others into LOW blocks outside `adv=` — and the
+  report carried a severity no verdict had lowered while Step 6 never saw the higher one. Kept, the higher record meets
+  Step 6, which may still lower it one level by a named trigger; item (51) reads every merge, and `--duplicates` names
+  one before the body exists.
 - **Duplicates are listed by the entry point a cell names, not its wording, and every pair is judged, because one run
   carried twenty-nine pairs of one finding as two**: an added lens re-applies a base lens's classes, so the same defect
   at one sink and entry point came from two workers worded `POST /items (items.ts:20)` and
@@ -1813,3 +1986,57 @@ sink several routes reach keeps every route; each carried block says on its seco
   reported at one Dockerfile line among them — and the recheck read 0; over the earlier runs' answers a clause repeated
   at most five times, always over one class pair, and one fresh run's clause answered eleven of its thirteen pairs over
   eight.
+- **A NEEDS CONTEXT judgement in a worker's clearances is listed by the checker and answered by the writer, because
+  one run's report left two such candidates out**: a worker that cannot decide a candidate without a fact outside the
+  repository writes NEEDS CONTEXT in prose, and the writer's hand-off harvest brought five bullets of such judgements into
+  the Unverifiable section and left out a message-chosen sender address one worker called an `Unverifiable candidate` and
+  a secret carried in a URL query another judged NEEDS CONTEXT. Reading the sink out of the prose was measured and
+  rejected: over sixty-four such passages of the earlier runs, thirty cite no `path:line`, and of nineteen whose cited
+  line no report section held, the `path:line` nearest the words was the judgement's sink in ten, so the checker lists
+  the lines — telling a line that names such a judgement is reliable where finding its sink is not — and the writer, who
+  reads them, names the sink. The `mention:` answer is the escape, and is guarded like a `distinct` clause: one text
+  naming no line or id over three or more lines of two or more workers. An observation names its sink, so it stands even
+  when one missing fact — an edge's header policy, a sending identity's policy — decides several. Three simulated writers
+  answering sixty-one such lines on three runs wrote no answer the checker refused, and each wrote `carried by` after the
+  sink's cite, which 2.25.9 read as an observation and never tested: 2.25.10 reads the cite and then the id, any id the
+  report gives a candidate — a body record, a heading's, an Unverifiable entry's — as older reports number them too. A
+  fourth review found what 2.25.10 still let pass or lose: a colon or a bracket between the cite and `carried by` read
+  as an observation, so a made-up id passed; a line of several answers was read only to its first; a worker record whose
+  heading ended with its `[UNVERIFIABLE]` tag, or a clearance calling a candidate UNVERIFIABLE, was not listed — one
+  run held such a record — and a missing fact opening with the words "carried by" was refused. 2.25.11 reads past the
+  separator, every answer of a line, every id after a `carried by` that bears a prefix the report's ids use — so a
+  weakness number or a hash name beside it is text, as a fifth review asked — and lists those lines; the eight
+  simulated writers' answers read as before. Two simulated repairs, given only the checker's `fix:` text, cleared six
+  kinds of wrong answer in one round each; 2.25.12 tells a line with no answer from one answered twice and says what to
+  do with an answer at no listed line, and the paragraph says an earlier report's answers are not copied — a run whose
+  worker lines moved by two read thirteen of fourteen copied answers as at no listed line, the fourteenth on a line it
+  did not judge. Ten simulated writers and repairs on the scan's own model answered 143 lines with one refusal the
+  rules did not make: a `mention:` that listed, after a `; `, the line keys it restates, each read as a file's cite —
+  2.25.13 reads a line key as the line it names.
+- **The Executive Summary counts the Unverifiable entries and names them, because one run's report held ten of them
+  two thousand lines down while its summary table showed only the five severities**: a reader of the start of the
+  report saw what was found and not what could not be decided — a sender identity's policy, a template's HTML context,
+  a deployment's approvals — though each entry names the fact that would decide it. The row stands after Total, which
+  counts findings and not these, and the sentences name each entry by its id; its Confirmed and Likely cells read
+  `n/a`, as an entry has neither tag. An UNV id on a line no entry opens fails the item when the row is absent or counts
+  more than the entries read, as a review's entry headings `UNV-001. <title>` were read as no entry and the hint asked
+  for `| Unverifiable | 0 |` over nine of them.
+- **A phrase inside an absence claim does not make a configuration clearance, and a dotfile's cite after `; ` keeps its
+  dot, because one run's writer was told to rewrite as a finding the clearance `no … or vendor non-production endpoint
+  surface in this partition` — a class found absent, with no sink to rewrite — and to re-form five honest answers citing
+  `.gitlab-ci.yml:37` after a `; `, read as `gitlab-ci.yml:37`**: across 1587 worker files three lines are such absence
+  claims, all of that class, and every clearance resting on `disabled by default` or a test-only `non-production` caller
+  still counts. A report written before reads either count.
+- **A pair one of whose records is merged into the block linked to the other reads `linked`, because one run held three
+  records of one defect over two keys** — a webhook record holding the ledger key, linked to a HIGH IaC record, and a
+  second IaC record merged into that one — and its third pair had no answer the table bore out: not `merged into` (the
+  webhook record stays `body`), not `linked` (one row merged), and `distinct` untrue. The writer and the repair left the
+  mismatch standing rather than answer falsely; the link is now read between the two kept blocks. A review then found the
+  link passing while the kept records' own pair read `distinct`: the kept pair's own answer is read now.
+- **One missing check of one entry point is one finding, its other sink lines on an `Also at:` line, because one handler
+  was filed as thirty-one findings, one per field it read, then sixty-seven across its two consumers** — every one closed
+  by one shape check at its top — and the ledger kept each line as a key the next run had to re-find or carry, so the
+  split held and spread. The base skill's identity rule now collapses one missing check (a catch-all — per-record error
+  isolation — groups nothing, as a test worker that folded a wrong-value bug under it showed); at its class each
+  `Also at:` line is a key its record holds — re-found, never a row of its own — a grouped block in a newer report keeps
+  the older per-line blocks from being carried back, and items (12), (40) and (46) read the line as (24) and (26) do.

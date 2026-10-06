@@ -1,6 +1,6 @@
 ---
 name: log_injection
-version: "0.1"
+version: "0.2"
 description: Log injection and log forging detection (CWE-117)
 ---
 
@@ -87,6 +87,12 @@ Commonly affected languages: Java, Python, JavaScript, Go, Ruby, C#, Rust (web s
 - Compliance failure (PCI/SOC2) on tamper-evident logging
 - SIEM alert injection or evasion
 - XSS in admin log-viewer panels
+
+## Severity
+
+- Class default for log injection and forging (CWE-117): **Medium** — forged or hidden entries in audit trails and SIEM pipelines. An HTML log viewer that renders the content unencoded is that viewer's stored XSS, rated by `xss.md`.
+- A value the logger writes as an encoded field of a JSON formatter is the Common False Alarm above, its viewer check included, not a lower rating.
+- This default covers CWE-117 only; a missing security log (CWE-778, *Security Events to Log* below) is outside it.
 
 ## Core Principle
 

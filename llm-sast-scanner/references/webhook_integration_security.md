@@ -1,7 +1,7 @@
 ---
 name: webhook_integration_security
-version: "0.3"
-description: Webhook and third-party integration security — outbound SSRF via test/ping/verify URL features, webhook CRUD IDOR/BFLA, unallowlisted delivery with redirect follow, OAuth redirect_uri from query without allowlist, inbound webhook receivers missing HMAC signature verification or replay protection, signing-secret disclosure, and third-party support/feedback/chat widget identity that trusts client-controlled userId/email without a server-signed JWT or HMAC proof (CWE-918 / CWE-639 / CWE-352 / CWE-287)
+version: "0.6"
+description: Webhook and third-party integration security — outbound SSRF via test/ping/verify URL features, webhook CRUD IDOR/BFLA, unallowlisted delivery with redirect follow, OAuth redirect_uri from query without allowlist, inbound webhook receivers missing HMAC signature verification or replay protection, signing-secret disclosure, and third-party support/feedback/chat widget identity that trusts client-controlled userId/email without a server-signed JWT or HMAC proof (CWE-918 / CWE-639 / CWE-352 / CWE-287); cloud event channels (SES via SNS, S3 notifications) whose grant admits every customer of the provider
 ---
 
 # Webhook & Integration Security (CWE-918 / CWE-639 / CWE-352)
@@ -95,6 +95,7 @@ For each outbound hit: confirm allowlist validation and internal-IP/metadata blo
 8. **Secret disclosure**: create-webhook response includes `signing_secret`; secret written to application logs on delivery failure.
 9. **Signature verified over the wrong bytes**: HMAC computed over a *re-serialized* parsed body (`createHmac(...).update(JSON.stringify(await req.json()))`, `hmac(json.dumps(parsed))`) instead of the **exact raw request bytes** the sender signed. `JSON.stringify`/`json.dumps` of the parsed object differs from the original payload in key order, whitespace, and number/unicode escaping, so the digest can never match a legitimate signature — and frameworks that auto-parse the body (Next.js `req.json()`, Express default `json()` middleware, FastAPI model binding) make this the *default* mistake, pushing developers to weaken or skip the check to make it "work." **Capture and HMAC the raw bytes before any parse.** SAST signal: an HMAC `update(...)` whose argument is a parsed/stringified body rather than a raw buffer/`req.rawBody`/`await req.text()`.
 10. **Cloud eventing push destination set from user input**: an HTTP(S) delivery endpoint registered through a cloud eventing **SDK or IaC** — SNS subscription `Endpoint` (`sns.subscribe`/`SubscribeCommand`), EventBridge API-destination `InvocationEndpoint` (`createApiDestination`), GCP Pub/Sub `push_endpoint`, Azure Event Grid `webhook_endpoint.url` (Terraform `aws_sns_topic_subscription` / `aws_cloudwatch_event_api_destination` / `google_pubsub_subscription` / `azurerm_eventgrid_event_subscription`) — is user/attacker-influenced and not constrained to an **HTTPS host allowlist**. The request to the endpoint is issued by the cloud service (or the SDK call), so a `fetch`/`requests` grep misses it, yet an internal/RFC1918/metadata endpoint is still reached — and SNS confirms a subscription by POSTing to the endpoint at subscribe time. Enforce the same allowlist + internal-IP/metadata block + HTTPS-only **at registration**, and prefer provider signature/`ConnectionArn`-scoped auth on delivery. Cross-ref `iac_security.md`, `ssrf.md`.
+11. **Cloud event channel open to every provider customer**: the inbound channel is a cloud service's own delivery — SES feedback or event publishing through an SNS topic, an S3 event notification — whose grant names the provider's service principal with no condition pinning a source account, organization or resource, at a service that delivers for other accounts (the shared block under **Downgrade when** names them), and the consumer acts on each event without checking its origin by a value the provider sets (the identity ARN, the bucket and its owner): anyone with an account at the provider can point their own configuration at the channel and feed the consumer genuine provider-generated events.
 
 ## Vulnerable vs Safe Code Examples
 
@@ -290,6 +291,7 @@ app.post('/integrations/vendor/identify', requireAuth, async (req, res) => {
 | Outbound delivery + redirect follow to internal | **High** |
 | Webhook delete/update IDOR across tenants | **High** |
 | Inbound webhook without signature on state-changing handler | **High** — forged events |
+| Cloud event channel (SES via SNS, S3 notifications) whose grant admits the provider's service principal | Rated by the shared block under **Downgrade when** — unbound: **High** when the consumer changes state keyed by the event, **Medium** otherwise; account-bound: one level lower; resource-bound: no finding. The attacker's own provider account is no privileged position (base Severity Downgrade Rule) |
 | Integration `redirect_uri` prefix/substring acceptance | **High** — code/token theft chain |
 | Signing secret in logs or list API | **Medium–High** |
 | Missing replay window on signed inbound | **Medium** (depends on event impact) |
@@ -299,7 +301,66 @@ app.post('/integrations/vendor/identify', requireAuth, async (req, res) => {
 | Test feature restricted to admin + strict allowlist | **Info / FALSE POSITIVE** |
 | Widget identify with server-minted JWT/user_hash only | **FALSE POSITIVE** |
 
-Downgrade when: outbound path uses allowlist + IP block + no redirects; CRUD scoped to owner; inbound HMAC + timestamp + idempotency enforced; secrets not exposed after create.
+Downgrade when: outbound path uses allowlist + IP block + no redirects; CRUD scoped to owner; inbound HMAC + timestamp + idempotency enforced; secrets not exposed after create. A cloud event channel is rated by the shared block below, which `iac_security.md` holds word for word:
+
+<!-- BEGIN shared block: service-principal grants — identical in iac_security.md and webhook_integration_security.md -->
+**Service-principal grants** — a resource policy or Lambda permission that admits a cloud provider's service principal
+(`ses.amazonaws.com`, `s3.amazonaws.com`, …). CWE-441; the record's `File:` is the grant's principal line — the line
+naming the service principal (`- ses.amazonaws.com`, `Service: sns.amazonaws.com`, `principal = "s3.amazonaws.com"`,
+`identifiers = ["ses.amazonaws.com"]`), as the base skill's Deduplication & Sink Location rule has it — whichever class
+reports it, so the records of whom one grant admits name one line and merge as one finding for each consumer the grant
+feeds (one when none is in scope): a grant finding's entry point is that consumer, named as the scan's entry-point list
+names it, else by its handler's `file:line` — `none in scope` when there is none.
+- **Which services deliver for other accounts.** SES (an event destination or a feedback notification that another
+  account's configuration set or identity names), S3 event notifications (to a topic, queue or function), API Gateway (a
+  Lambda permission for `apigateway.amazonaws.com` lets another account's API integrate the function, and that API
+  writes the whole event — a non-proxy integration's template sets every field, `requestContext` included — so no event
+  field is a provider-set origin or sending account; AWS's own setup binds the grant by an `aws:SourceArn` naming the
+  API), and CloudTrail, AWS Config and log delivery (`delivery.logs.amazonaws.com`) writing to a bucket do. These do not
+  through the service principal alone, so a grant to them is account-bound at most: SNS — until the endpoint's owner
+  confirms a subscription made by another account's topic, that topic can place only `SubscriptionConfirmation` messages
+  in the queue or function (unbound only when the consumer itself confirms a `SubscribeURL`); EventBridge — another
+  account's rules reach a target only through an execution role the target's policy admits by account ID, and a grant to
+  `events.amazonaws.com` serves rules of the same account; S3 server access logging (`logging.s3.amazonaws.com`) —
+  buckets of the same account only. A service not named here delivers for other accounts unless the provider's
+  documentation, read in this run, says otherwise; one you cannot check is unbound at LIKELY.
+- **Unbound** — no condition pins an account: none of `aws:SourceArn`, `aws:SourceAccount`, `aws:SourceOwner`,
+  `aws:SourceOrgID`, `aws:SourceOrgPaths` (a Lambda permission: `SourceArn`, `SourceAccount`), or every value leaves the
+  account open (`*`, `arn:aws:ses:*`, `arn:aws:ses:*:*:configuration-set/x`, a topic or function name any account can
+  create) — at a service that delivers for other accounts. An S3 bucket name is global: `arn:aws:s3:::<bucket>` and
+  `arn:aws:s3:*:*:<bucket>` pin that bucket (the S3 bullet below); an API Gateway id is a label AWS assigns (the
+  `<api-id>.execute-api.<region>.amazonaws.com` host) that no account can choose, so an `arn:aws:execute-api:…` value
+  whose id segment is written out in full — no `*` or `?` in it — pins that API even with the account or region left
+  open (resource-bound below). The rating is the class default: **High** when an event the attacker's configuration
+  produces makes the consumer change data or behaviour beyond that event's own record — a recipient blocked or
+  suppressed, a record updated or deleted, privileged code invoked — keyed by a value the event chooses (a recipient
+  address, an object key); **Medium** otherwise (each event only appended to a log or archive, or a fixed action no
+  event value steers); with no consumer in scope, Medium at LIKELY.
+- **Account-bound** — a condition pins an account or organization (this one, or a sending account or organization the
+  grant names: `aws:SourceAccount`, the legacy `aws:SourceOwner`, `aws:SourceOrgID`, `aws:SourceOrgPaths`; a Lambda
+  permission's `SourceAccount`) but not the resource meant to deliver; or the consumer checks only the sending account
+  (`mail.sendingAccountId`); or the service delivers only within its own account (above). What remains needs a principal
+  inside that account: the Severity Downgrade Rule's privileged position, applied once — one level below the unbound
+  rating of the same consumer. The record names it
+  `privileged position: an IAM principal inside the account the grant at <file:line> pins (a role held, not a hop)`,
+  `<file:line>` being the record's own `File:` line (a verdict cell names an identifier from its record), at the end of
+  its `Judge:` line, after `; `, and, when Step 6 runs on it, on its `Adversarial:` line as well — as a `DOWNGRADED`
+  verdict's trigger and named thing while the account pin holds, or in the rationale of a `DISPUTED` one — and no later
+  step demotes it again for that position.
+- **Resource-bound** — no finding: a condition pins the one resource meant to deliver (its ARN; an S3 bucket ARN together
+  with `aws:SourceAccount`), or the consumer rejects, before acting, every event whose provider-set origin is not that
+  resource — the identity ARN (`mail.sourceArn`; an event without it rejected too), the bucket with its owner. A
+  configuration-set name, a message tag or anything else the sender chooses is no origin check; an SES identity binds
+  whoever can verify its domain or address. When only the consumer's check binds and the grant itself pins nothing, the
+  unpinned grant is a Hardening Note.
+- **S3 bucket ARN without `aws:SourceAccount`** — a Hardening Note, no severity, when this repository creates that bucket:
+  the pin holds while the bucket exists, and a deleted bucket's name can be recreated by any account. When the
+  repository does not create it, nothing shows who owns the name: unbound, at LIKELY.
+- **Never grounds to lower these ratings** — no downgrade, NEEDS CONTEXT, DISPUTED or UNCERTAIN mark: holding an account
+  at the provider; knowing the resource's ARN, account ID or bucket name (AWS treats them as non-secret); the provider's
+  gate on the attacker's own account (SES production access, a sending quota), which is part of opening that account —
+  the record may mention it in Impact.
+<!-- END shared block -->
 
 ## Common False Alarms
 
@@ -319,6 +380,7 @@ Downgrade when: outbound path uses allowlist + IP block + no redirects; CRUD sco
 - `information_disclosure.md` — signing secrets and integration tokens in responses/logs.
 - `business_logic.md` — webhook event handlers with inverted or missing verb checks (grant vs revoke).
 - `api_security.md` — REST webhook management API surface.
+- `iac_security.md` — the resource-policy grant itself when a cloud event channel admits a service principal with no condition pinning its source, and which services let another customer deliver.
 
 ## Core Principle
 

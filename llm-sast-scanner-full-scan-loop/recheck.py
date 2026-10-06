@@ -31,6 +31,33 @@ from collections import Counter
 from pathlib import Path
 
 CMD = "python3 .llm-sast-scanner-cache/recheck.py"
+# a file reader cuts a line longer than this many UTF-8 bytes: a line past it is read only up to it (one fresh run wrote
+# every worker prompt as one line of 6,800 characters, and thirteen workers were re-run). The limit is bytes, not
+# characters: Devin's reader keeps exactly 2,000 bytes of a longer line — 1,982 to 1,994 characters on lines with em
+# dashes, three bytes each — and Claude Code's 2,000-character limit is never the tighter of the two
+LINE_LIMIT = 2000
+FENCE_RX = re.compile(r"^\s*(?:```|~~~)")  # a fence line as `unfenced()` reads one, at any indentation
+
+
+def long_lines(text: str) -> list[tuple[int, int]]:
+    """The lines of a prompt longer than LINE_LIMIT bytes (UTF-8), as (line number, bytes)."""
+    return [(i + 1, len(l.encode("utf-8"))) for i, l in enumerate(text.split("\n")) if len(l.encode("utf-8")) > LINE_LIMIT]
+
+
+def long_text_lines(text: str) -> list[tuple[int, int]]:
+    """The lines of a worker file or report longer than LINE_LIMIT bytes outside a fenced code block, as (line number,
+    bytes): a fenced line is a verbatim copy of source, which a wrap would make no copy, and every other line can be
+    shortened or broken. Fences are read as `unfenced()` reads them — a ``` or ~~~ line at any indentation opens or
+    closes one — except that a fence still open at the end of the text is none."""
+    lines = text.split("\n")
+    marks = [i for i, l in enumerate(lines) if FENCE_RX.match(l)]
+    if len(marks) % 2:
+        marks = marks[:-1]  # a fence never closed is no fence: one left open would exempt every line after it
+    fenced = set()
+    for a, b in zip(marks[::2], marks[1::2]):
+        fenced.update(range(a, b + 1))
+    return [(i + 1, len(l.encode("utf-8"))) for i, l in enumerate(lines)
+            if i not in fenced and len(l.encode("utf-8")) > LINE_LIMIT]
 VERDICT_RX = re.compile(r"(DOWNGRADED|DISPUTED) — [^—]*(`[^`]+`|[A-Za-z0-9_./-]+:[0-9]+)")
 VOIDED_RX = re.compile(r"STANDING — previous downgrade voided: [^—]*(`[^`]+`|[A-Za-z0-9_./-]+:[0-9]+)")
 LEDGER_RX = re.compile(r"^([a-z][a-z0-9_]*) \| ([^|]+:[0-9]+(?:-[0-9]+)?) \|(.*)$")
@@ -54,14 +81,14 @@ MISMATCHES: list[str] = []
 
 
 # one definition of a recorded gate line and of its verdict, shared by item 29 and by --prompt's precondition
-GATE_LINE_RX = re.compile(r"^gate: ([a-z-]+/p\d+) — header (ok|fail) \| pinned (ok|fail) \| phrase (ok|fail) \| sentinel (absent|files ([\d,]+)/([\d,]+) lines ([\d,]+)/([\d,]+) passes (\d+)) \| paths (\d+)/(\d+) resolve \| headings (\d+)/(\d+) \| absolute (\d+) \| references (\d+)/(\d+)(?: \| entry pipes (\d+))?(?: \| copied (?:(\d+)%(?: from \S+)?|n/a))?(?: \| digest ([0-9a-f]{12}|unreadable))?", re.M)
+GATE_LINE_RX = re.compile(r"^gate: ([a-z-]+/p\d+) — header (ok|fail) \| pinned (ok|fail) \| phrase (ok|fail) \| sentinel (absent|files ([\d,]+)/([\d,]+) lines ([\d,]+)/([\d,]+) passes (\d+)) \| paths (\d+)/(\d+) resolve \| headings (\d+)/(\d+) \| absolute (\d+) \| references (\d+)/(\d+)(?: \| entry pipes (\d+))?(?: \| copied (?:(\d+)%(?: from \S+)?|n/a))?(?: \| digest ([0-9a-f]{12}|unreadable))?(?: \| long lines (\d+))?", re.M)
 COPY_CAP = 80  # a worker file whose prose is this share of an earlier run's file of its pair is that file, not this run's
 
 
 def gate_line_passes(line: str) -> bool | None:
     """A recorded `gate:` line's verdict by the gate rule (None when the line does not parse): every field `ok`, the sentinel
     at full coverage with passes, paths all resolving (`0/0` failing on a file with records), headings and references full,
-    and, on a line that carries it, a `copied` share below COPY_CAP."""
+    and, on a line that carries them, a `copied` share below COPY_CAP and `long lines 0`."""
     g = GATE_LINE_RX.match(line.strip())
     if not g:
         return None
@@ -74,12 +101,14 @@ def gate_line_passes(line: str) -> bool | None:
     # the later fields: a line written before them has none, and its verdict reads as it did; `entry pipes` is a count, not a fail
     if g.group(19) and int(g.group(19)) >= COPY_CAP:
         return False
+    if g.group(21) and int(g.group(21)) > 0:
+        return False  # a line over the reader's limit: the writer reads only its start
     return not ((km > 0 and k < km) or (km == 0 and s > 0) or s < sm or r < rm_)
 
 def gate_line_diff(recorded: str, now: str) -> list[str]:
     """What a recorded `gate:` line read in its worker file that the file's gate line now does not — the file changed after
     it was gated. Read: the file's digest (its bytes' SHA-256), then the counts its text decides, which say what changed —
-    its sentinel, records (`m`), headings, absolute paths, references and entry pipes. Not read: the header, pinning and
+    its sentinel, records (`m`), headings, absolute paths, references, entry pipes and long lines. Not read: the header, pinning and
     phrase, which follow the skills and the plan, the resolving paths, which follow the checkout, and `copied`, which
     follows the earlier runs' directories — within one run these do not move, and a later reading under other skills or
     another checkout would name a change the file never had. A line written before a field existed is read by the
@@ -102,7 +131,16 @@ def gate_line_diff(recorded: str, now: str) -> list[str]:
         out.append(f"references {a.group(16)}/{a.group(17)} now {b.group(16)}/{b.group(17)}")
     if a.group(18) is not None and b.group(18) is not None and a.group(18) != b.group(18):
         out.append(f"entry pipes {a.group(18)} now {b.group(18)}")
+    if a.group(21) is not None and b.group(21) is not None and a.group(21) != b.group(21):
+        out.append(f"long lines {a.group(21)} now {b.group(21)}")
     return out
+
+
+def gate_line_as(recorded: str, now: str) -> str:
+    """The file's gate line now, read by the fields the recorded line has: a line written before `long lines` existed is
+    judged without it, as every later field is."""
+    a = GATE_LINE_RX.match(recorded.strip())
+    return re.sub(r" \| long lines \d+\s*$", "", now.strip()) if a and a.group(21) is None else now
 
 
 def pathlib_name(name) -> str:
@@ -325,6 +363,58 @@ CITE_SPLIT_RX = re.compile(r"\s+|->|=>|<-|\u2192|\u2190")
 CITE_TOK_RX = re.compile(r"^(?P<pre>[(\[`'\"*]*)(?P<path>\S+?):(?P<spec>\d{1,9}(?:[-\u2013\u2014]\d{1,9})?(?:,\d{1,9}(?:[-\u2013\u2014]\d{1,9})?)*)(?::\d+)?(?:\([^)\s]*\))?[)\]`'\",;.*]*$")
 
 
+ALSO_RX = re.compile(r"^\s*(?:[-*+]\s+)?\**\s*Also at\s*\**\s*:\**\s*(.*)$", re.I)
+
+
+def also_sinks(text: str, file_path: str | None = None) -> list[tuple[str, int, int]]:
+    """The sinks an `Also at:` line names — one missing check's other sink lines (base skill, Deduplication & Sink
+    Location) — as (path, first line, last line): `path:30`, `path:30,32` and `path:30, 32`, `path:30:12` (a column),
+    `path:L30` and `path#L30`, a bare `:32` reading in the path before it and a bare `32` only as the next item of a
+    comma-separated list, `./` dropped, a bare file name that is the `File:` path's own read as that path, a path holding
+    `(…)` or `[…]` segments kept. A range comes back as (path, first, last), first < last, which the line may not hold
+    (item (40) flags it, and it holds its first line alone). `text` is the line after its label."""
+    out_, last_, cont_ = [], None, False
+    norm_ = lambda x_: re.sub(r"^(?:\./)+", "", x_.strip())
+    s_ = re.sub(r"[`*​‌‍﻿]", "", text or "").replace("−", "-")
+    raws_ = re.split(r"[\s;]+", s_)
+    cite_rx = re.compile(r"^[(\[]*([^\s:#]*?)(?::L?|#L)(\d{1,9}(?:[-–]\d{1,9})?(?:,\d{1,9}(?:[-–]\d{1,9})?)*)(?::\d{1,9})?[)\],.]*$")
+    num_rx = re.compile(r"^(\d{1,9})(?:[-–](\d{1,9}))?$")
+    for i_, raw_ in enumerate(raws_):
+        tok_ = raw_.strip(",").rstrip(".")  # a leading `.` is a path's (`./src`, `.gitlab-ci.yml`), a trailing one the sentence's
+        if not tok_:
+            cont_ = cont_ or raw_.endswith(",")
+            continue
+        if tok_.lower() in ("and", "&"):
+            continue  # `30, 32 and 40`: the list goes on
+        m_ = cite_rx.match(tok_)
+        if m_:
+            path_ = norm_(m_.group(1)) if m_.group(1) else last_
+            if path_ and file_path and "/" not in path_ and file_path.endswith("/" + path_):
+                path_ = file_path  # a bare file name that is the sink's file
+            if not path_:
+                cont_ = False
+                continue
+            last_ = path_
+            for sp_ in m_.group(2).split(","):
+                a_, _, b_ = sp_.replace("–", "-").partition("-")
+                out_.append((path_, int(a_), int(b_ or a_)))
+            cont_ = raw_.endswith(",")
+            continue
+        n_ = num_rx.match(tok_)
+        nxt_ = next((r_ for r_ in raws_[i_ + 1:] if r_.strip(",")), "")
+        nxt_t = nxt_.strip(",").rstrip(".")
+        prev_ = raws_[i_ - 1].lower() if i_ else ""
+        # a bare number is a line only as the next item of a list: after a comma (or `and`), and before a comma, a cite,
+        # `and` or the line's end — `30, 3 of them` names one line
+        if n_ and last_ and (cont_ or prev_ in ("and", "&")) and (raw_.endswith(",") or not nxt_ or nxt_t.lower() in ("and", "&", "\u2014", "\u2013", "-", "--")
+                                                                   or cite_rx.match(nxt_t) or num_rx.match(nxt_t)):
+            out_.append((last_, int(n_.group(1)), int(n_.group(2) or n_.group(1))))
+            cont_ = raw_.endswith(",")
+            continue
+        cont_ = False
+    return out_
+
+
 def cited_locations(block: str) -> list[tuple[list[str], int, int, str, str]]:
     """Every `path:line`, `path:line-line`, `path:line,line` and `path:line:col` a block's `File:` and `Flow:` lines cite, as
     (the path read without and with the bracket or parenthesis its token opens with — `(auth)/page.tsx` is a name,
@@ -350,6 +440,11 @@ def cited_locations(block: str) -> list[tuple[list[str], int, int, str, str]]:
     same = lambda x, y: x == y or (y.startswith("/") and (y.endswith("/" + x) or x.endswith(y))) or (x.startswith("/") and x.endswith("/" + y))
     out, sink_taken = [], False
     for line in body[1:]:
+        a_l = ALSO_RX.match(line)
+        if a_l:  # an `Also at:` line's sinks are cited as `File:`'s are, read as items (24) and (26) read them
+            for p_, n1_, n2_ in also_sinks(a_l.group(1), sink37[0] if sink37 else None):
+                out.append(([p_], n1_, n2_, "file", f"{n1_}" if n1_ == n2_ else f"{n1_}-{n2_}"))
+            continue
         m = re.match(r"^(?:[-*+]\s+)?\**(Files?|Flow)\**:\**\s*(.*)$", line)
         if not m:
             continue
@@ -365,6 +460,81 @@ def cited_locations(block: str) -> list[tuple[list[str], int, int, str, str]]:
             if kind == "file" and not sink_taken and sink37 and nums[0] == sink37[1] and any(same(norm(x), sink37[0]) for x in paths):
                 where, sink_taken = "sink", True
             out.append((paths, nums[0], max(nums), where, t.group("spec").replace("\u2013", "-").replace("\u2014", "-")))
+    return out
+
+
+# a NEEDS CONTEXT judgement in a worker's prose: the base skill reports one under Unverifiable, and a worker writes it in
+# its clearances, where no table row carries it
+NC_RX = re.compile(r"(?i)\bneeds[\s-]context\b|\bunverifiable candidate\b|\[unverifiable\]|(?-i:\bUNVERIFIABLE\b)")
+NC_REC_HEAD = re.compile(r"^(?:#+ )?\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\] VULN-", re.I)
+# a worker's own NEEDS CONTEXT record, one candidate: its `[UNVERIFIABLE]` tag first (a severity tag may stand before
+# it), or a `#` heading naming its id before the tag — a section heading `## Candidates [UNVERIFIABLE]` names none
+NC_UNV_HEAD = re.compile(r"^\s*(?:#+\s*|[-*+]\s+|\d+[.)]\s+)?[*_]*(?:\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]\s*)?\[UNVERIFIABLE\]", re.I)
+NC_UNV_TAIL = re.compile(r"^#{1,6} .*\b[A-Z][A-Z0-9]*-[A-Z0-9-]*\d\b.*\[UNVERIFIABLE\]")
+NC_ANS_RX = re.compile(r"^[-*+>\s]*(?:\d+[.)]\s*)?[*_`]*needs[\s-]+context[*_`]*\s*:[*_`]*\s*`?([a-z][a-z0-9-]*(?:/p\d+)?):(\d{1,9})`?[*_`]*"
+                       r"\s*(?:—|–|--|-)\s*(.*\S)\s*$", re.I)
+NC_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})([^`]*)$")  # a fence line: a one-line ```code``` span opens nothing
+NC_END = re.compile(r"^#{1,6} |^\s*(?:-{3,}|\*{3,}|_{3,})\s*$|^\*{0,2}(?:Clearances?|Coverage|Pass log|Convergence|Hardening|Positive|Hits)\b[^*:]{0,60}\*{0,2}:?\*{0,2}\s*$", re.I)
+NC_FIELD = re.compile(r"^\s*(?:[-*+]\s+)?\**(?:File|Location|Sink|Blocked|Missing|Judge|Verdict|Status|Reason|CWE|Class|Severity|"
+                      r"Confidence|Description|Impact|Evidence|Flow|Entry|Source|Remediation|Fix|Recommendation|Reference|Worker|"
+                      r"Note|Why|Context|Precondition|Attack|Exploit|Platform|Proof|Test|Adversarial|Base|Overlap|Variant|Ledger|"
+                      r"Route|Reachability|Sanitization|Authorization|Business)[A-Za-z0-9 /&()\u2192-]{0,40}\**\s*:", re.I)  # a record's field line
+
+
+def nc_pair(p: Path) -> str:
+    """`deep-<lens>-p<n>-results.md` -> `<lens>/p<n>`; an unpartitioned `deep-<lens>-results.md` -> `<lens>`."""
+    m = re.match(r"deep-(.+?)(?:-p(\d+))?-results\.md$", p.name)
+    return (m.group(1) + (f"/p{m.group(2)}" if m.group(2) else "")) if m else p.name
+
+
+def nc_lines(worker_files: list) -> list:
+    """Every line of a worker file outside its finding records that names a NEEDS CONTEXT judgement — `(<lens>/p<n>,
+    <line>, <text>)`, numbered as `grep -n` numbers it, the file split at its newlines alone. A record runs from its
+    `[SEVERITY] VULN-` line to the next record, a `#` heading, a rule or a section label line; its row carries it. A
+    worker's own `[UNVERIFIABLE]` record is one candidate, listed by its heading line alone: it runs over the field lines
+    under its heading — `File:`, `- **Blocked by:**`, blank lines and fenced evidence — and ends at the first other line."""
+    out = []
+    for p in worker_files:
+        try:
+            raw = read_raw(p)
+        except OSError:
+            continue
+        inside = unv = False
+        fence = None  # the open fence's marker: only a bare fence of its character, as long or longer, closes it
+        for n_, l in enumerate(raw.split("\n"), 1):
+            head_ = False
+            fm_ = NC_FENCE.match(l)
+            if fence is None and fm_:
+                fence = fm_.group(1)
+            elif fence is not None:
+                if fm_ and fm_.group(1)[0] == fence[0] and len(fm_.group(1)) >= len(fence) and not fm_.group(2).strip():
+                    fence = None
+            elif NC_REC_HEAD.match(l):
+                inside, unv = True, False
+            elif NC_UNV_HEAD.match(l) or NC_UNV_TAIL.match(l):
+                inside, unv, head_ = False, True, True
+            elif NC_END.match(l):
+                inside = unv = False
+            elif unv and l.strip() and not NC_FIELD.match(l):
+                unv = False
+            if head_ or (not inside and not unv and NC_RX.search(l)):
+                out.append((nc_pair(p), n_, l.strip()))
+    return out
+
+
+def nc_section(report: str) -> str:
+    """The report's Unverifiable section, its `## Unverifiable` heading to the next `##` heading."""
+    m = re.search(r"^## Unverifiable\b.*$", report, re.M | re.I)
+    return report[m.end():].split("\n## ", 1)[0] if m else ""
+
+
+def nc_answers(section: str) -> dict:
+    """`needs context: <lens>/p<n>:<line> — <answer>` lines of the Unverifiable section, by key."""
+    out: dict = {}
+    for l_ in section.splitlines():
+        m_ = NC_ANS_RX.match(l_)
+        if m_:
+            out.setdefault((m_.group(1).lower(), int(m_.group(2))), []).append(m_.group(3).strip(" `*"))
     return out
 
 
@@ -692,9 +862,11 @@ def gate_lines(target: Path, cache: Path, plan: str, skills: Path | None, only: 
             dg = hashlib.sha256(f.read_bytes()).hexdigest()[:12]  # the file as gated: any later write changes it
         except OSError:
             dg = "unreadable"
-        ok = header_ok and pinned_ok and phrase_ok and sent_ok and paths_ok and s >= m_ and r >= m_ and (c is None or c < COPY_CAP)
+        # a line over the reader's limit outside a fenced code block: the writer reads only its start
+        ll = len(long_text_lines(text))
+        ok = header_ok and pinned_ok and phrase_ok and sent_ok and paths_ok and s >= m_ and r >= m_ and (c is None or c < COPY_CAP) and ll == 0
         all_ok = all_ok and ok
-        out.append(f"gate: {pair} — header {'ok' if header_ok else 'fail'} | pinned {'ok' if pinned_ok else 'fail'} | phrase {'ok' if phrase_ok else 'fail'} | {sent} | paths {k}/{m_} resolve | headings {s}/{m_} | absolute {a} | references {r}/{m_} | entry pipes {e} | copied " + ("n/a" if c is None else f"{c}%" + (f" from {c_from}" if c else "")) + f" | digest {dg}")
+        out.append(f"gate: {pair} — header {'ok' if header_ok else 'fail'} | pinned {'ok' if pinned_ok else 'fail'} | phrase {'ok' if phrase_ok else 'fail'} | {sent} | paths {k}/{m_} resolve | headings {s}/{m_} | absolute {a} | references {r}/{m_} | entry pipes {e} | copied " + ("n/a" if c is None else f"{c}%" + (f" from {c_from}" if c else "")) + f" | digest {dg} | long lines {ll}")
     return all_ok, out
 
 
@@ -831,6 +1003,7 @@ def paths_lines(path: Path, target: Path, pair: str | None, skills: Path | None 
     text = read(path)
     if not text:
         return False, [f"paths {path.name}: prompt file absent or empty"]
+    long_p = long_lines(text)
     # a home-relative path is a path: `~/`, `$HOME/` and `${HOME}/` read as the home directory they stand for
     text = re.sub(r"(?<![\w.~:/-])(?:~|\$HOME|\$\{HOME\})(?=/)", lambda _: str(Path.home()), text)
     cache = target / ".llm-sast-scanner-cache"
@@ -970,11 +1143,14 @@ def paths_lines(path: Path, target: Path, pair: str | None, skills: Path | None 
         lines.append(f"text written one character per line ({one_char} such lines) — the prompt was built by joining a string's characters")
     if tpl_missing is not None:
         lines.append(f"worker template not in the prompt with its slots filled; first sentence missing: {tpl_missing!r}")
+    if long_p:
+        lines.append(f"line {long_p[0][0]} is {long_p[0][1]} bytes" + (f" ({len(long_p)} lines over {LINE_LIMIT})" if len(long_p) > 1 else "")
+                     + f" — a file reader cuts a line over {LINE_LIMIT} bytes (UTF-8, an em dash three) and the worker reads only its start: write the prompt with the template's line breaks")
     if wrong_out:
         lines.append(f"output path not {expected_out if expected_out else 'under the cache'}: " + ", ".join(wrong_out))
     if unfilled:
         lines.append("unfilled placeholders: " + ", ".join(unfilled))
-    ok = ok_n == tested and not unfilled and not wrong_out and tested > 0 and not others and first_bad is None and not form_missing and not stale and not misplaced and one_char <= 50 and tpl_missing is None
+    ok = ok_n == tested and not unfilled and not wrong_out and tested > 0 and not others and first_bad is None and not form_missing and not stale and not misplaced and one_char <= 50 and tpl_missing is None and not long_p
     if ok:
         # the worker is started with this one line, never with the prompt re-typed: a re-typed prompt is a copy this test never read
         lens_, part_ = pair.split("/")
@@ -1085,6 +1261,10 @@ def prompt_lines(path: Path, skills: Path, cache: Path | None = None) -> tuple[b
                 missing.append("the Same-commit carry paragraph verbatim (unchanged commit, ledger rows to carry)")
     if "<skills root>" in flat:
         missing.append("<skills root> filled in")
+    long_w = long_lines(text)
+    if long_w:
+        missing.append(f"lines a file reader keeps whole — line {long_w[0][0]} is {long_w[0][1]} bytes" + (f" ({len(long_w)} lines over {LINE_LIMIT})" if len(long_w) > 1 else "")
+                       + f": a reader cuts a line over {LINE_LIMIT} bytes (UTF-8, an em dash three), so write the prompt with its paragraphs' line breaks")
     if cache is not None and skills is not None:
         plan_g = read(cache / "scan-plan.md")
         roster_g = {pr for body in re.findall(r"^wave roster \d+:\s*(.*)$", plan_g, re.M) for pr in re.findall(r"[a-z-]+/p\d+", body)}
@@ -1104,7 +1284,7 @@ def prompt_lines(path: Path, skills: Path, cache: Path | None = None) -> tuple[b
             now = {head_rx.match(l).group(1): l.strip() for l in now_g if head_rx.match(l)}
             counts_g = Counter(m_g.group(1) for m_g in (head_rx.match(l) for l in plan_g.splitlines()) if m_g)
             absent_g = [p_ for p_ in pairs_g if p_ not in rec]
-            differ_g = [p_ for p_ in pairs_g if p_ in rec and p_ in now and gate_line_passes(rec[p_]) != gate_line_passes(now[p_])]
+            differ_g = [p_ for p_ in pairs_g if p_ in rec and p_ in now and gate_line_passes(rec[p_]) != gate_line_passes(gate_line_as(rec[p_], now[p_]))]
             nr_g = set(re.findall(r"^worker not run: ([a-z-]+/p\d+)", plan_g, re.M))
             stale_g = [(p_, gate_line_diff(rec[p_], now[p_])) for p_ in pairs_g if p_ in rec and p_ in now and p_ not in differ_g and p_ not in nr_g]
             stale_g = [(p_, d_) for p_, d_ in stale_g if d_]
@@ -1171,9 +1351,10 @@ def main() -> int:
     ap.add_argument("--record", action="store_true", help="STEP 3, the session only: append this set to the scan plan — the recorded set; a run without it reads and records nothing")
     ap.add_argument("--checks", action="store_true", help="STEP 1: print the `checks:` line the scan plan must carry, from its entry list and the partition manifests, and exit (0 pass, 1 failed)")
     ap.add_argument("--duplicates", action="store_true", help="STEP 3: print every pair of table rows item (48) asks the writer to judge — kind, worker records, VULN ids, worker severities, classes, sinks, whether each key is a ledger row of the pre-write copy, entry points and the answer written — and exit")
+    ap.add_argument("--needs-context", action="store_true", help="STEP 3: print every worker-file line outside a finding record that names a NEEDS CONTEXT judgement — `<lens>/p<n>:<line>`, its text, and the report's `needs context:` answer if it has one — the lines item (49) asks the writer to answer, and exit 0 (2 with no worker files)")
     ap.add_argument("--ledger-start", action="store_true", help="STEP 1: print the `ledger rows at start:` row, counted in the pre-write copy the plan's `started:` row names, and exit (0 counted; 2 no copy, a plan past STEP 1, or a copy whose ledger rows differ in number from the memory's)")
     args = ap.parse_args()
-    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "paths", "roster", "gate", "ledger-start", "checks", "duplicates")
+    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "paths", "roster", "gate", "ledger-start", "checks", "duplicates", "needs-context")
                        if getattr(args, n.replace("-", "_"), None) is not None and getattr(args, n.replace("-", "_"), None) is not False), None)  # `--roster 0` is a mode too
     if args.record and other_mode:
         sys.stderr.write(f"recorded: nothing — --record records a plain recheck set, and this run is {other_mode}\n")
@@ -1192,6 +1373,31 @@ def main() -> int:
             ok_c, lines_c = prompt_lines(pp if pp.is_absolute() else tgt / pp, skills_c, tgt / ".llm-sast-scanner-cache")
         print("\n".join(lines_c))
         return 0 if ok_c else 1
+    if args.needs_context:
+        # the writer's worklist for item (49): every NEEDS CONTEXT line of the worker files, with its answer so far
+        tgt = Path(args.target).resolve()
+        wf_ = sorted((tgt / ".llm-sast-scanner-cache").glob("deep-*-results.md"))
+        if not wf_:
+            print("needs-context: error — no worker files (`.llm-sast-scanner-cache/deep-*-results.md`) under the target; nothing listed")
+            return 2
+        rn_ = args.report or (re.findall(r"^report:\s*(sast_report-\S+\.md)", read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md"), re.M) or [None])[-1]
+        try:
+            rp_ = tgt / rn_ if rn_ else None
+            ok_r = bool(rp_ and rp_.is_file() and os.access(rp_, os.R_OK))
+        except (OSError, ValueError):
+            ok_r = False
+        ans_ = nc_answers(nc_section(read(rp_))) if ok_r else {}
+        nl_ = nc_lines(wf_)
+        for pair_, n_, l_ in nl_:
+            got_ = ans_.get((pair_.lower(), n_), [])
+            mk_ = NC_RX.search(l_)
+            at_ = mk_.start() if mk_ else 0  # an `[UNVERIFIABLE]` heading may hold no marker words
+            show_ = l_[:300] + (" …" if len(l_) > 300 else "") if at_ < 200 else f"{l_[:120]} … {l_[at_ - 120:at_ + 160]}{' …' if len(l_) > at_ + 160 else ''}"
+            print(f"needs context line: {pair_}:{n_} — {show_} | answer: "
+                  + (got_[0][:80] if len(got_) == 1 else ("none" if not got_ else f"{len(got_)} lines")))
+        note_ = "" if ok_r else ((f" | report {rn_[:80]} absent or unreadable" if rn_ else " | no `report:` row in the plan") + ": every answer reads none")
+        print(f"needs context lines: {len(nl_)} to answer{note_}")
+        return 0
     if args.paths:
         tgt = Path(args.target).resolve()
         if len(args.paths) != 2 or not re.fullmatch(r"[a-z][a-z-]*/p\d+", args.paths[1]):  # the pair names the output file tested
@@ -1215,6 +1421,15 @@ def main() -> int:
             return 2
         ok_g, lines_g = gate_lines(tgt, tgt / ".llm-sast-scanner-cache", read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md"), skills_g, args.gate)
         print("\n".join(lines_g) if lines_g else f"gate: no worker file for {args.gate}")
+        # the lines `long lines <n>` counts, named on stderr so the line recorded from stdout stays the gate line: a
+        # character count (`wc -L`) misses the lines of 1,982 to 2,000 characters an em dash takes over the limit
+        for l_g in lines_g:
+            m_g = re.match(r"^gate: ([a-z-]+)/(p\d+) — .* \| long lines (\d+)$", l_g)
+            if m_g and int(m_g.group(3)) > 0:
+                f_g = tgt / ".llm-sast-scanner-cache" / f"deep-{m_g.group(1)}-{m_g.group(2)}-results.md"
+                ll_g = long_text_lines(read(f_g))
+                print(f"long lines in {f_g.name}: " + ", ".join(f"line {n_} ({b_} bytes)" for n_, b_ in ll_g[:12])
+                      + (f" … and {len(ll_g) - 12} more" if len(ll_g) > 12 else ""), file=sys.stderr)
         return 0 if ok_g and lines_g else 1
     if args.ledger_start:
         # the row STEP 1 copies: counted, never composed — one session counted the previous run's copy and wrote its 363
@@ -1572,6 +1787,91 @@ def main() -> int:
                 others.append(l)
         return (flow, "\n".join(others), sink, entry) if found else None
 
+    record_also_memo: dict = {}
+
+    def record_also(row_id: str) -> list:
+        """The sinks the `Also at:` line of the worker record a table row id names lists — one missing check's other sink
+        lines (base skill, Deduplication & Sink Location) — as `path:line` strings, read by `also_sinks`, a range by its
+        first line. A promoted row's id reads as its record's. Empty when the record or the line is absent."""
+        rid_ = re.sub(r"^promoted/", "", re.sub(r"[`*]", "", row_id).strip())
+        if rid_ in record_also_memo:
+            return record_also_memo[rid_]
+        m_id = re.match(r"^([a-z][a-z-]*)/(p\d+)/(\S+)$", rid_)
+        if not m_id:
+            record_also_memo[rid_] = []
+            return []
+        txt = next((v for k_, v in worker_text.items() if Path(k_).name == f"deep-{m_id.group(1)}-{m_id.group(2)}-results.md"), "")
+        own_rx = re.compile(r"^(?:#+ )?\**\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]\**\s+\**" + re.escape(m_id.group(3)) + r"(?![\w-])", re.I)
+        inside, out_, file_ = False, [], None
+        # read outside fenced code, and ended by a section heading (`#`–`###`), never by a `#### Evidence` sub-heading
+        # inside the record or a `# comment` in its Evidence: either once cut a record off before its `Also at:` lines.
+        # Fences are paired within each record, from its heading to the next record heading, and one still open there
+        # is none — as `long_text_lines` reads them — so a fence one record leaves open hides no `Also at:` line
+        lines_ = txt.splitlines()
+        heads_ = [i_ for i_, l in enumerate(lines_) if re.match(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*|CONFIRMED|LIKELY)\]", l, re.I)]
+        fenced_ = set()
+        for a_, b_ in zip([0] + heads_, heads_ + [len(lines_)]):
+            marks_ = [i_ for i_ in range(a_, b_) if FENCE_RX.match(lines_[i_])]
+            if len(marks_) % 2:
+                marks_ = marks_[:-1]
+            for x_, y_ in zip(marks_[::2], marks_[1::2]):
+                fenced_.update(range(x_, y_ + 1))
+        head_set_ = set(heads_)
+        for i_, l in enumerate(lines_):
+            if i_ in head_set_:
+                inside = own_rx.match(l) is not None
+                continue
+            if i_ in fenced_:
+                continue
+            if inside and re.match(r"^#{1,3} |^<!-- LLM-SAST-COMPLETE", l):
+                inside = False
+            if not inside:
+                continue
+            f_l = re.match(r"^\**Files?:\**\s*`?([^\s`|:,;]+):\d", l)
+            if f_l and file_ is None:
+                file_ = re.sub(r"^(?:\./)+", "", f_l.group(1))
+            a_ = ALSO_RX.match(l)
+            if a_:
+                out_ += [f"{p_}:{n_}" for p_, n_, _ in also_sinks(a_.group(1), file_)]
+        record_also_memo[rid_] = out_
+        return out_
+
+    def block_also_lines(block_: str) -> list:
+        """The `Also at:` lines of a report block, read as item (40) reads a block: to its next `#`, `##` or `###`
+        heading, outside fenced code."""
+        lines_ = unfenced(block_ or "").split("\n")
+        out_ = []
+        for l in lines_[1:]:
+            if re.match(r"^#{1,3} ", l):
+                break
+            a_ = ALSO_RX.match(l)
+            if a_:
+                out_.append(a_.group(1))
+        return out_
+
+    def block_also(block_: str) -> list:
+        """The sinks a report block's own `Also at:` line names, as `record_also` reads a record's."""
+        f_ = file_of(block_ or "")
+        fp_ = f_.rsplit(":", 1)[0] if f_ else None
+        return [f"{p_}:{n_}" for l_ in block_also_lines(block_) for p_, n_, _ in also_sinks(l_, fp_)]
+
+    def block_also_bad(block_: str) -> list:
+        """What is wrong with a block's `Also at:` lines: one naming no sink it can read, a range, a path no file of the
+        target holds."""
+        f_ = file_of(block_ or "")
+        fp_ = f_.rsplit(":", 1)[0] if f_ else None
+        bad_ = []
+        for l_ in block_also_lines(block_):
+            s_ = also_sinks(l_, fp_)
+            if not s_:
+                bad_.append(f"`Also at: {l_.strip()[:40]}` names no `<path>:<line>` it can read")
+            bad_ += [f"`{p_}:{a_}-{b_}` is a range — one line each" for p_, a_, b_ in s_ if b_ != a_]
+            bad_ += [f"`{p_}` is no file of the target" for p_ in dict.fromkeys(p_ for p_, _, _ in s_) if target_lines(p_) is None]
+        return bad_
+    # the keys a row's record holds on its `Also at:` line, at its class: re-found by that record, never keys of their own
+    also_rows = lambda disp_: {corrected_key(c[3], s_) for c in table_rows if c[4].lower() in disp_
+                               for s_ in (block_also(block_id.get(c[6].upper(), "")) if c[4].lower() == "carried" else record_also(c[0]))}
+
     # duplicates (48): one finding reported by two workers. Nothing is merged by rule — a rule that guessed an entry point
     # once merged two routes — so the recheck lists the pairs, the writer judges each from its two records and answers it
     # on a `duplicate candidate:` line, and a merge stands only as that answer and item (4) allow
@@ -1784,6 +2084,19 @@ def main() -> int:
         if sev_rank(c_) > sev_rank(t_):
             why_.append(f"its worker record is {record_sev(c_[0])} and the kept one {record_sev(t_[0])} — the lower severity is the one merged")
         return "; ".join(why_) or None
+    def group_overlap(c_, t_) -> bool:
+        """Row `c_` and body row `t_` are one missing check's two records: one class, one entry point (the list entry each
+        cell names, or the same words), and one's sink on the other's record's `Also at:` line."""
+        if not t_ or c_[3] != t_[3]:
+            return False
+        ek_ = lambda x_: ep_id(x_[1]) or " ".join(re.sub(r"[`*]", "", x_[1] or "").lower().split())
+        if ek_(c_) != ek_(t_):
+            return False
+        es_c_, es_t_ = ep_strict(ep_of(c_)), ep_strict(ep_of(t_))
+        if es_c_ and es_t_ and es_c_ != es_t_:
+            return False
+        sc_, st_ = canon(rel(c_[2])), canon(rel(t_[2]))
+        return sc_ in {canon(rel(x_)) for x_ in record_also(t_[0])} or st_ in {canon(rel(x_)) for x_ in record_also(c_[0])}
     bad_merge, merge_fix = 0, []
     for c in merged_rows:
         t = body_by_id.get(c[6].upper())
@@ -1802,6 +2115,10 @@ def main() -> int:
             if kind4 in ("entry", "same") and answered_into(c, t) and sev_rank(c) <= sev_rank(t):
                 continue
             if kind4 == "near" and answered_into(c, t) and not xmerge_why(c, t):
+                continue
+            # a group overlap: two records of one missing check at one class and entry point, one's sink on the other's
+            # `Also at:` line — item (48) asks for this merge, and a block cannot leave its record's `Also at:` line
+            if group_overlap(c, t):
                 continue
         if not t or (ep_id(t[1]), canon(rel(t[2])), t[3]) != (ep_id(c[1]), canon(rel(c[2])), c[3]):  # one sink, whichever line form each row cites
             bad_merge += 1
@@ -1865,6 +2182,34 @@ def main() -> int:
             got_ = ans48.get(pair_, [])
             print(f"duplicate pair {kind_}: {side_(a_)} <> {side_(b_)} | answer: {got_[0][:60] if len(got_) == 1 else ('none' if not got_ else f'{len(got_)} lines')}")
         print(f"duplicate pairs: {len(cand48)} to answer | {len(skip48)} the table answers")
+        # recheck item (51)'s reading made early: a `merged` row whose worker record outranks its kept `body` row's —
+        # the higher record is the one kept, before the body, the histogram and the counts are taken
+        R51 = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1, "INFORMATIONAL": 1}
+        n51d = 0
+        for c_ in merged_rows:
+            t_ = body_by_id.get(c_[6].upper())
+            sc_, st_ = record_sev(c_[0]), (record_sev(t_[0]) if t_ else None)
+            if t_ and sc_ and st_ and R51.get(sc_, 0) > R51.get(st_, 0):
+                n51d += 1
+                print(f"merge severity: {c_[0]} ({sc_}) is merged into {t_[6]} ({t_[0]}, {st_}) — keep {c_[0]} as the `body` row and merge {t_[0]} into it")
+        if n51d:
+            print(f"merge severity: {n51d} merged records outrank their kept record")
+        # item (48)'s `Also at` reading made early: a `body` record whose sink stands on another `body` record's `Also at:`
+        # line at one class and entry point is that group's — the writer merges it before the body is rendered
+        ekd_ = lambda x_: ep_id(x_[1]) or " ".join(re.sub(r"[`*]", "", x_[1] or "").lower().split())
+        bodyd_ = [x_ for x_ in table_rows if x_[4].lower() == "body"]
+        atd_: dict = {}
+        for x_ in bodyd_:
+            atd_.setdefault((x_[3], ekd_(x_), canon(rel(x_[2]))), []).append(x_)
+        ngo_ = 0
+        for x_ in bodyd_:
+            for s_ in dict.fromkeys(canon(rel(y_)) for y_ in record_also(x_[0])):
+                for o_ in atd_.get((x_[3], ekd_(x_), s_), []):
+                    if o_ is not x_:
+                        ngo_ += 1
+                        print(f"group overlap: {o_[0]} ({o_[3]} at {s_}) stands on {x_[0]}'s `Also at:` line ({x_[6]}) at one class and entry point — merge it into that group")
+        if ngo_:
+            print(f"group overlap: {ngo_} records stand on another record's `Also at:` line")
         return 0
     bad48, n_m, n_d, n_l, unans_l = [], 0, 0, 0, []
     clause48: dict = {}  # each `distinct` clause, normalised, with the class pairs and ids of the pairs it answers
@@ -1872,6 +2217,9 @@ def main() -> int:
 
     def merged_to(x_, k_):
         return (x_[4].lower() == "body" and x_[6].upper() == k_) or (x_[4].lower() == "merged" and x_[6].upper() == k_)
+    # a merged row is read as the body block its `body record` cell names, a body row as itself
+    kept_ = lambda x_: x_ if x_[4].lower() != "merged" else next(
+        (y_ for y_ in table_rows if y_[4].lower() == "body" and y_[6].upper() == x_[6].upper()), x_)
     for pair_, (kind_, a_, b_) in sorted(cand48.items(), key=lambda x_: sorted(x_[0])):
         got_ = ans48.get(pair_, [])
         ids_ = f"{a_[0]} / {b_[0]}"
@@ -1891,6 +2239,10 @@ def main() -> int:
             n_d += 1
             if any(x_[4].lower() == "merged" and y_[4].lower() == "body" and x_[6].upper() == y_[6].upper() for x_, y_ in ((a_, b_), (b_, a_))):
                 bad48.append(f"`{ids_}` reads `distinct`, but one row is merged into the other")
+            elif (kept_(a_) is not a_ or kept_(b_) is not b_) and kept_(a_) is not kept_(b_) and kept_(a_)[4].lower() == kept_(b_)[4].lower() == "body" \
+                    and any(re.match(r"(?i)linked\b", x_) for x_ in ans48.get(frozenset({wr_id(kept_(a_)), wr_id(kept_(b_))}), [])):
+                bad48.append(f"`{ids_}` reads `distinct`, but its rows are held by the kept blocks `{kept_(a_)[6]}` / `{kept_(b_)[6]}`, "
+                             f"whose own pair reads `linked` — the pair reads `linked` too")
             elif not re.match(r"(?i)distinct:\s*\S", ans_):
                 bad48.append(f"`{ids_}` reads `distinct` with no clause saying what differs")
             cl_ = re.match(r"(?i)distinct:\s*(.*\S)", ans_)
@@ -1899,6 +2251,18 @@ def main() -> int:
                     (tuple(sorted((a_[3].lower(), b_[3].lower()))), ids_, cl_.group(1)))
         elif re.match(r"(?i)linked\b", ans_):
             n_l += 1
+            # a row merged into the block linked to the other — three records of one defect over two keys — is read as the
+            # block that holds it: the link is the two kept blocks'
+            ka_, kb_ = kept_(a_), kept_(b_)
+            if (ka_ is not a_ or kb_ is not b_) and ka_ is not kb_ and ka_[4].lower() == kb_[4].lower() == "body":
+                # the kept blocks, when they are a listed pair, are answered `linked` themselves: the link is theirs
+                kp_ = frozenset({wr_id(ka_), wr_id(kb_)})
+                if kp_ in cand48 and not any(re.match(r"(?i)linked\b", x_) for x_ in ans48.get(kp_, [])):
+                    bad48.append(f"`{ids_}` reads `linked` through the kept blocks `{ka_[6]}` / `{kb_[6]}`, but their own pair "
+                                 f"`{ka_[0]} / {kb_[0]}` is not answered `linked` — one link, read alike on every pair it joins")
+                    continue
+                ids_ = f"{ids_} (read as the kept blocks `{ka_[6]}` / `{kb_[6]}`, records `{ka_[0]}` / `{kb_[0]}`)"
+                a_, b_ = ka_, kb_
             # linked: the record that would be merged away — the lower severity, either on a tie — holds a ledger key
             away_ = [x_ for x_, y_ in ((a_, b_), (b_, a_)) if sev_rank(x_) <= sev_rank(y_)]
             why_l = ([] if a_[4].lower() == b_[4].lower() == "body" else ["both rows stay `body`"]) \
@@ -1946,11 +2310,27 @@ def main() -> int:
                      + ", ".join(unans_l[:10]) + (f" … and {len(unans_l) - 10} more" if len(unans_l) > 10 else ""))
     if stray48:
         bad48.append(f"`duplicate candidate:` lines at {', '.join('`' + x_ + '`' for x_ in stray48[:3])} — no pair: a line is written only for a pair `--duplicates` lists")
+    # a line both on one finding's `Also at:` line and another finding's own `File:` sink, at one class and entry point,
+    # is one defect counted twice: the line is the group's (the record merged into it) or its own (off the `Also at:` line)
+    fins48 = [c for c in table_rows if c[4].lower() in ("body", "promoted")]
+    ep_k48 = lambda c_: ep_id(c_[1]) or " ".join(re.sub(r"[`*]", "", c_[1] or "").lower().split())
+    at_sink48: dict = {}
+    for c in fins48:
+        at_sink48.setdefault((c[3], ep_k48(c), canon(rel(c[2]))), []).append(c)
+    also_twice48 = []
+    for c in fins48:
+        for s_ in dict.fromkeys(canon(rel(x_)) for x_ in record_also(c[0])):
+            also_twice48 += [(c, o_, s_) for o_ in at_sink48.get((c[3], ep_k48(c), s_), []) if o_ is not c]
+    for c, o_, s_ in also_twice48[:4]:
+        bad48.append(f"`{o_[0]}`'s sink `{s_}` stands on `{c[0]}`'s `Also at:` line at one class and entry point — one defect counted twice: "
+                     "merge the record into that group (item (4) reads such a merge as one finding's: a block cannot leave its record's `Also at:` line)")
+    if len(also_twice48) > 4:
+        bad48.append(f"… and {len(also_twice48) - 4} more sinks on an `Also at:` line that are another finding's own")
     n_lines = sum(len(v_) for v_ in ans48.values())
     stated48 = ints(r"^[-*\s]*\**duplicate candidates:\**\s*(\d+)", appendix)
     if not ((stated48[0] == n_lines) if stated48 else not n_lines and not cand48):
         bad48.append(f"the appendix line reads `duplicate candidates: {n_lines}`, the `duplicate candidate:` lines written")
-    emit("duplicates", f"pairs {len(cand48)} (entry {kinds48['entry']} | same {kinds48['same']} | near {kinds48['near']}) | answered merged {n_m} | distinct {n_d} | linked {n_l} | unanswered {len(unans_l)} | lines at no pair {len(stray48)} | pairs the table answers {len(skip48)} | repeated clauses {len(rep48)}",
+    emit("duplicates", f"pairs {len(cand48)} (entry {kinds48['entry']} | same {kinds48['same']} | near {kinds48['near']}) | answered merged {n_m} | distinct {n_d} | linked {n_l} | unanswered {len(unans_l)} | lines at no pair {len(stray48)} | pairs the table answers {len(skip48)} | repeated clauses {len(rep48)}" + (f" | Also at lines that are another finding's sink {len(also_twice48)}" if also_twice48 else ""),
          str(stated48[0]) if stated48 else "absent", not bad48, "; ".join(bad48[:6]) + (" …" if len(bad48) > 6 else "") if bad48 else None)
 
     # 5. config clearances rewritten
@@ -1970,11 +2350,24 @@ def main() -> int:
                 inside = False
             if not inside:
                 yield n_, l
-    cfg_hits = [(name, n_) for name, t in worker_text.items() for n_, l in disposition_lines(t) if CONFIG_PHRASES.search(l) and CLEARANCE_MARK.search(l) and not FILE_LINE_RX.search(l) and not any(refute_lines(l))]
-    phrase_lines = len(cfg_hits)
+    # a phrase inside an absence claim — its clause opens `no`, `none of`, `neither` or `nor` and lists what the partition
+    # lacks (`SAFE in p3 — no IaC resource-attribute … or vendor non-production endpoint surface in this partition`) — names
+    # a class found absent, not a configuration a clearance rests on: a writer told to rewrite one had no sink to rewrite
+    def cfg_absent(l_):
+        for m_ in CONFIG_PHRASES.finditer(l_):
+            st_ = max([l_.rfind(c_, 0, m_.start()) for c_ in ("—", "–", ";", ":", ". ", "(")] + [-1])
+            if not re.match(r"(?i)^\s*(?:[*_`]+\s*)?(?:no|none of|neither|nor)\b", l_[st_ + 1:m_.start()]):
+                return False
+        return True
+    cfg_all = [(name, n_, l) for name, t in worker_text.items() for n_, l in disposition_lines(t) if CONFIG_PHRASES.search(l) and CLEARANCE_MARK.search(l) and not FILE_LINE_RX.search(l) and not any(refute_lines(l))]
+    cfg_hits = [(name, n_) for name, n_, l in cfg_all if not cfg_absent(l)]
+    phrase_lines, cfg_abs = len(cfg_hits), len(cfg_all) - len(cfg_hits)
     rep_cfg = ints(r"^config clearances rewritten:\s*(\d+)", appendix)
-    emit("config clearances rewritten", str(phrase_lines), str(rep_cfg[0]) if rep_cfg else "absent", bool(rep_cfg) and rep_cfg[0] == phrase_lines,
-         (f"each of the {phrase_lines} worker disposition line(s) that rest on configuration with no file:line guard — {', '.join(f'{pathlib_name(nm)}:{ln}' for nm, ln in cfg_hits[:6])}{' …' if len(cfg_hits) > 6 else ''} — is rewritten as a body record and listed in the report's appendix as `<lens>/p<n>: <its text> → <body VULN id>`; the report's appendix line then reads `config clearances rewritten: {phrase_lines}`" if phrase_lines else "no worker disposition line rests on configuration: the report's appendix line reads `config clearances rewritten: 0`"))
+    # a report written before the absence claims were set apart counted them too, and reads either count
+    emit("config clearances rewritten", str(phrase_lines) + (f" (absence claims {cfg_abs})" if cfg_abs else ""), str(rep_cfg[0]) if rep_cfg else "absent",
+         bool(rep_cfg) and rep_cfg[0] in (phrase_lines, phrase_lines + cfg_abs),
+         (f"each of the {phrase_lines} worker disposition line(s) that rest on configuration with no file:line guard — {', '.join(f'{pathlib_name(nm)}:{ln}' for nm, ln in cfg_hits[:6])}{' …' if len(cfg_hits) > 6 else ''} — is rewritten as a body record and listed in the report's appendix as `<lens>/p<n>: <its text> → <body VULN id>`; the report's appendix line then reads `config clearances rewritten: {phrase_lines}`" if phrase_lines else "no worker disposition line rests on configuration: the report's appendix line reads `config clearances rewritten: 0`")
+         + (f" — the {cfg_abs} line(s) whose phrase stands inside an absence claim (`no … non-production endpoint surface`) name a class found absent and are not counted" if cfg_abs else ""))
 
     # 6. ledger rows after / archived / duplicate-key rows / ledger present
     dup_rows = sum(v - 1 for v in ledger_keys.values() if v > 1)
@@ -2335,8 +2728,13 @@ def main() -> int:
     rep_new = ints(r"new keys (\d+)", mat_line)
     run_lines = re.findall(r"^run .*new-confirmed=(\d+)", memory, re.M)
     run_new = int(run_lines[-1]) if run_lines else None
-    emit("new keys", f"{new_keys} (run line new-confirmed={run_new})", str(rep_new[0]) if rep_new else "absent", bool(rep_new) and rep_new[0] == new_keys and run_new == new_keys,
-         f"the memory run line's `new-confirmed=` and the maturity line's `new keys` are both {new_keys}, the ledger keys this run added — not the body-block count")
+    # a finding's key is its `File:` sink: a new row at a line only an `Also at:` line names is a key of no finding
+    file_keys12 = {corrected_key(c[3], c[2]) for c in table_rows if c[4].lower() in ("body", "merged", "promoted", "carried")}
+    also_new12 = sorted(k for k in ledger_keys if is_new(k) and k not in file_keys12 and k in also_rows(("body", "merged", "promoted")))
+    emit("new keys", f"{new_keys} (run line new-confirmed={run_new})" + (f" | rows written for `Also at:` lines {len(also_new12)}" if also_new12 else ""),
+         str(rep_new[0]) if rep_new else "absent", bool(rep_new) and rep_new[0] == new_keys and run_new == new_keys and not also_new12,
+         f"the memory run line's `new-confirmed=` and the maturity line's `new keys` are both {new_keys}, the ledger keys this run added — not the body-block count"
+         + (f"; a line on a finding's `Also at:` line is no key of its own — its row is not written: {', '.join('`' + k_ + '`' for k_ in also_new12[:4])}{' …' if len(also_new12) > 4 else ''}" if also_new12 else ""))
 
     # 13. required lines
     missing = [p for p in REQUIRED_PREFIXES if not re.search(r"^" + re.escape(p), report, re.M)]
@@ -2604,7 +3002,8 @@ def main() -> int:
     run_date = (started or "")[:10]
     carried_keys = {corrected_key(c[3], c[2]) for c in carried_rows}
     refuted_keys = {corrected_key(c[3], c[2]) for c in refuted_rows}  # withdrawn by Step 6 on a worker's line: item (47)'s, its row archived
-    unfound = [k for k in {corrected_key(m.group(1), m.group(2)) for m in copy_rows} if k not in body_keys and k not in carried_keys and k not in refuted_keys]
+    also_held = also_rows(("body", "merged", "promoted", "carried"))  # a key on a finding's (or a carried block's) `Also at:` line is held by it
+    unfound = [k for k in {corrected_key(m.group(1), m.group(2)) for m in copy_rows} if k not in body_keys and k not in carried_keys and k not in refuted_keys and k not in also_held]
     marked = sum(1 for k in unfound if k in ledger_keys and any(f"not re-found {run_date}" in m.group(3) for m in ledger if key_of(m.group(1), m.group(2)) == k))
     gone = sum(1 for k in unfound if k not in ledger_keys)
     emit("not re-found", f"{marked}/{len(unfound)} rows without a body record this run carry `not re-found {run_date}` | rows gone from the ledger {gone}", None, marked == len(unfound) and gone == 0)
@@ -2795,6 +3194,8 @@ def main() -> int:
     if unchanged:
         open_copy = {corrected_key(m.group(1), m.group(2)) for m in copy_rows if m.group(3).split(" | ")[-1].strip() == "open"}
         judged_keys = {key_of(c[3], c[2]) for c in table_rows if c[4].lower() not in ("carried", "refuted")}  # any disposition a worker's record received
+        # and every line its record's `Also at:` line names, at its class: one missing control's other sinks were judged with it
+        judged_keys |= also_rows(tuple({c[4].lower() for c in table_rows} - {"carried", "refuted"}))
         # a `refuted` row is a source block Step 6 withdrew on a worker's `ledger refuted:` line: the key's other blocks are
         # still carried, and a key whose every block is withdrawn carries none (item 47 holds the rest)
         ref26 = Counter(corrected_key(c[3], c[2]) for c in refuted_rows)
@@ -2860,9 +3261,43 @@ def main() -> int:
                     break
             return passed
 
-        cand = {k: key_candidates(k) for k in unjudged}
+        # a key the newest report holding it names only on the `Also at:` line of a block whose own key is carried this run —
+        # one missing control an earlier report grouped — is carried with that block, never as a block of its own: the
+        # older per-line blocks of a group are not carried back beside it
+        unjudged_all = set(unjudged)
+
+        def also_cover(k):
+            """How the newest report holding the key holds it: None for a block at its own `File:` sink (carried as itself);
+            ("with", fk) for the `Also at:` line of a block whose own key fk is carried this run — the key goes with that
+            block; ("none", fk) for the `Also at:` line of a block whose key fk this run judged — the key has no source of
+            its own, and no older per-line block is carried beside the group."""
+            cls, sink = k.split("|", 1)
+            for name in reversed(list(src26)):
+                if any(holds_key(sb, cls, sink) for sb in src26[name]):
+                    return None
+                heads_ = []
+                for sb in src26[name]:
+                    stem = re.search(r"references/([a-z0-9_]+)\.md", sb)
+                    if (stem and stem.group(1) != cls) or citations_of(sb)[1]:
+                        continue
+                    f_ = file_of(sb)
+                    if f_ and canon(rel(sink)) in {canon(rel(s_)) for s_ in block_also(sb)}:
+                        fk = corrected_key(cls, f_)
+                        if fk != k:
+                            heads_.append(fk)
+                if heads_:
+                    # any head carried this run carries it, whatever the blocks' order; a head refuted on a worker's line is
+                    # carried by no block
+                    carried_ = [fk for fk in heads_ if fk in unjudged_all and len(key_candidates(fk)[1]) > ref26.get(fk, 0)]
+                    return ("with", carried_[0]) if carried_ else ("none", heads_[0])
+            return None
+        cover26 = {k: c_ for k in unjudged for c_ in [also_cover(k)] if c_}
+        covered26 = {k: c_[1] for k, c_ in cover26.items() if c_[0] == "with"}
+        nosrc_also26 = {k for k, c_ in cover26.items() if c_[0] == "none"}
+        unjudged = [k for k in unjudged if k not in covered26]
+        cand = {k: ((None, []) if k in nosrc_also26 else key_candidates(k)) for k in unjudged}
         computed_without = sum(1 for k in unjudged if not cand[k][1])
-        past_end26 = sum(len(past_end_sources(k)) for k in unjudged)
+        past_end26 = sum(len(past_end_sources(k)) for k in unjudged if k not in nosrc_also26)
         expected = sum(max(0, len(c) - ref26.get(k, 0)) for k, (_, c) in cand.items())
         copy_lines: dict[str, set] = {}  # twin rows (`:20` and `:20-24`) share a canonical key: a carried row's line must be one of them
         for m in copy_rows:
@@ -2878,7 +3313,11 @@ def main() -> int:
         def other_note(k_):
             """Why a key with a block of its own in a listed report has no source: its source blocks are all in reports of another commit."""
             if k_ not in other_memo:
-                other_memo[k_] = " — its only source blocks are in reports of another commit, whose `Base SHA:` is not this run's base-sha" if k_ and key_candidates(k_, src_blocks)[0] else ""
+                if k_ in nosrc_also26:
+                    other_memo[k_] = (f" — the newest report holding it names it only on the `Also at:` line of `{cover26[k_][1]}`'s block, which this "
+                                      "run re-found or Step 6 withdrew: no older per-line block is carried beside that group")
+                else:
+                    other_memo[k_] = " — its only source blocks are in reports of another commit, whose `Base SHA:` is not this run's base-sha" if k_ and key_candidates(k_, src_blocks)[0] else ""
             return other_memo[k_]
 
         def pe_norms(k_):
@@ -3046,6 +3485,9 @@ def main() -> int:
                 short26.append(f"`{k_}`: {src_} holds {len(cs_)} source block(s) at that sink and class — one per entry point — and {per_key.get(k_, 0)} carried"
                                + (f", {ref26[k_]} withdrawn as `refuted` rows" if ref26.get(k_) else ""))
         for k_ in sorted(set(per_key) - set(unjudged)):
+            if k_ in covered26:
+                extra26.append(f"`{k_}` is carried as a block of its own though it goes with `{covered26[k_]}`'s carried block, whose `Also at:` line names it")
+                continue
             extra26.append(f"`{k_}` is carried though " + ("Step 6 withdrew it on a worker's `ledger refuted:` line — its `refuted` rows are its disposition" if any(corrected_key(c[3], c[2]) == k_ for c in refuted_rows) else "a worker's record reached it this run — its row is that record's disposition" if k_ in judged_keys else "no open row of the pre-write copy holds it"))
         nosrc26 = [k_ for k_ in unjudged if not cand[k_][1]]
         cb_ids26 = {RECORD_RX.match(b).group(2).upper() for b in carried_blocks}
@@ -3107,6 +3549,7 @@ def main() -> int:
         app47.setdefault(corrected_key(m_.group(1), m_.group(2)), []).append((word_, out_))
     if unchanged:
         record_keys = {key_of(c[3], c[2]) for c in table_rows if c[4].lower() not in ("carried", "refuted")}
+        record_keys |= also_rows(tuple({c[4].lower() for c in table_rows} - {"refuted"}))  # and its `Also at:` lines, a carried block's too
         copy_keys47 = {corrected_key(m.group(1), m.group(2)) for m in copy_rows}
         car_ids: dict = {}
         for c in carried_rows:
@@ -3302,7 +3745,7 @@ def main() -> int:
     LAYOUT = ["Worker record", "Entry point", "CWE", "File", "Description", "Impact", "Flow", "Evidence", "Judge", "Adversarial", "Remediation", "Reference"]
     lay_rows = {c[6].upper(): c for c in table_rows if c[4].lower() in ("body", "promoted")}
     lay_norm = lambda s_: " ".join(re.sub(r"[`*]", "", s_.replace("\\|", "|")).split())
-    lay_o, lay_f, lay_w, lay_e, lay_a, lay_n = [], [], [], [], [], 0
+    lay_o, lay_f, lay_w, lay_e, lay_a, lay_x, lay_n = [], [], [], [], [], [], 0
     for b in blocks:
         bid_ = RECORD_RX.match(b).group(2)
         c = lay_rows.get(bid_.upper())
@@ -3347,12 +3790,28 @@ def main() -> int:
             adv_ok = bool(cell_) and av_.startswith(cell_) and len(av_[len(cell_):].strip(" .;:,—-").split()) >= 3
         if not adv_ok:
             lay_a.append(f"`{bid_}` reads `{av_[:60]}` for the cell `{cell_[:40]}`")
-    lay_bad = {x_ for lst_ in (lay_o, lay_f, lay_w, lay_e, lay_a) for x_ in (s_.split("`")[1] for s_ in lst_)}
+        # a body or promoted block keeps its record's `Also at:` line and the lines of each record of its class merged into
+        # it, the same sinks — dropped, their keys would read as carried or missed by the next run — each a readable line
+        if c[4].lower() in ("body", "promoted"):
+            rec_al_ = set(record_also(c[0]))
+            for m_r in table_rows:
+                if m_r[4].lower() == "merged" and m_r[6].upper() == bid_.upper() and m_r[3] == c[3]:
+                    rec_al_ |= set(record_also(m_r[0]))
+            own_f_ = canon(rel(file_of(b) or ""))  # a merged record may name the kept block's own sink, which is its `File:`
+            rec_al_ = sorted({canon(rel(s_)) for s_ in rec_al_} - {own_f_})
+            blk_al_ = sorted({canon(rel(s_)) for s_ in block_also(b)} - {own_f_})
+            bad_al_ = block_also_bad(b)
+            if rec_al_ != blk_al_:
+                lay_x.append(f"`{bid_}` names {len(blk_al_)} `Also at:` sink(s) where its record and the records of its class merged into it name {len(rec_al_)}")
+            if bad_al_:
+                lay_x.append(f"`{bid_}`: " + "; ".join(bad_al_[:2]))
+    lay_bad = {x_ for lst_ in (lay_o, lay_f, lay_w, lay_e, lay_a, lay_x) for x_ in (s_.split("`")[1] for s_ in lst_)}
     fix40 = [f"{what_}: {', '.join(lst_[:3])}{' …' if len(lst_) > 3 else ''}" for what_, lst_ in (
         ("the fields in STEP 3's order — Worker record, Entry point, CWE, File, Description, Impact, Flow, Evidence, Judge, Adversarial, Remediation, Reference — with no other line between them", lay_o),
         ("Evidence as a fenced code block", lay_f), ("`Worker record:` the row's worker record id", lay_w), ("`Entry point:` the row's entry-point cell", lay_e),
-        ("the `Adversarial:` line the row's verdict cell, then ` — ` and the one-sentence rationale, never omitted — `Adversarial: not run (severity outside adv=)` for a `not run` row", lay_a)) if lst_]
-    emit("block layout", f"{lay_n - len(lay_bad)} of {lay_n} body and promoted blocks in the one layout | fields out of order, missing or with a line between {len(lay_o)} | Evidence not fenced {len(lay_f)} | Worker record not the row's {len(lay_w)} | Entry point not the row's {len(lay_e)} | Adversarial not the cell and a rationale {len(lay_a)}",
+        ("the `Adversarial:` line the row's verdict cell, then ` — ` and the one-sentence rationale, never omitted — `Adversarial: not run (severity outside adv=)` for a `not run` row", lay_a),
+        ("the record's `Also at:` line after `Reference:`, its sinks as the record and the records of its class merged into it name them, one `<path>:<line>` each — no range, a file of the target", lay_x)) if lst_]
+    emit("block layout", f"{lay_n - len(lay_bad)} of {lay_n} body and promoted blocks in the one layout | fields out of order, missing or with a line between {len(lay_o)} | Evidence not fenced {len(lay_f)} | Worker record not the row's {len(lay_w)} | Entry point not the row's {len(lay_e)} | Adversarial not the cell and a rationale {len(lay_a)}" + (f" | Also at not the record's {len(lay_x)}" if lay_x else ""),
          None, not lay_bad, ("every block is rendered from its row in the one layout — " + "; ".join(fix40)) if fix40 else None)
 
     # 41. appendix table — the appendix copies `disposition-table.md` in full, every row as the file holds it: three
@@ -3532,6 +3991,168 @@ def main() -> int:
          + (": " + ", ".join(f"{i_} {c_} ({n_} lines)" for i_, c_, n_, _, _ in cit_bad[:6]) + (" …" if len(cit_bad) > 6 else "") if cit_bad else ""),
          None, not cit_bad, "; ".join(fix46) or None)
 
+    # 49. needs context — every line of a worker file outside its finding records that names a NEEDS CONTEXT judgement
+    # (`--needs-context` lists them) has one `needs context: <lens>/p<n>:<line> — <answer>` line in the Unverifiable
+    # section: `<path:line> — <what is missing>`, `carried by <the report's VULN or UNV id>`, or `mention: <what the line
+    # restates>`. The base skill reports NEEDS CONTEXT under Unverifiable, and a worker writes it in its clearances, where
+    # no row carries it: one run's writer brought five such observations into its Unverifiable section and left out two
+    # candidates — a message-chosen sender address a worker called an `Unverifiable candidate`, and a secret in a URL query.
+    # Reading the sink out of the prose was tried: over the earlier runs the cite nearest the words was the judgement's
+    # sink in ten of nineteen and thirty of sixty-four named none, so the checker lists the lines and the writer, who can
+    # read them, names the sink. One `mention:` text naming no line or id, over three or more lines of two or more worker
+    # files, says what none of them is.
+    nc_list = nc_lines(worker_files)
+    nc_keys = {(p_.lower(), n_): l_ for p_, n_, l_ in nc_list}
+    nc_pairs = {nc_pair(p_).lower() for p_ in worker_files}
+    nc_sec = nc_section(report)
+    # a key naming no worker file is no answer line — a prose bullet `Needs context: <file>:<line> — …` is the section's text
+    nc_ans = {k_: v_ for k_, v_ in nc_answers(nc_sec).items() if k_[0] in nc_pairs}
+    # an id the report gives a candidate: a body block's, a record heading's, a table row's `body record` cell, or one an
+    # entry line of the Unverifiable section opens (`### [UNVERIFIABLE] UNV-001 — …`, `- \`UNVERIFIABLE-001\` (…)`, a
+    # `[UNVERIFIABLE] VULN-012` heading) — never a worker record's own id, which the report names only beside `Worker
+    # record:`, nor an id a sentence of the section mentions
+    nc_idrx = r"[A-Za-z][A-Za-z0-9]*-[A-Za-z0-9-]*\d"
+    nc_ids = {k_.upper() for k_ in block_id}
+    nc_ids |= {x_.upper() for x_ in re.findall(r"(?mi)^(?:#+\s*)?\[(?:CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]\s+`?(" + nc_idrx + r")(?![-\w])", body_text)}
+    nc_ids |= {c_[6].strip("` ").upper() for c_ in table_rows if re.fullmatch(nc_idrx, c_[6].strip("` "))}
+    entry_rx = re.compile(r"^[\s#>|*_`+-]*(?:(?:\d+[.)]|\(\d+\))\s*)?(?:[*_`]*\[(?:UNVERIFIABLE|CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\][*_`]*\s*)*"
+                          r"(?:UNVERIFIABLE\s+)?[\s—–:*_`-]*(UNV(?:ERIFIABLE)?-\d{1,9}|VULN-[A-Za-z0-9-]*\d)(?![-\w])"
+                          r"(?=[\s*_`]*(?:[—–:|(),\]-]|$))", re.I)
+    for l_ in nc_sec.splitlines():
+        h_ = None if NC_ANS_RX.match(l_) else entry_rx.match(l_)
+        if h_ and (not h_.group(1).upper().startswith("VULN-") or re.search(r"(?i)\[UNVERIFIABLE\]", l_)):
+            nc_ids.add(h_.group(1).upper())
+    # a token is read as an id when its prefix is one the report's ids use — `VULN`, `UNV`, `UNVERIFIABLE` or an older
+    # report's own (`F-012`) — so `CWE-639`, `SHA-256` or `us-east-1` beside an id is the text's, not a claim
+    nc_pref = {"VULN", "UNV", "UNVERIFIABLE"} | {x_.split("-", 1)[0] for x_ in nc_ids}
+    idlike_ = lambda x_: x_.split("-", 1)[0].upper() in nc_pref
+    nc_unans, nc_noform, nc_kind, nc_same = [], [], Counter(), {}
+    # a text read for repeats: its words, and the references it names kept as written — a line key, a VULN or UNV id, a
+    # `path:line`, `line <n>` — so a counter `(2)` tells nothing apart while `restates injection/p2:215` does
+    ref_rx = re.compile(r"[a-z][a-z0-9-]*(?:/p\d+)?:\d{1,9}|(?:vuln|unv)-[a-z0-9-]*\d|[\w.@+-]+(?:/[\w.@+-]+)*\.\w+:\d{1,9}|\bline\s+\d{1,9}", re.I)
+    words_ = lambda s_: len(re.findall(r"[A-Za-z][A-Za-z'-]*", ref_rx.sub(" ", s_)))
+    norm_ = lambda s_: " ".join(re.sub(r"[^a-z\s]", " ", ref_rx.sub(" ", s_.lower())).split())
+    cite_rx = re.compile(r"^\[?`?([^`\s\]:;]+?):(\d{1,9})(?:[-–]\d{1,9})?`?\]?(?:\([^)\s]*\))?(.*)$")
+    sep_ = lambda s_: re.sub(r"^[\s\u00a0:,;|/.=~\u00b7'\"\u2018\u2019\u201c\u201d\u2014\u2013\u2192()\[\]*_`<>-]+", "", s_)
+    carry_rx = re.compile(r"(?i)(?<![A-Za-z])carried\s+by(?![A-Za-z])")
+    # the carried form: `carried by` and, a word or three on, an id — `carried by` with no id after it is the missing
+    # fact's own words
+    cb_rx = re.compile(r"(?i)^carried\s+by(?![A-Za-z])(?:[\s*_`]+[a-z][a-z'-]*){0,3}?[\s:*_`\[(]*(" + nc_idrx + r")(?![-\w])")
+
+    def nc_cite(path_, line_, shown_):
+        """None when the cite names a line of a source file of the target, else what is wrong."""
+        n_ = target_lines(path_)
+        if n_ is None or re.match(r"(?i)(?:\.llm-sast-scanner-cache(?:/|$)|sast_report-[^/]*\.md$)", os.path.normpath(path_)):
+            return f"cites `{shown_}`, no source file of the target — the sink's path from the target directory"
+        if not 1 <= line_ <= n_:
+            return f"cites `{shown_}`, past the end of its {n_} lines"
+        return None
+
+    def nc_ids_after(s_):
+        """None when every id after a `carried by` in the text is one the report gives a candidate, else the first that is
+        not — an id read by its prefix, a worker record's path (`lens/p2/VULN-…`) left out."""
+        for cm_ in carry_rx.finditer(s_):
+            for x_ in re.findall(r"(?<![/\w-])(" + nc_idrx + r")(?![-\w])", s_[cm_.end():]):
+                if idlike_(x_) and x_.upper() not in nc_ids:
+                    return (f"names `{x_}`, no id the report gives a candidate — a body block's or record heading's, a `body record` "
+                            "cell's or an Unverifiable entry's — never a worker record's own")
+        return None
+
+    for k_ in nc_keys:
+        got_ = nc_ans.get(k_, [])
+        if len(got_) != 1:
+            nc_unans.append(f"`{k_[0]}:{k_[1]}`" + (f" ({len(got_)} lines)" if got_ else ""))
+            continue
+        parts_ = re.split(r"[;；]\s*", got_[0])
+        kind_, err_, last_ = None, None, None
+        # the first answer in its full form: a cite then the missing fact, `carried by` or `mention:`, or no cite and one of
+        # those two — whatever separator stands between the cite and the rest
+        a_ = parts_[0]
+        ob_ = cite_rx.match(a_)
+        tail_ = sep_(ob_.group(3)) if ob_ else sep_(a_)
+        if ob_:
+            last_ = rel(ob_.group(1))
+            err_ = nc_cite(last_, int(ob_.group(2)), f"{ob_.group(1)}:{ob_.group(2)}")
+        cb_ = cb_rx.match(tail_)
+        cb_ = cb_ if cb_ and idlike_(cb_.group(1)) else None
+        mn_ = re.match(r"(?i)mention\s*:\s*(.*\S)?", tail_)
+        if err_:
+            pass
+        elif cb_:
+            kind_ = "carried"
+        elif mn_:
+            kind_ = "mention"
+            if words_(mn_.group(1) or "") < 2:
+                err_ = "reads `mention:` without two words saying what the line restates"
+            elif not ref_rx.search(mn_.group(1)):  # a mention naming the line or id it restates points somewhere
+                nc_same.setdefault(norm_(mn_.group(1)), []).append(k_)
+        elif ob_:
+            kind_ = "observation"
+            if words_(tail_) < 2:
+                err_ = f"cites `{last_}:{ob_.group(2)}` without two words naming what is missing"
+        else:
+            err_ = (f"reads `{a_[:40]}` — `<path:line> — <what is missing>`, the cite first, `carried by <VULN or UNV id>` or "
+                    "`mention: <what the line restates>`")
+        err_ = err_ or nc_ids_after(tail_)
+        # each later answer of a `; ` line: its cites — `:<line>`s read in the file cited before them, a `path:line` whose
+        # path is a file's (`localhost:3000` and `02:30` are words) — and every id after its `carried by`
+        for q_ in parts_[1:]:
+            if err_:
+                break
+            b_ = re.match(r"^[\s—–-]*(:\d{1,9}(?:[-–]\d{1,9})?(?:\s*(?:,|and|&)\s*:\d{1,9}(?:[-–]\d{1,9})?)*)(.*)$", q_)
+            if b_:
+                if not last_:
+                    err_ = f"cites `{b_.group(1).split(',')[0].strip()}` with no file before it — the sink's path from the target directory"
+                    break
+                for n_ in re.findall(r":(\d{1,9})", b_.group(1)):
+                    err_ = err_ or nc_cite(last_, int(n_), f"{last_}:{n_}")
+                q_ = b_.group(2)
+            else:
+                # the cite read before the separators go, so a dotfile's (`.gitlab-ci.yml:37`) keeps its leading `.`
+                c_ = cite_rx.match(re.sub(r"^[\s\u00a0,|=~\u00b7'\"\u2018\u2019\u201c\u201d\u2014\u2013\u2192()*_<>-]+", "", q_))
+                q_ = sep_(q_)
+                c_ = c_ or cite_rx.match(q_)
+                # a line key (`protocol-infra/p3:130`) a mention lists is a line of the worker files, not a file's cite
+                if c_ and re.search(r"/|\.\w+$", c_.group(1)) and not re.fullmatch(r"[a-z][a-z0-9-]*/p\d+", c_.group(1), re.I):
+                    last_ = rel(c_.group(1))
+                    err_ = nc_cite(last_, int(c_.group(2)), f"{c_.group(1)}:{c_.group(2)}")
+                    q_ = c_.group(3)
+            q_ = sep_(q_)
+            if not err_ and re.match(r"(?i)mention\s*:", q_) and words_(q_[q_.index(":") + 1:]) < 2:
+                err_ = "reads a later `mention:` without two words saying what the line restates"
+            err_ = err_ or nc_ids_after(q_)
+        if err_:
+            nc_noform.append(f"`{k_[0]}:{k_[1]}` {err_}")
+        else:
+            nc_kind[kind_] += 1
+    nc_stray = sorted(f"`{p_}:{n_}`" for p_, n_ in nc_ans if (p_, n_) not in nc_keys)
+    # one `mention:` text naming no line or id, over three or more lines of two or more worker files, says what none of
+    # them is; an observation is held to its sink and is never a dismissal
+    nc_rep = sorted(((t_, v_) for t_, v_ in nc_same.items() if len(v_) >= 3 and len({k_[0] for k_ in v_}) >= 2), key=lambda x_: -len(x_[1]))
+    fix49 = []
+    if nc_unans:
+        none_ = [x_ for x_ in nc_unans if "lines)" not in x_]
+        many_ = [x_ for x_ in nc_unans if "lines)" in x_]
+        fix49.append(f"{len(nc_unans)} NEEDS CONTEXT line(s) of the worker files have no `needs context:` line, or more than one, in the Unverifiable section"
+                     + ("" if nc_sec else " (the report holds no `## Unverifiable` section: write it)") + " — read "
+                     "each (`python3 .llm-sast-scanner-cache/recheck.py --needs-context` lists them) and write `needs context: <lens>/p<n>:<line> — "
+                     "<path:line of the sink> — <what is missing>`, `— carried by <the report's id for it: its body block's or its Unverifiable "
+                     "entry's, never a worker record's>` or `— mention: <what the line restates, when it judges nothing itself>`"
+                     + (": no answer: " + ", ".join(none_[:8]) + (f" … and {len(none_) - 8} more" if len(none_) > 8 else "") if none_ else "")
+                     + ("; " if none_ and many_ else ": " if many_ else "")
+                     + ("answered more than once, keep the one answer that holds: " + ", ".join(many_[:8]) if many_ else ""))
+    fix49 += nc_noform[:4] + ([f"… and {len(nc_noform) - 4} more answers in no form"] if len(nc_noform) > 4 else [])
+    if nc_stray:
+        fix49.append(f"`needs context:` lines at {', '.join(nc_stray[:3])} — no NEEDS CONTEXT line there: delete each, or move it to the line it "
+                     "answers — a line is written only for a line `--needs-context` lists, and an earlier run's answer names that run's worker lines")
+    if nc_rep:
+        t_, v_ = nc_rep[0]
+        fix49.append(f"one `mention:` text naming no line or id, `{t_[:80]}`, answers {len(v_)} lines of {len({k_[0] for k_ in v_})} worker files, so it says what none of them is: "
+                     "read each and name its sink and missing fact, the id that carries it, or the line or id whose judgement it restates: " + ", ".join(f"`{k_[0]}:{k_[1]}`" for k_ in v_[:6]))
+    emit("needs context", f"lines {len(nc_keys)} | answered observation {nc_kind['observation']} | carried {nc_kind['carried']} | mention {nc_kind['mention']} | "
+         f"unanswered {len(nc_unans)} | lines at no marker {len(nc_stray)} | answers in no form {len(nc_noform)} | repeated mentions {len(nc_rep)}",
+         None, not fix49, "; ".join(fix49) or None)
+
     # 27. summary table — the Executive Summary's severity table against the records under each heading and the histogram
     SEVS = ["Critical", "High", "Medium", "Low", "Informational"]
     summ_m = re.search(r"^## Executive Summary\s*$", body_text, re.M | re.I)
@@ -3590,6 +4211,126 @@ def main() -> int:
                                      + ", ".join(f"{k} {conf_want[k][0]}/{conf_want[k][1]}" for k in SEVS + ["Total"])
                                      + ("" if not untagged else f" — and every record's heading closes with its confidence tag: {untagged} do not"))
     emit("summary table", f"{'present' if table_counts else 'absent'} | " + " | ".join(summ_parts) + f" | total {summ_total if summ_total is not None else 'absent'} = {sum(body_counts.values())}" + (f" | duplicated rows {summ_dup}" if summ_dup else "") + conf_part, None, summ_ok, summ_fix)
+
+    # 50. unverifiable summary — the Executive Summary's severity table holds, after Total, a row `| Unverifiable | <u> |`,
+    # `u` the entries of the Unverifiable section, which Total does not count, and the summary's sentences name each entry
+    # by its id: one report held nine Unverifiable entries two thousand lines down while its summary table showed only the
+    # five severities. With no entry the row reads 0, or stands absent.
+    unv_ids = []
+    for l_ in nc_section(report).splitlines():
+        h_ = None if NC_ANS_RX.match(l_) else entry_rx.match(l_)
+        if h_ and (not h_.group(1).upper().startswith("VULN-") or re.search(r"(?i)\[UNVERIFIABLE\]", l_)) and h_.group(1).upper() not in unv_ids:
+            unv_ids.append(h_.group(1).upper())
+    # the row's label opens `Unverifiable` (`Unverifiable findings`, `Unverifiable (not in Total)`), its count the first
+    # number of its second cell (`10`, `**10**`, `10 entries`)
+    unv_row = re.search(r"(?mi)^\|\s*[*_`]*\s*Unverifiable\b[^|]*\|\s*[*_`]*\s*(\d+)[^|]*\|", summ_tbl)
+    unv_n = int(unv_row.group(1)) if unv_row else None
+    # the names are read in the summary outside its severity table: a second table listing the entries names them too
+    summ_text = summ_sec.replace(summ_tbl, "\n").upper() if summ_tbl else summ_sec.upper()
+    unv_unnamed = [x_ for x_ in unv_ids if not re.search(r"(?<![\w-])" + re.escape(x_) + r"(?![\w-])", summ_text)]
+    # an UNV id on a line no entry opens — another line of the section that is not an answer, or the `body record` cell of
+    # an `unverifiable` row — is an entry in a shape no item reads (`### UNV-001. <title>`) when the row stands absent or
+    # counts more than the entries read: a count of the readable entries alone told a writer `| Unverifiable | 0 |` over
+    # nine. A sentence's mention of another id, under a row that counts the entries, is no such entry.
+    unv_loose = []
+    for l_ in nc_section(report).splitlines():
+        if not NC_ANS_RX.match(l_):
+            unv_loose += [x_.upper() for x_ in re.findall(r"(?i)(?<![\w/-])(UNV(?:ERIFIABLE)?-\d{1,9})(?![-\w])", l_)]
+    for c_ in table_rows:
+        if c_[4].lower() == "unverifiable":
+            unv_loose += [x_.upper() for x_ in re.findall(r"(?i)(?<![\w/-])(UNV(?:ERIFIABLE)?-\d{1,9})(?![-\w])", c_[6])]
+    unv_unread = [x_ for x_ in dict.fromkeys(unv_loose) if x_ not in unv_ids]
+    unv_shape = bool(unv_unread) and (unv_n is None or unv_n > len(unv_ids))
+    unv_ok = (unv_n == len(unv_ids) if unv_ids else unv_n in (None, 0)) and not unv_unnamed and not unv_shape
+    unv_names = (f": not named {', '.join('`' + x_ + '`' for x_ in unv_unnamed[:8])}{f' and {len(unv_unnamed) - 8} more' if len(unv_unnamed) > 8 else ''}"
+                 if unv_unnamed else "")
+    unv_fix = None if unv_ok else (
+        (f"{len(unv_ids)} line{'' if len(unv_ids) == 1 else 's'} of the Unverifiable section read as entries, and {', '.join('`' + x_ + '`' for x_ in unv_unread[:8])}"
+         f"{f' and {len(unv_unread) - 8} more' if len(unv_unread) > 8 else ''} {'is' if len(unv_unread) == 1 else 'are'} named outside any line that reads as one — an entry the checker cannot read is not an absent one: an entry's line opens with its id, "
+         "after any `#` marks and its `[UNVERIFIABLE]` tag, then ` — ` and its title (`### [UNVERIFIABLE] UNV-001 — <title>`), and the Executive Summary's `| Unverifiable | <u> | n/a | n/a |` "
+         "row after Total counts the entries, its sentences naming each by its id and title" + unv_names) if unv_shape else
+        (f"the Executive Summary's severity table holds, after its Total row, `| Unverifiable | {len(unv_ids)} | n/a | n/a |` — the entries "
+         "of the Unverifiable section, which Total does not count — and the summary's sentences name each entry by its id and title" + unv_names))
+    emit("unverifiable summary", f"entries {len(unv_ids)} | table row {unv_n if unv_n is not None else 'absent'} | named in the summary {len(unv_ids) - len(unv_unnamed)}/{len(unv_ids)}"
+         + (f" | ids no entry line opens {len(unv_unread)}" if unv_unread else ""), None, unv_ok, unv_fix)
+
+    # 51. merge severity — a block never reads below a record merged into it by more than the one level a `DOWNGRADED` or
+    # `DISPUTED` verdict on it names: of two records of one finding the higher worker severity is the kept one, and Step 6
+    # alone may lower it (one same-key merge in sixteen in past reports kept the lower record, its block below a severity
+    # no verdict had lowered); a merged record whose severity cannot be read is counted, not judged
+    RANK51 = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1, "INFORMATIONAL": 1}
+    n51, unread51, bad51 = 0, 0, []
+    for c in merged_rows:
+        t51 = body_by_id.get(c[6].upper())
+        blk51 = block_id.get(c[6].upper()) if t51 else None
+        if not t51 or not blk51:
+            continue  # a merged row with no kept body block is item (4)'s and (1)'s
+        n51 += 1
+        m_sev = record_sev(c[0])
+        h51 = RECORD_RX.match(blk51.splitlines()[0]) if blk51.strip() else None
+        if not m_sev or not h51:
+            unread51 += 1
+            continue
+        b_sev = h51.group(1).upper()
+        adv51 = (adversarial(blk51) or "").lstrip("*` ")
+        allow51 = 1 if re.match(r"(?i)(DOWNGRADED|DISPUTED)\b", adv51) else 0
+        if RANK51.get(b_sev, 0) < RANK51.get(m_sev, 0) - allow51:
+            bad51.append((c, t51, m_sev, b_sev, allow51))
+    fix51 = None
+    if bad51:
+        # one hint per kept block: the highest record merged into it becomes the `body` row, every other record of the
+        # finding — the kept one included — is merged into it
+        by_blk51: dict = {}
+        for c, t_, m_, b_, a_ in bad51:
+            by_blk51.setdefault(t_[6].upper(), []).append((c, t_, m_, b_, a_))
+        hints51 = []
+        for grp_ in by_blk51.values():
+            top_ = max(grp_, key=lambda g_: RANK51.get(g_[2], 0))
+            c, t_, m_, b_, a_ = top_
+            others_ = [f"`{t_[0]}`"] + [f"`{g_[0][0]}`" for g_ in grp_ if g_ is not top_]
+            hints51.append(f"`{t_[6]}` is a {b_} block{' whose verdict allows one level' if a_ else ''} holding "
+                           + ", ".join(f"`{g_[0][0]}` ({g_[2]})" for g_ in grp_)
+                           + f" — keep `{c[0]}`'s record as the `body` row at {m_} (its `Worker record:` line and cells follow it), "
+                           + f"make {' and '.join(others_)} `merged` into it, and let Step 6 judge any downgrade")
+        fix51 = "; ".join(hints51[:4]) + (f" … and {len(hints51) - 4} more blocks" if len(hints51) > 4 else "")
+    emit("merge severity", f"merged records above their kept block {len(bad51)} | unreadable {unread51} | merged rows read {n51}",
+         None, not bad51, fix51)
+
+    # 52. long lines — no line of the report outside a fenced code block is longer than LINE_LIMIT bytes: a file reader
+    # keeps only a line's first 2,000 bytes, and a later run reads this report (its carried blocks, its verdicts) and
+    # a repair reads its draft; a block's field stays one line, as STEP 3's layout reads it (item 40), so it is shortened,
+    # a table row is shortened cell by cell, and any other line is broken between its sentences or items. A carried
+    # block's lines are not counted: item (26) holds them to the earlier report's words
+    # a carried block is an earlier report's, copied word for word: its lines are exactly the ones item (26) compares
+    # with its source — the body split at record headings as `blocks` splits it, each carried block up to its first
+    # `## ` line — so no line item (26) holds to the source's words is one this item asks to change
+    rep_lines52 = report.split("\n")
+    carried52 = set()
+    starts52 = [m_.start() + 1 for m_ in re.finditer(r"\n(?=(?:#+ )?\[(?i:CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\] VULN-)", body_text)]
+    for a_, b_ in zip(starts52, starts52[1:] + [len(body_text)]):
+        blk_ = body_text[a_:b_].rstrip("\n")  # its last line, never the newline before the next record's heading
+        if not RECORD_RX.match(blk_) or not re.search(r"^Carried: confirmed ", blk_, re.M):
+            continue
+        cut_ = blk_.find("\n## ")
+        end_ = a_ + (cut_ if cut_ >= 0 else len(blk_))
+        first_ = body_text.count("\n", 0, a_) + 1
+        carried52.update(range(first_, body_text.count("\n", 0, end_) + 2))  # 1-based line numbers of the region
+    long52 = [(n_, b_) for n_, b_ in long_text_lines(report) if n_ not in carried52]
+    def kind52(n_: int) -> str:
+        l_ = rep_lines52[n_ - 1].lstrip()
+        if l_.startswith("|"):
+            return ("a table row: shorten its cells — a disposition-table row in `disposition-table.md`, which the appendix "
+                    "copies, then the row copied again and its block re-rendered from it")
+        if ALSO_RX.match(l_):
+            return "an `Also at:` list: continue it on a further `Also at:` line right after it, no sink dropped"
+        if re.match(r"^\**([A-Z][A-Za-z ]*?):\**\s", l_) and re.match(r"^\**([A-Z][A-Za-z ]*?):", l_).group(1) in ("Worker record", "Entry point", "CWE", "File", "Description", "Impact", "Flow", "Evidence", "Judge", "Adversarial", "Remediation", "Reference"):
+            return "a block field, which stays one line: shorten it"
+        return "prose: break it between its sentences or items"
+    fix52 = ("a file reader keeps only a line's first 2,000 bytes (UTF-8 — an em dash counts three): "
+             + "; ".join(f"line {n_} ({b_} bytes) is {kind52(n_)}" for n_, b_ in long52[:4])
+             + (f" … and {len(long52) - 4} more" if len(long52) > 4 else "")) if long52 else None
+    emit("long lines", f"{len(long52)} over {LINE_LIMIT} bytes outside code blocks" + (f" (lines {', '.join(str(n_) for n_, _ in long52[:6])}{' …' if len(long52) > 6 else ''})" if long52 else ""),
+         None, not long52, fix52)
 
     # 28. previous run residual — STEP 1 preserved the previous plan as previous-run-<started>/scan-plan.md and recorded its
     # last `recheck: mismatches` line as `previous run residual: <n> — <items>` (or `none` on a run with no earlier plan)
@@ -3796,7 +4537,7 @@ def run() -> int:
         tb = traceback.extract_tb(exc.__traceback__)
         own = [fr for fr in tb if os.path.abspath(fr.filename) == os.path.abspath(__file__)]
         where = f"line {(own or tb)[-1].lineno}" if tb else "unknown line"
-        mode = next((a for a in sys.argv[1:] if a.split("=")[0] in ("--gate", "--contracts", "--roster", "--prompt", "--paths", "--checks", "--ledger-start", "--duplicates")), None)
+        mode = next((a for a in sys.argv[1:] if a.split("=")[0] in ("--gate", "--contracts", "--roster", "--prompt", "--paths", "--checks", "--ledger-start", "--duplicates", "--needs-context")), None)
         if mode:
             # a STEP 1 or STEP 2 command checks no report: its failure is its own error line, never a report mismatch
             print(f"{mode.split('=')[0][2:]}: error — script error {type(exc).__name__}: {str(exc)[:160]} at {where}; nothing checked")

@@ -1,6 +1,6 @@
 ---
 name: ssti
-version: "0.2"
+version: "0.4"
 description: Detect Server-Side Template Injection where user input controls the template string itself, not just template variables.
 ---
 
@@ -98,11 +98,11 @@ The `map`/`filter`/`sort`/`reduce` filters accept a **callable argument**, so an
 - User input bound as a template *variable* (`render('page.html', name=user)`) — not a sink.
 - **XSS via template output**: unsanitized user data rendered in a browser is XSS, not SSTI.
 - **Allowlisted template names**: user picks a name but it is validated against a hardcoded set — not SSTI.
-- **Logic-less engines** (Mustache, Liquid with safe config): arbitrary code execution is typically impossible even if the template string is user-supplied — lower risk; flag for manual review unless engine config is confirmed logic-less.
+- **Logic-less engines** (Mustache, Liquid with safe config) are no false alarm: arbitrary code execution is typically impossible even if the template string is user-supplied, but the sink is a finding at the engine's tier (Medium: data injection, XSS, information leak) like any other, never a manual-review note; clear it only when the engine's escaping and the data the template can reach leave no injection consequence.
 - Java numeric/boolean template arguments — simple-type sanitizers treat these as safe.
 - Ruby/Python string compared to a constant or allowlisted set before template construction.
 - Express `res.render()` with user-controlled *template object* only fires when the router uses a known vulnerable view engine configuration (`ejs`, `hbs`, `express-handlebars`, `eta`, `squirrelly`, `haml-coffee`, `express-hbs`, or `whiskers`).
-- **Second-order SSTI**: user-submitted template stored in DB/config and later rendered server-side — trace write path, still flag if unsandboxed.
+- **Second-order SSTI**: user-submitted template stored in DB/config and later rendered server-side — trace write path, still flag if unsandboxed. A template a template editor or other maintaining role keeps — in the application's own database, bucket or parameter store, or its cloud provider's message-template service — is the same sink, rated as the base skill's False Positive Guardrails (Trust Boundary) rate content another role writes and the code executes: one level below this file's tier for its engine when its writers hold a privileged position and lack the rendering workload's authority (a store whose writers the repository does not show is rated as that guardrail rates it), that tier when any signed-in user, a self-registered tenant, a role that writes only ordinary content (a CMS contributor) or another party's system writes it, and no finding only when the repository or its platform shows the writers already hold the workload's authority, or shows only the repository's own deploy writing it from its files.
 
 ---
 
@@ -245,7 +245,7 @@ erb :profile
 
 ### Liquid
 - **SINK grep**: `Liquid::Template.parse(` — non-literal argument
-- **VULN**: `Liquid::Template.parse(user_input).render(ctx)` — logic-less but flag for data leakage; manual review unless tags restricted
+- **VULN**: `Liquid::Template.parse(user_input).render(ctx)` — logic-less: a Medium-tier finding for data leakage unless its tags are restricted
 
 ---
 
@@ -353,7 +353,7 @@ return render_template(tmpl)
 - Jinja2: `SandboxedEnvironment` for unavoidable dynamic templates.
 - Spring: `@ResponseBody` / `@RestController` so return value is not interpreted as a view name.
 - Express: avoid passing user objects as the template argument to `res.render()` on vulnerable engines.
-- Logic-less engines (Mustache): lower RCE risk but still review for sensitive data exposure.
+- Logic-less engines (Mustache): lower RCE risk, still a Medium-tier finding for injection and sensitive data exposure.
 
 ## Business Risk
 

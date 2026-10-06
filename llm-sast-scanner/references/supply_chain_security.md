@@ -1,6 +1,6 @@
 ---
 name: supply_chain_security
-version: "0.2"
+version: "0.3"
 description: Software supply-chain weaknesses — unpinned dependencies, missing integrity, lifecycle scripts, typosquatting, outdated packages, missing SRI, untrusted registries, lockfile drift, provenance gaps, and build-time asset-pipeline code execution (CSS preprocessor loaders — Less `@plugin`/`javascriptEnabled` — that evaluate package-controlled stylesheets as code at compile time, bypassing install-time `--ignore-scripts`/lifecycle-off hardening and `.js`-only SCA)
 ---
 
@@ -93,7 +93,29 @@ rg -n '@plugin\b|`.*`' --glob '*.less'   # @plugin loads JS at compile time; bac
 - Deploy/build pulls `:latest` images or unpinned base tags with no digest or signature verification step
 - Known CVE affects pinned dependency version and no compensating control or upgrade path documented in repo
 - **Auto-update / firmware / package installer verifies the signature but not the *version* (no anti-rollback)** — an update client that checks only a signature/hash over the artifact, with no monotonic-version enforcement, lets an attacker serve or replay an **older, still-validly-signed** release to force a **downgrade** to a known-vulnerable version. Signals: an updater that records/compares no minimum-or-monotonic version before applying (signature/`SHA-256` check on the file while the version field is unsigned or unchecked); a signature that covers the payload but not the version/metadata; shared signing keys across release channels (a dev/beta-signed build accepted by prod). Fix: sign the version **together with** the artifact and reject any version ≤ the installed one (monotonic/anti-rollback counter); use separate per-channel signing keys
-- **Build-time CSS-preprocessor code execution (compile-time supply-chain RCE that install-time hardening does not cover)** — a build tool compiles Less at bundle time, including stylesheets reached transitively via `@import` from `node_modules`, using a configuration that leaves Less's JavaScript primitives on. Two sinks, either sufficient: **(a)** `@plugin "./mod.js";` inside any compiled `.less` — Less `require()`s and runs the module's top-level code at compile time, and this fires **regardless of `javascriptEnabled`**; **(b)** `javascriptEnabled: true` (e.g. hardcoded in `@angular-devkit/build-angular`'s `less-loader` options, or set for antd-style theme math) — inline backtick JS in a `.less` expression executes. A compromised or typosquatted dependency that ships a crafted `.less` (or a malicious first-party `.less`) therefore gets arbitrary code on every developer and CI machine during `npm run build`/`ng build`, with impact = whatever the build identity holds: `GITHUB_TOKEN`/`NPM_TOKEN`/cloud creds in CI env, `~/.npmrc`/`~/.aws/credentials` on disk, and **artifact poisoning** — a library built with `ng-packagr` re-emits the payload into its published stylesheet surface, reaching every downstream consumer. **Why the usual defenses miss it:** execution is at *build*, so `--ignore-scripts`, pnpm `onlyBuiltDependencies`, and Yarn Berry `enableScripts:false` never fire (there is no lifecycle event), and SCA/secret scanners that content-inspect only `.js`/`package.json` never parse `.less`. **Mitigation and its trap:** set `disablePluginRule: true` **and** `javascriptEnabled: false` (recover theme math with `math: 'always'`) on **every** Less invocation (`less-loader`, `less.render`, `ng-packagr`). But `disablePluginRule` has a **propagation gap** — Less installs the guard only on the entry stylesheet and does **not** re-apply it to `@import`-ed files — so the realistic transitive-dependency shape (the `@plugin` sits in `node_modules/**/*.less`) still fires; pair the flag with a content scrub in the loader's file resolver (`loadFile`) that strips comments+strings then rejects `@plugin` on **every** file it loads. **Severity: High–Critical** (build/CI RCE, CVSS Scope: Changed). Signals: `javascriptEnabled: true` anywhere in a Less build; any `@plugin` in a `.less` (especially vendored/`node_modules`); a Less compile of dependency stylesheets with no `disablePluginRule` + no content scrub. Do **not** flag Sass/`.scss` this way (Sass runs JS only via consumer-registered functions — see False Alarms).
+- **Build-time CSS-preprocessor code execution (compile-time supply-chain RCE that install-time hardening does not
+  cover)** — a build tool compiles Less at bundle time, including stylesheets reached transitively via `@import` from
+  `node_modules`, using a configuration that leaves Less's JavaScript primitives on. Two sinks, either sufficient:
+  **(a)** `@plugin "./mod.js";` inside any compiled `.less` — Less `require()`s and runs the module's top-level code at
+  compile time, and this fires **regardless of `javascriptEnabled`**; **(b)** `javascriptEnabled: true` (e.g. hardcoded
+  in `@angular-devkit/build-angular`'s `less-loader` options, or set for antd-style theme math) — inline backtick JS in
+  a `.less` expression executes. A compromised or typosquatted dependency that ships a crafted `.less` (or a malicious
+  first-party `.less`) therefore gets arbitrary code on every developer and CI machine during
+  `npm run build`/`ng build`, with impact = whatever the build identity holds: `GITHUB_TOKEN`/`NPM_TOKEN`/cloud creds in
+  CI env, `~/.npmrc`/`~/.aws/credentials` on disk, and **artifact poisoning** — a library built with `ng-packagr`
+  re-emits the payload into its published stylesheet surface, reaching every downstream consumer. **Why the usual
+  defenses miss it:** execution is at *build*, so `--ignore-scripts`, pnpm `onlyBuiltDependencies`, and Yarn Berry
+  `enableScripts:false` never fire (there is no lifecycle event), and SCA/secret scanners that content-inspect only
+  `.js`/`package.json` never parse `.less`. **Mitigation and its trap:** set `disablePluginRule: true` **and**
+  `javascriptEnabled: false` (recover theme math with `math: 'always'`) on **every** Less invocation (`less-loader`,
+  `less.render`, `ng-packagr`). But `disablePluginRule` has a **propagation gap** — Less installs the guard only on the
+  entry stylesheet and does **not** re-apply it to `@import`-ed files — so the realistic transitive-dependency shape
+  (the `@plugin` sits in `node_modules/**/*.less`) still fires; pair the flag with a content scrub in the loader's file
+  resolver (`loadFile`) that strips comments+strings then rejects `@plugin` on **every** file it loads. **Severity:
+  High–Critical** (build/CI RCE, CVSS Scope: Changed). Signals: `javascriptEnabled: true` anywhere in a Less build; any
+  `@plugin` in a `.less` (especially vendored/`node_modules`); a Less compile of dependency stylesheets with no
+  `disablePluginRule` + no content scrub. Do **not** flag Sass/`.scss` this way (Sass runs JS only via
+  consumer-registered functions — see False Alarms).
 
 ## Safe Patterns
 

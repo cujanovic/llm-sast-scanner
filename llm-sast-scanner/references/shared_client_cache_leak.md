@@ -1,7 +1,36 @@
 ---
 name: shared_client_cache_leak
-version: "0.8"
-description: Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth singletons, shared cookie jars, pooled-connection or thread-local reuse, reused pooled buffers/objects not reset (sync.Pool, Netty ByteBuf/Recycler, fasthttp/Fiber RequestCtx reuse — residual-data bleed), singleton request-handler instance fields (servlet / Spring @Controller / JSF @ApplicationScoped), process-global locale/timezone mutation, and module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers JS/TS (urql, Apollo, Apollo RESTDataSource, DataLoader, TanStack/React Query, SWR, axios, ofetch/$fetch, openapi-fetch, request, apisauce/wretch/Zodios shared-instance auth, typescript-memoize `@Memoize()`/`@MemoizeExpiring` (default key = first arg only, or `this` for a no-arg method → per-instance cache that is process-wide on a singleton), NestJS singleton providers, Buffer.allocUnsafe residual memory, AsyncLocalStorage enterWith/module-global, Express app.locals, Prisma/TypeORM/Sequelize/Mongoose, Next.js Full Route Cache / Data Cache / unstable_cache closure-captured identity / module-global in Server Components & Server Actions, RxJS module-level Subject/shareReplay on the server, Angular Universal SSR providedIn:'root' singleton state, InversifyJS/tsyringe/TypeDI singletons, Koa ctx.state/Hapi server.app), Python (requests, aiohttp, httpx, SQLAlchemy, Django/Flask caches, preforked-worker module globals (gunicorn/uWSGI), FastAPI app.state / sync-route threadpool threading.local, Django translation.activate/timezone.activate, django-tenants schema, Celery prefork task state), Go (singleflight, gorm method-chaining/`Session`, go-redis, go-resty, imroc/req, gin/echo pooled Context needing `c.Copy()`, ctx-in-struct, package-level sync.Map), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient/RestClient, OkHttp, Ktor, Unirest, Vert.x WebClientSession, Hibernate L2, gRPC, SLF4J MDC not cleared on pooled threads, WebFlux/Reactor ThreadLocal vs Context, Jackson ObjectMapper per-request mutable config, static SimpleDateFormat), Ruby (Rails.cache, Faraday, HTTParty class-level config, Excon/Typhoeus shared-connection headers, ActiveSupport::CurrentAttributes leaking into Sidekiq jobs/threads, acts_as_tenant/Apartment tenant-bleed, class variables, Time.zone=/I18n.locale= vs use_zone/with_locale), PHP (Guzzle, Octane/Swoole), OpenAPI-generated clients, C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest, tokio thread_local vs task_local across .await, actix web::Data / axum State/Extension app-wide state, sqlx/SeaORM/Diesel pool SET), Elixir/Phoenix (:persistent_term, ETS, Tesla/Req shared-auth client), Scala, Clojure, and reused headless-browser / SSR render workers (Puppeteer/Playwright "headless context bleed"), and GraphQL federation-router / API-gateway request de-duplication (WunderGraph Cosmo Router single-flight / inbound dedup with identity set in an `OnOriginRequest`/`EnginePreOriginHandler` hook or coprocessor outside the dedup key, Apollo Router query dedup) (CWE-488 / CWE-524 / CWE-567 / CWE-362)
+version: "0.9"
+description: >-
+  Cross-user / cross-tenant data leakage via shared client caches, request deduplication/coalescing, mutable-auth
+  singletons, shared cookie jars, pooled-connection or thread-local reuse, reused pooled buffers/objects not reset
+  (sync.Pool, Netty ByteBuf/Recycler, fasthttp/Fiber RequestCtx reuse — residual-data bleed), singleton request-handler
+  instance fields (servlet / Spring @Controller / JSF @ApplicationScoped), process-global locale/timezone mutation, and
+  module-global request state — identity omitted from the cache/coalescing key or held in process-shared state. Covers
+  JS/TS (urql, Apollo, Apollo RESTDataSource, DataLoader, TanStack/React Query, SWR, axios, ofetch/$fetch,
+  openapi-fetch, request, apisauce/wretch/Zodios shared-instance auth, typescript-memoize
+  `@Memoize()`/`@MemoizeExpiring` (default key = first arg only, or `this` for a no-arg method → per-instance cache that
+  is process-wide on a singleton), NestJS singleton providers, Buffer.allocUnsafe residual memory, AsyncLocalStorage
+  enterWith/module-global, Express app.locals, Prisma/TypeORM/Sequelize/Mongoose, Next.js Full Route Cache / Data Cache
+  / unstable_cache closure-captured identity / module-global in Server Components & Server Actions, RxJS module-level
+  Subject/shareReplay on the server, Angular Universal SSR providedIn:'root' singleton state,
+  InversifyJS/tsyringe/TypeDI singletons, Koa ctx.state/Hapi server.app), Python (requests, aiohttp, httpx, SQLAlchemy,
+  Django/Flask caches, preforked-worker module globals (gunicorn/uWSGI), FastAPI app.state / sync-route threadpool
+  threading.local, Django translation.activate/timezone.activate, django-tenants schema, Celery prefork task state), Go
+  (singleflight, gorm method-chaining/`Session`, go-redis, go-resty, imroc/req, gin/echo pooled Context needing
+  `c.Copy()`, ctx-in-struct, package-level sync.Map), Java/Kotlin (Caffeine, Spring @Cacheable/WebClient/RestClient,
+  OkHttp, Ktor, Unirest, Vert.x WebClientSession, Hibernate L2, gRPC, SLF4J MDC not cleared on pooled threads,
+  WebFlux/Reactor ThreadLocal vs Context, Jackson ObjectMapper per-request mutable config, static SimpleDateFormat),
+  Ruby (Rails.cache, Faraday, HTTParty class-level config, Excon/Typhoeus shared-connection headers,
+  ActiveSupport::CurrentAttributes leaking into Sidekiq jobs/threads, acts_as_tenant/Apartment tenant-bleed, class
+  variables, Time.zone=/I18n.locale= vs use_zone/with_locale), PHP (Guzzle, Octane/Swoole), OpenAPI-generated clients,
+  C#/.NET (HttpClient, IHttpClientFactory, EF Core, IMemoryCache/FusionCache), Rust (moka, reqwest, tokio thread_local
+  vs task_local across .await, actix web::Data / axum State/Extension app-wide state, sqlx/SeaORM/Diesel pool SET),
+  Elixir/Phoenix (:persistent_term, ETS, Tesla/Req shared-auth client), Scala, Clojure, and reused headless-browser /
+  SSR render workers (Puppeteer/Playwright "headless context bleed"), and GraphQL federation-router / API-gateway
+  request de-duplication (WunderGraph Cosmo Router single-flight / inbound dedup with identity set in an
+  `OnOriginRequest`/`EnginePreOriginHandler` hook or coprocessor outside the dedup key, Apollo Router query dedup)
+  (CWE-488 / CWE-524 / CWE-567 / CWE-362)
 ---
 
 # Shared-Client Cache / Dedup Cross-User Leak
