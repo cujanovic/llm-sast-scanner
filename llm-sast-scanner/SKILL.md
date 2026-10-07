@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.29"
+  version: "1.50.30"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -683,7 +683,7 @@ For example:
 
 Every matching finding that passed the Judge (CONFIRMED or LIKELY) must survive an adversarial stress test focused on real-world impact before it can be reported. The goal is to actively try to **disprove** each finding — only those that withstand scrutiny are worth reporting at that severity.
 
-For each matching finding, work through ALL of the following:
+For each matching finding, work through ALL of the following, answering each question from the code — its dependencies at the versions the repository pins included — and the deployment configs the repository ships: a question that reading them settles, Step 6 settles, and the answer decides; an answer they do not give — a WAF, a gateway, a network or TLS policy, a downstream system's behavior, data volume, provider limits — is written in the rationale of the `Adversarial:` line as an open question and decides no verdict (the note after the verdict table):
 
 #### 1. Why You Might Be Wrong
 - What assumptions are you making about the data flow, environment, or attacker capability?
@@ -724,10 +724,10 @@ For each matching finding, work through ALL of the following:
 |---------|---------|--------|
 | **STANDING** | Finding survived all challenges — real-world impact is credible and demonstrable | Report at the severity the record reached Step 6 with; when it voids a downgrade, at the rating the Downgrade validity check gives — a record whose `Judge:` line names a `<trigger>:` downgrade that holds and lowers it is `DOWNGRADED` instead (Finding Format) |
 | **DOWNGRADED** | Finding is real and one of the Severity Downgrade Rule's three triggers — privileged position, non-default configuration, chained prerequisite — applies and is named, and the named prerequisite passes the downgrade validity check — it is not a hop of the record's Flow | Demote by one level per named trigger, each trigger once, counted from the class default or from the lower rating a class reference gives the record's case without naming a trigger (its `reference:` reason) — a trigger the record's severity already reflects (its `Judge:` or `Adversarial:` line or the class reference's rating names it) is that same level, never a second, and the non-default configuration is counted last, never taking the record below `Low` (Severity Downgrade Rule); proceed to report |
-| **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact | Demote by one severity level, add explicit caveat to finding |
-| **WITHDRAWN** | Cannot construct a credible real-world attack scenario despite the technical truth of the bug | Drop from report; log internally as "withdrawn after adversarial review" with rationale |
+| **DISPUTED** | Reasonable doubt exists on practical exploitability or real-world impact, about a property of a concrete thing the record cites — a check, a value, a condition, in backticks or as its `file:line` — that reading the code and the configs does not settle (whether the race window between two cited lines is wide enough to win), on a ground the note below does not bar | Demote by one severity level — none where the record's `UNCERTAIN cap:` already reflects that property; the verdict names that thing, the property in doubt and what in the code leaves it unsettled |
+| **WITHDRAWN** | Cannot construct a credible real-world attack scenario despite the technical truth of the bug | Drop from report; log internally as "withdrawn after adversarial review" with rationale citing the `file:line` of the code it rests on — a guard's for a guard (the note below), the line that shows any other ground, such as the entry point an operator runs for operator self-harm — never the record's own sink alone |
 
-Neither `DISPUTED` nor `WITHDRAWN` rests on a ground barred by False Positive Guardrails or the second-order signal: the non-default-configuration trigger's setting or a deprecated or `legacy` label (Scope), the population of a store the repository does not show, or that writers of content the code executes are trusted or their authority not shown (Trust Boundary).
+Neither `DISPUTED` nor `WITHDRAWN` rests on a ground barred by False Positive Guardrails or the second-order signal: the non-default-configuration trigger's setting or a deprecated or `legacy` label (Scope), the population of a store the repository does not show, or that writers of content the code executes are trusted or their authority not shown (Trust Boundary); nor on a fact the repository does not show — missing context (Severity Downgrade Rule), such as a deployment's gateway, network, TLS or WAF policy, a downstream system's behavior, data volume or provider limits — nor on a doubt that names no property of what it cites but the finding's exploitability or impact in general (`practical exploitability remains uncertain`, `the repository does not expose enough downstream behavior`): such a doubt decides no verdict — the record is rated as the rest of Step 6 gives, `STANDING` where nothing else applies — and an open question it leaves is named in the rationale of the `Adversarial:` line. A question that reading the code or the shipped configs settles is no doubt either: Step 6 settles it and the answer decides — a guard the code or a shipped config shows, cited at its `file:line` — a pinned dependency's at the line of its code that shows it, which needs that code at hand, a version number alone showing nothing — that stops the attack on every path and target of the attack is grounds for `WITHDRAWN`, its rationale citing that guard; a shown fact that narrows the attack without stopping it decides no verdict either, the narrowing named in the rationale; and an answer that leaves the attack open leaves the record as the rest of Step 6 gives.
 
 **Only STANDING, DOWNGRADED, and DISPUTED findings proceed to the report.** A finding that is DOWNGRADED or DISPUTED is reported below its class default (e.g., Critical → High or below, High → Medium or below). DISPUTED findings must include the specific doubt rationale so the reader can make their own judgment.
 
@@ -803,7 +803,7 @@ Flow: <source file:line> → <intermediate hop file:line> → … → <sink file
 Evidence:
   <relevant code snippet>
 Judge: <one sentence — why this passed re-verification>[; <why the severity is below the class default — only for such a record>]
-Adversarial: <one sentence — why this survived the stress test; for DOWNGRADED, the trigger by name: privileged position / non-default configuration / chained prerequisite, and the named thing the attacker must hold or establish, which is not a hop of the Flow> [STANDING | DOWNGRADED | DISPUTED]
+Adversarial: <one sentence — why this survived the stress test; for DOWNGRADED, the trigger by name: privileged position / non-default configuration / chained prerequisite, and the named thing the attacker must hold or establish, which is not a hop of the Flow; for DISPUTED, the concrete thing the record cites that the doubt is about and what about it is uncertain> [STANDING | DOWNGRADED | DISPUTED]
 Remediation: <specific fix — not generic advice>
 Reference: references/<vuln>.md (v<version>)
 Also at: <path>:<line>, <path>:<line>, … — <only for one missing control's other sink lines; omit otherwise>

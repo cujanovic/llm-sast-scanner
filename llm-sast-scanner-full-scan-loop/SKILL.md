@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.26.7"
+  version: "2.26.8"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -643,7 +643,7 @@ and a group overlap aside — one class and entry point, the merged record's sin
 kept record's sink on the merged record's, two workers' records of one missing check —
 each entry point cell read as the list entry it names — a cited `file:line` as the entry at it or up to three lines
 below it in that file, a bare name as the one entry holding it, a name two entries share as written; (5) `config clearances rewritten` — the phrase search over the
-worker files' disposition lines, a finding record's own lines (its `Judge:`, its `Impact:`) not among them, nor a phrase
+worker files' disposition lines that hold a clearance word, cite no `file:line` and are no `ledger refuted:` line, a finding record's own lines (its `Judge:`, its `Impact:`) not among them, nor a phrase
 inside an absence claim (`no … non-production endpoint surface`), shown as `(absence claims <a>)`; a report that counted
 those too reads either count; (6) `ledger rows after` and `archived` — `ledger rows after` is the number of lines in `project-memory.md`'s
 confirmed-findings ledger section matching `^[a-z][a-z0-9_]* \| [^|]+:[0-9]+(-[0-9]+)? \|` — a class may carry digits,
@@ -858,7 +858,14 @@ file reader would cut: `<n> over 2000 bytes outside code blocks`, `n` required 0
 is shortened, an `Also at:` list continues on a further `Also at:` line with no sink dropped, a table row is shortened
 cell by cell (a disposition-table row in `disposition-table.md`, then copied again and its block re-rendered), any other
 line is broken between its sentences or items, and a carried block's lines, an earlier report's words, are not counted;
-a fence left open counts as none. Two lines are readings, not items: `recorded sets <n> | lone mismatches lines <k>`, a lone line being a subagent's own run appended to the plan, and
+a fence left open counts as none; (53) `dispute clauses` — a block's `DISPUTED` clause that cites nothing but its own
+sink (its `File:` path, with or without its line) or nothing at all and is, identifiers set aside, word for word the
+clause of such blocks at two other sinks: `<n> boilerplate in <k> shapes (of <d> disputed)`, `n` required 0, a same-commit
+carried block, an earlier report's words, not read; (54) `withdrawn guards` — every `withdrawn:` line whose reason is
+Step 6's cites the `file:line` of the code it rests on — a line of a file the target holds, never the row's own sink: a
+guard's for a guard that stops the attack, a dependency's at the line of its code that shows it, never a version
+alone, and for another ground, such as operator self-harm, the line that shows it, the entry point the operator runs —
+`<n> Step 6 withdrawals citing no file:line (of <s>)`, `n` required 0. Two lines are readings, not items: `recorded sets <n> | lone mismatches lines <k>`, a lone line being a subagent's own run appended to the plan, and
 `recheck: repair none — …`, printed when every mismatch in the set reads a STEP 1 or STEP 2 line.
 
 Before it starts the writer, the session writes the writer's prompt to `.llm-sast-scanner-cache/writer-prompt.md`,
@@ -978,7 +985,9 @@ defined below, is not a worker record's and carries its own word):
 - `withdrawn` — Step 6 returned WITHDRAWN, or Citation & Evidence Verification failed, and nothing else — a record that
   repeats a `body` row's entry point, sink and class is `merged`; `body record` holds the word
   `withdrawn`, and the appendix lists one line per such row, `withdrawn: <worker record> — <Step 6 | citation>: <one
-  line>`, so the reason has a home outside the cells;
+  line>`, so the reason has a home outside the cells — a Step 6 one reads `withdrawn: <worker record> — Step 6:
+  <guard file:line> <one line>`, the guard the one that stops the attack on every path and target of the attack (base
+  skill, the note after Step 6's verdict table), never a guard named in prose alone;
 - `unverifiable` — the record moved to the Unverifiable section, whose entries are numbered `UNV-<nnn>` in order;
   `body record` holds that id.
 
@@ -1063,7 +1072,9 @@ of them is, and recheck item (49) counts it; one missing fact may decide several
 
 `verdict` is Step 6's result for the row, written into the table before any body block is rendered: `STANDING`,
 `STANDING — downgrade voided: <named thing> is hop <n> of the Flow`, `DOWNGRADED — <trigger>: <the named thing the
-attacker must hold>`, or `DISPUTED — <one clause>` for every `body` row whose worker record's severity — the severity
+attacker must hold>`, or
+`DISPUTED — <the concrete thing the doubt is about, as the record cites it>: <the property in doubt>` (what in the code
+leaves it unsettled is the block's rationale) for every `body` row whose worker record's severity — the severity
 Step 6 saw, before any downgrade — is in `adv=`, and every `promoted` row whose severity as promoted, before Step 6, is;
 `not run` for a `body` row whose record's severity, or a `promoted` row whose severity as promoted, is outside `adv=`,
 so a record Step 6 disputed or downgraded below `adv=` keeps the verdict that lowered it; a `carried` row's cell is the copied block's `Adversarial:` verdict as it stands; a `refuted` row's is
@@ -1073,7 +1084,13 @@ backticks — a permission string, configuration key, function, type, route, rol
 verbatim from that row's own record (its File, Flow, Description or Evidence); a cell with no backticked identifier and
 no `file:line`, or whose identifiers appear in no line of the record, is an invalid cell whatever its prose says, and
 `invalid cells <c>` counts exactly those cells. Identical text on two rows is valid only when each row's record holds
-the identifier. Verdicts are written per finding, never per category, and they carry across runs, and continuity is
+the identifier, and a `DISPUTED` clause that cites nothing but its own row's sink and is, identifiers set aside, word for
+word the clause of rows at two other sinks is boilerplate, not a doubt — nor an invalid cell; recheck item (53) counts
+it — and Step 6 re-judges a fresh one to the verdict the rest of Step 6 gives (`STANDING` with the open question in its
+rationale where nothing else applies, `DOWNGRADED` for a trigger that holds, `DISPUTED` naming the property in doubt),
+while a verdict the continuity join carried is voided as the continuity rule below gives — a `carried` row's block,
+an earlier report's words, is not read; one doubt about the code at one
+sink that several routes reach is one doubt, however many rows repeat it. Verdicts are written per finding, never per category, and they carry across runs, and continuity is
 the first write into the verdict column, not a repair after the recheck: before Step 6 runs, the writer joins the
 table's `body` and `promoted` rows on their sink `file:line` — backticks removed — and class with the body records of every report the
 scan-plan's `earlier-reports:` row lists, oldest to newest: a `DOWNGRADED` or `DISPUTED` verdict at a sink and class
@@ -1097,11 +1114,15 @@ base skill's Downgrade validity check: Step 6 tests a carried `DOWNGRADED` cell'
 record, whatever `adv=` covers, and voids one that is a hop of the Flow, never a trigger, or one this run's record
 shows does not hold; it voids a carried `DISPUTED` cell, whatever `adv=` covers, only on a ground the base skill bars (the grounds its note after
 Step 6's verdict table lists: the non-default-configuration trigger's setting or a deprecated or `legacy` label, the
-population of a store the repository does not show, or that writers of content the code executes are trusted or their
-authority not shown), or as the restated-cell rule below voids one specific in form but not in substance. The void reads
+population of a store the repository does not show, that writers of content the code executes are trusted or their
+authority not shown, a fact the repository does not show, or a doubt that names no property of what it cites but the
+finding's exploitability or impact in general — and a question that reading the code or the shipped configs settles is
+no doubt: Step 6 settles it and the answer decides), or as the restated-cell rule below voids one specific in form but not in substance. The void reads
 `STANDING — previous downgrade voided: <clause>`, an identifier in the clause before any em dash within it (recheck
 item (2)) — for a barred ground, the clause naming the store, grant or default `file:line` the record's `Description:` line names,
-or, where it names none, the store's read `file:line` or the setting or label in backticks — the row then rated as the base
+or, where it names none, the store's read `file:line` or the setting or label in backticks, and for a fact the
+repository does not show, a doubt that names no property or a question the code settles, the record's sink
+`file:line` or the `file:line` of the code that settles it — the row then rated as the base
 skill's Downgrade validity check rates a voided record and counted under `voided`; where
 the row's `Judge:` line names a trigger that holds, the cell reads `DOWNGRADED — <that trigger>: <named thing>`
 instead, its block's rationale naming the voided ground, one level below and counted under `verdicts carried`. A voided cell is held to the same
@@ -1114,7 +1135,11 @@ the table is built, because the ledger, the earlier reports and the join all spe
 absolute ones once made fifteen keys that matched nothing. Step 6 may then replace such a cell only with
 `STANDING — previous downgrade voided: <one clause naming what changed>`, or with a `DOWNGRADED` or `DISPUTED` cell as
 the base skill's Downgrade validity check gives, its block's rationale naming the voided ground and, for `DISPUTED`,
-its doubt besides, counted under `verdicts carried`, or with a cell the two rules below give; a bare `STANDING` on such a row is an invalid
+its doubt besides, counted under `verdicts carried`, or with a cell the two rules below give; and where reading the
+code or a shipped config settles a carried `DISPUTED` cell's question against the attack — a guard cited at its
+`file:line` stopping it on every path and target of the attack — Step 6 withdraws the record in place of the void
+above, as it withdraws any record: the row `withdrawn`, its verdict cell `n/a`, the guard's `file:line` on its
+appendix line, and the join line corrected in its ` → corrected <n> — <ids>` form with that row's id dropped; a bare `STANDING` on such a row is an invalid
 cell, and a run whose join line is missing rendered its verdicts without looking: one writer rendered thirty previously
 downgraded sinks as bare `STANDING` and restored them only when the recheck named them. A carried `DOWNGRADED` or
 `DISPUTED` cell that neither the Downgrade validity check nor the barred-ground test above voids, both tested first,
@@ -1307,12 +1332,16 @@ itself in one document.
 Any non-finding disposition line in a worker file — a Clearance Record, a `Hits → disposition` entry, a Hardening
 Note, a Positive Pattern, a `safe-because` clause, never a `ledger refuted:` line, which Step 6 tests — whose text contains `disabled by default`, `enabled by default`,
 `default configuration`, `environment-gated`, `non-production`, `only when the flag` or `unless configured` rests on
-configuration and is not a clearance, unless the same line also names a code guard that holds regardless of
-configuration — an authorization middleware, an ownership check, a validator, by name or by `file:line`. A flag or
-setting listed beside such a guard is a guard list, not a clearance by configuration, and does not trigger; nor does a
+configuration and is not a clearance, unless the same line also names, at its `file:line`, a code guard that holds
+regardless of configuration — an authorization middleware, an ownership check, a validator: a guard named by name
+alone, and the `file:line` of the setting the line rests on or of its default, exempt nothing. A flag or
+setting listed beside such a cited guard is a guard list, not a clearance by configuration, and does not trigger; nor does a
 phrase inside an absence claim — its clause opens `no`, `none of`, `neither` or `nor` and lists what the partition lacks
 (`SAFE in p3 — no IaC resource-attribute … or vendor non-production endpoint surface in this partition`) — which names a
-class found absent, not a configuration a clearance rests on. The base skill's Severity Downgrade Rule makes a non-default configuration a downgrade
+class found absent, not a configuration a clearance rests on; nor does a line citing a `file:line`, every one under a
+path the base skill's Scope skips — tests, fixtures, mocks, `__tests__`, examples, demos, samples, seeds — which names
+code no deployment runs.
+The base skill's Severity Downgrade Rule makes a non-default configuration a downgrade
 trigger, so the negative-verdict re-derivation rewrites each such line's sink as a body record at its class severity,
 its `Description:` line naming the setting and each `file:line` that sets its default — in the code and in every
 deployment config the repository ships that sets it — and Step 6 tests that trigger as on any record in `adv=`: where
@@ -1321,9 +1350,12 @@ and the trigger lowers the record — one level, after its other triggers, never
 Severity Downgrade Rule counts it — Step 6 downgrades it naming that configuration on its `Adversarial:` line, and
 otherwise rates it as Step 6 rates any record, the phrase its clearance used being no trigger; a record whose class
 severity is outside `adv=` is `not run`, a verdict the continuity join carries excepted, and otherwise stays at it,
-which under the default `adv=` is only a `Low` or `Informational` record, one the trigger never lowers. `config clearances rewritten: <k>` equals the number of such lines
-without a `file:line` guard, found by searching the worker files for those phrases, and the appendix lists each as
-`<lens>/p<n>: <its text> → <body VULN id>`; a `0` while the search finds such lines is a STEP 3 error.
+which under the default `adv=` is only a `Low` or `Informational` record, one the trigger never lowers. `config clearances rewritten: <k>` counts those of such lines that recheck
+item (5)'s search finds — a clearance word on the line (`SAFE`, `clearance`, `cleared`, `not exploitable`, `not a
+finding`, `no finding`, `dismiss`) and no `file:line`, a path with a file extension and a line; that search cannot tell
+a guard's line from any other, so a line whose only `file:line` is no guard's — its setting's, its default's, its
+sink's — is rewritten and listed all the same, outside `k` — and the appendix lists each rewritten line as
+`<lens>/p<n>: <its text> → <body VULN id>`, one outside `k` marked `(cites <file:line>, outside k)`; a `0` while the search finds such lines is a STEP 3 error.
 
 Then every line of the scan-plan's `## Entry points` list is looked up by name or `file:line` across the worker files. An entry
 point named in no finding's `Entry point:` line, as no stored-content finding's read trigger (a finding whose Flow

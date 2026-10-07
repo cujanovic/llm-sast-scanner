@@ -3706,7 +3706,7 @@ def main() -> int:
             vs_low.append(f"`{c[6]}` is [{bt_}] from a [{rs_}] record under `{cell_[:30]}`")
     fix38 = []
     if vs_in or vs_out:
-        fix38.append(f"a body row's verdict follows its worker record's severity — the severity Step 6 saw, not the block's: in `adv={adv_txt}` a Step 6 verdict in its form (`STANDING`, `STANDING — downgrade voided: <named thing> is hop <n> of the Flow`, `DOWNGRADED — <privileged position | non-default configuration | chained prerequisite>: <named thing>`, `DISPUTED — <one clause>`; the rationale belongs to the block's line, not the cell), outside it `not run`, its block's line `Adversarial: not run (severity outside adv=)`; a record Step 6 disputed or downgraded below `adv=` keeps that verdict: {', '.join((vs_in + vs_out)[:4])}{' …' if len(vs_in) + len(vs_out) > 4 else ''}")
+        fix38.append(f"a body row's verdict follows its worker record's severity — the severity Step 6 saw, not the block's: in `adv={adv_txt}` a Step 6 verdict in its form (`STANDING`, `STANDING — downgrade voided: <named thing> is hop <n> of the Flow`, `DOWNGRADED — <privileged position | non-default configuration | chained prerequisite>: <named thing>`, `DISPUTED — <the concrete thing the doubt is about>: <the property in doubt>`; the rationale belongs to the block's line, not the cell), outside it `not run`, its block's line `Adversarial: not run (severity outside adv=)`; a record Step 6 disputed or downgraded below `adv=` keeps that verdict: {', '.join((vs_in + vs_out)[:4])}{' …' if len(vs_in) + len(vs_out) > 4 else ''}")
     if vs_low:
         fix38.append(f"a block below its record's severity carries the `DOWNGRADED` or `DISPUTED` verdict that lowered it, or is rendered at its record's severity: {', '.join(vs_low[:3])}{' …' if len(vs_low) > 3 else ''}")
     if vs_na:
@@ -4331,6 +4331,96 @@ def main() -> int:
              + (f" … and {len(long52) - 4} more" if len(long52) > 4 else "")) if long52 else None
     emit("long lines", f"{len(long52)} over {LINE_LIMIT} bytes outside code blocks" + (f" (lines {', '.join(str(n_) for n_, _ in long52[:6])}{' …' if len(long52) > 6 else ''})" if long52 else ""),
          None, not long52, fix52)
+
+    # 53. dispute clauses — a `DISPUTED` doubt names the concrete thing the record cites that it is about and what about it
+    # is uncertain (base skill, Step 6's verdict table and the note after it): a fact the repository does not show and a
+    # doubt that names nothing are no grounds. Read mechanically: a fresh block (never a same-commit carried one, which
+    # keeps its source's words) whose `DISPUTED` clause cites nothing but its own sink — its `File:` path, with or without
+    # its line — or nothing at all, in words, identifiers set aside, that such clauses at two other sinks share, is
+    # boilerplate: one fresh run disputed 78 of 355 findings in two such sentences, each citing its own sink, and every one
+    # passed item (2) and the identical-text rule because the sinks differed; one doubt about the code at one sink, which
+    # several routes reach (one record per route), is one doubt, however many rows repeat it
+    def sink_only53(clause_: str, sink_: str | None) -> bool:
+        ids_ = [(x_ + z_ or y_).strip() for x_, z_, y_ in re.findall(r"`([^`]+)`(:[0-9]+(?:[-\u2013][0-9]+)?)?|([A-Za-z0-9_./-]+:[0-9]+(?:[-\u2013][0-9]+)?(?::[0-9]+)?)", clause_)]
+        if not ids_:
+            return True
+        if not sink_:
+            return False
+        s_path, _, s_line = sink_.partition(":")
+        s_line = s_line.split("-")[0]
+        for i_ in ids_:
+            # a path with or without its line (and a column), `./` or `/` before it; its components match the sink's
+            # from the end — `Dockerfile:12` and `.env:3` are paths, `a.py` is no suffix of `src/data.py`, `sslmode` no path
+            m_ = re.match(r"^(?:\./|/)?(.*?)(?::(\d+)(?:[-\u2013](\d+))?)?(?::\d+)?$", i_)
+            if not m_ or not m_.group(1):
+                return False
+            i_path = m_.group(1)
+            if not (i_path == s_path or s_path.endswith("/" + i_path) or i_path.endswith("/" + s_path)):
+                return False
+            if m_.group(2) and s_line.isdigit():
+                lo_, hi_ = int(m_.group(2)), int(m_.group(3) or m_.group(2))
+                if not lo_ <= int(s_line) <= hi_:
+                    return False
+        return True
+    def shape53(clause_: str) -> str:
+        s_ = re.sub(r"`[^`]+`(?::[0-9]+(?:[-\u2013][0-9]+)?)?|[A-Za-z0-9_./-]+:[0-9]+(?:[-\u2013][0-9]+)?(?::[0-9]+)?", "<id>", clause_)
+        return re.sub(r"[\s.;,:!]+$", "", re.sub(r"\s+", " ", s_)).strip().lower()
+    disputed53, cands53 = 0, []
+    for b_ in blocks:
+        a_ = adversarial(b_) or ""
+        if not a_.startswith("DISPUTED") or re.search(r"^Carried: confirmed ", b_, re.M):
+            continue
+        disputed53 += 1
+        clause_ = a_.split(" — ", 2)[1] if a_.count(" — ") >= 1 else ""
+        if not clause_.strip():
+            continue  # a cell with no clause is item (2)'s, which counts it invalid
+        if sink_only53(clause_, file_of(b_)):
+            cands53.append((RECORD_RX.match(b_).group(2), shape53(clause_), file_of(b_) or ""))
+    sinks53: dict[str, set] = {}
+    for _, s_, k_ in cands53:
+        sinks53.setdefault(s_, set()).add(k_)
+    kinds53 = [s_ for s_, ks_ in sorted(sinks53.items(), key=lambda kv: -len(kv[1])) if len(ks_) >= 3]
+    boiler53 = [(v_, s_) for v_, s_, _ in cands53 if s_ in kinds53]
+    shapes53 = Counter(s_ for _, s_ in boiler53)
+    fix53 = ("a `DISPUTED` doubt names the concrete thing the record cites that it is about — a check, a value, a condition, in "
+             "backticks or as its `file:line` — and the property of it in doubt; a fact the repository does not show and a doubt "
+             "that names no property but the finding's exploitability or impact are no grounds (the base skill's note after "
+             "Step 6's verdict table): "
+             + "; ".join(f"`{s_ if len(s_) <= 90 else s_[:90].rsplit(' ', 1)[0] + ' …'}` on {shapes53[s_]} blocks ({', '.join([v_ for v_, x_ in boiler53 if x_ == s_][:3])}"
+                         f"{' …' if shapes53[s_] > 3 else ''})" for s_ in kinds53[:3])
+             + " — re-judge each: `STANDING` with the open question in its rationale, `DOWNGRADED` for a trigger that holds, or "
+             "`DISPUTED` naming the property in doubt; a verdict the continuity join carried is voided as STEP 3's continuity "
+             "rule gives") if boiler53 else None
+    emit("dispute clauses", f"{len(boiler53)} boilerplate in {len(kinds53)} shapes (of {disputed53} disputed)", None, not boiler53, fix53)
+
+    # 54. withdrawn guards — a Step 6 withdrawal drops a finding the Judge passed, so its appendix line cites the
+    # `file:line` of the code its reason rests on — for a guard that stops the attack, the guard's; a dependency's at the
+    # line of its code that shows it, never a version alone; another ground at the line that shows it — a line of a file
+    # the target holds, never the row's own sink (base skill, Step 6's verdict table and the note after it): one
+    # writer, told a settled question decides, withdrew three findings on "the pinned library encodes it" and cited nothing
+    step6_54 = [(n_, why) for n_, why in wd_lines if re.search(r"(?i)\bstep[\s-]*6\b", why) and not re.match(r"(?i)^[\s`*_:]*citation\b", why)]
+    wd_sink54 = {cell_id(c).upper(): canon(rel(c[2])) for c in table_rows if c[4].lower() == "withdrawn"}
+    def cites54(n_: str, why: str) -> bool:
+        # a line of a file the target holds, within it, and not the withdrawn row's own sink: the code the reason rests on
+        own_ = wd_sink54.get(n_.upper())
+        for m_ in FILE_LINE_RX.finditer(why):
+            path_, _, ln_ = m_.group(0).rpartition(":")
+            n_l = target_lines(path_)
+            if n_l is None or not ln_.isdigit() or not 1 <= int(ln_) <= n_l:
+                continue
+            if own_ and canon(rel(m_.group(0))) == own_:
+                continue
+            return True
+        return False
+    bare54 = [n_ for n_, why in step6_54 if not cites54(n_, why)]
+    fix54 = ("a Step 6 withdrawal cites the `file:line` of the code its reason rests on, a line of a file the target holds and "
+             "never the row's own sink — a guard that stops the attack on every path and target, at its `file:line`; a "
+             "dependency's at the line of its code that shows it, never a version alone; operator self-harm or a test-only "
+             "caller at the line that shows it, such as the entry point the operator runs: "
+             + ", ".join(f"`{v_}`" for v_ in bare54[:4]) + (" …" if len(bare54) > 4 else "")
+             + " — its line reads `withdrawn: <worker record> — Step 6: <guard file:line> <one line>`, or the record is re-judged "
+             "as the rest of Step 6 gives") if bare54 else None
+    emit("withdrawn guards", f"{len(bare54)} Step 6 withdrawals citing no file:line (of {len(step6_54)})", None, not bare54, fix54)
 
     # 28. previous run residual — STEP 1 preserved the previous plan as previous-run-<started>/scan-plan.md and recorded its
     # last `recheck: mismatches` line as `previous run residual: <n> — <items>` (or `none` on a run with no earlier plan)
