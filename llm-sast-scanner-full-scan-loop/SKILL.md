@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.26.8"
+  version: "2.26.11"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -47,7 +47,9 @@ Run this PARTITIONED, not as one agent per lens.
 **STEP 1** — runs in this session, never in a subagent: its artifacts are what every worker and STEP 3 depend
 on, and a delegated cut cannot be checked by the session that dispatches against it. Build the scope manifest per
 the skill's D1, writing the manifest and partition files with redirected shell commands rather than composing them
-in a response. Then split the in-scope files into 3 partitions balanced by ATTACK SURFACE, not by line count
+in a response. D1's `architecture-threat-model.md` is written anew whenever the previous plan's `wrapper:` row differs
+from this run's, or the previous plan holds none, whatever D1's SHA gate allows: its entry points, stack and
+allowlist were read under rules this version changed. Then split the in-scope files into 3 partitions balanced by ATTACK SURFACE, not by line count
 alone. The manifest holds only what D1 leaves in scope: generated output derived from in-scope source — ORM
 snapshots and journals, build and bundle output, generated route trees — is excluded in `scope-excluded.txt`
 with its reason, never classified or partitioned, and so are the orchestrating runtime's own run logs and exported
@@ -57,9 +59,14 @@ infrastructure, CI and build code), `test` (test, fixture, mock and end-to-end t
 package manifests, lockfiles, editor and agent configuration). Count entry points per directory with STEP 2's entry-point
 definition — every registration of every kind that a caller can invoke: an operation (query, mutation,
 subscription, field resolver), a route or handler, a message consumer, a scheduled job, a command — plain HTTP routes
-included; a class, module, schema or container that only groups such registrations is not an entry point however it
+included; a direct call of a triggered function through its platform's invoke API is none (base skill, finding
+identity), and each triggered handler is read for a branch that, when the trigger's records are absent, goes on to
+process the event, that branch listed at its line, kind `direct-invocation branch`; a class, module, schema or
+container that only groups such registrations is not an entry point however it
 is registered, so two sessions deriving the list from one commit derive the same count — attributed to the directory
-of the file that registers it. This count balances the cut and nothing else, and the registrations themselves are written
+of the file that registers it. This count balances the cut and nothing else; the list is derived from the code at this
+run's commit, never copied from an earlier plan, threat model or helper script, each made under the rules its skill version held. The
+registrations themselves are written
 into `scan-plan.md` under a `## Entry points` heading, one line each as `<file:line> | <kind> | <name> | p<n>` with the partition holding the file (a bare `<n>` reads the same), so that STEP 3 can account for every one of them by name. The derivation table is a separate count:
 a family's row holds only the registrations of that family's own protocol or declaration, and a plain HTTP route
 belongs to no family, so it counts for the cut and for no row. The two totals are expected to differ; `scan-plan.md`
@@ -151,7 +158,7 @@ and the command run again. Before this run's `scan-plan.md` is written, an exist
 as it stands to `.llm-sast-scanner-cache/previous-run-<started>/scan-plan.md` (the directory created if absent; the stale
 worker files join it below), because writing this plan destroys it; its last `recheck: mismatches` line becomes this
 plan's row `previous run residual: <n> — <items>` — `previous run residual: 0` when that line listed no items (`0 — none`
-reads the same) — or `previous run residual: none` when no earlier plan existed. When the copy has no `recheck: mismatches` line at all — the previous run ended before its recheck set (stopped, killed or crashed) and so resolved nothing — its own `previous run residual:` row is copied forward unchanged as this plan's row. This run's `scan-plan.md` is then written
+reads the same) — or `previous run residual: none` when no earlier plan existed. When the copy has no `recheck: mismatches` line at all — the previous run ended before its recheck set (stopped, killed or crashed) and so resolved nothing — its own `previous run residual:` row is copied forward unchanged as this plan's row; a copy with neither that line nor that row — a plan an earlier version of this skill wrote, no `started:` or `workers dispatched:` row in it either — gives `previous run residual: none`. This run's `scan-plan.md` is then written
 anew: no dispatch, gate, wave, join or `recheck:` line of the previous run stays in it — those live in the copy — because
 the recheck reads the plan's dispatch lines, join line and rosters as this run's, and a plan edited in place carried a
 previous run's twenty-seven dispatch lines and twenty-nine recheck lines under a new header. `scan-plan.md` opens with the rows `invocation: <the skill invocation as given>`, `model: <the model this
@@ -557,7 +564,13 @@ defined, not interpreted:
 - `entry points`: registrations in hand-written source where data from outside the process is first handed to
   a handler — HTTP route and RPC method registrations, WebSocket / Socket.IO / SSE / WebTransport handler
   registrations, GraphQL operation and resolver declarations, message or queue consumer subscriptions,
-  model-callable tool and function declarations, CLI commands and scheduled jobs. Nothing else is an entry point:
+  model-callable tool and function declarations, CLI commands and scheduled jobs. A triggered handler's
+  `direct-invocation branch` (base skill, finding identity) is the one entry point that is no registration, counted
+  for the partition cut and for no derivation row; a function's trigger, a function URL, an HTTP or API integration
+  and an invoke grant to a principal outside the function's account or project count as registrations even where an
+  infrastructure file declares them, the URL, integration and grant each for the cut and for no derivation row; a
+  grant to a cloud service's own principal is part of the trigger that service is, and no entry point when no trigger
+  of the function uses it. Nothing else is an entry point:
   UI event props, goroutine or thread spawns, decode and parse calls, init functions, mocks, Kubernetes and IaC
   resources, CI jobs, Dockerfile stages and configuration files all count as zero. A registration counts once,
   for the family whose protocol or declaration it registers, on the side of the connection that runs in the
@@ -769,7 +782,9 @@ take two rows, and the line names them — and no id is on more rows than record
 row that is not withdrawn or gives a duplicate as its reason (a duplicate is `merged`), and every `unverifiable` row's
 `UNV-<nnn>` stands in the Unverifiable section; (33) `promoted rows` — no `promoted` row stands at the entry point, sink
 and class that a `withdrawn` or `unverifiable` row's worker record names in its own `Entry point:`, `File:` and
-`Reference:` lines, since that finding is the record's own row; (34) `withdrawn cells` — a `withdrawn` or
+`Reference:` lines, since that finding is the record's own row, and none stands at the entry point, sink and class
+of a `body` row — each entry point cell read as the `## Entry points` entry it names, an `unavailable` cell not
+read — since that is the body row's finding counted twice; (34) `withdrawn cells` — a `withdrawn` or
 `unverifiable` row's sink and class cells are its worker record's own `File:` and `Reference:`, so what was withdrawn
 stays readable in the table; (35) `dispatch lines late` — the appendix's `dispatch lines late: <n>` equals the
 first-attempt dispatch lines beneath each `wave <k>:` line timed at or after that wave's `complete` — a second line
@@ -965,7 +980,14 @@ or the partition. A record is one row, and a record's own finding is always that
 `body` row with its entry point, sink and class — never a `promoted` row: a `promoted` row is a STEP X or buried-sink
 promotion, or a finding at another entry point of a record that names several — a read trigger of a store a route or handler
 writes, named beside that writer, is a hop of its Flow (base skill, finding identity), never a promoted row, the
-grant-only writers' finding at that trigger excepted. Every cell holds exactly one of these: a worker record id, an entry
+grant-only writers' finding at that trigger excepted, and a direct call of a triggered function through its
+platform's invoke API is no entry point (base skill, finding identity), never a promoted row: its caller is named in
+the `Description:` of each finding the function's triggers open or hold as a hop. In this flow the `## Entry points` list fixes the entry points at
+dispatch: a handler's `direct-invocation branch` the list holds is an entry point of its own — when no worker filed
+its finding there, a promoted row of the record whose `Entry point:` is the direct call — and one STEP 1 did not list
+is named in the `Description:` of each finding the function's triggers open or hold as a hop this run, for the next
+run's STEP 1 to list. Every cell holds
+exactly one of these: a worker record id, an entry
 point (route, handler, tool or consumer name), a `path:line` sink, a class name, a disposition word, a verdict as
 defined below, or a VULN id;
 a cell holding anything else — a cross-reference, a placeholder, a blank, a description, a sink without its `:line`,
@@ -979,7 +1001,11 @@ defined below, is not a worker record's and carries its own word):
   entry point read as the `## Entry points` entry it names, never by its wording, so `POST /x (a.ts:20)` and
   `a.ts:20 — HTTP route — POST /x` are one — or it is the same defect as a `body` row by the **Duplicates** rule below;
   `body record` holds that row's VULN id. A record whose entry point differs from every `body` row is never
-  `merged`. Of two records that are one finding, the one of the higher worker severity is the `body` row and the other
+  `merged`. A record whose `Entry point:` is a direct call of a triggered function, or a `direct-invocation branch`
+  the list does not hold, names in its cell the entry point of the finding whose Flow holds the trigger it reads —
+  else the first of the function's trigger entries, in list order, with a `body` row at its sink and class, else the
+  first of them — and is one finding with that row, the next sentence choosing which record is the `body` row, or is
+  the `body` row when there is none. Of two records that are one finding, the one of the higher worker severity is the `body` row and the other
   is `merged` into it, so a block never reads below a record merged into it, except by the one level a `DOWNGRADED` or
   `DISPUTED` verdict on the block names — recheck item (51);
 - `withdrawn` — Step 6 returned WITHDRAWN, or Citation & Evidence Verification failed, and nothing else — a record that
@@ -2072,3 +2098,12 @@ sink several routes reach keeps every route; each carried block says on its seco
   isolation — groups nothing, as a test worker that folded a wrong-value bug under it showed); at its class each
   `Also at:` line is a key its record holds — re-found, never a row of its own — a grouped block in a newer report keeps
   the older per-line blocks from being carried back, and items (12), (40) and (46) read the line as (24) and (26) do.
+- **A direct call of a triggered function is no entry point of its own because one run filed sixty-eight findings that
+  way**: its writer gave every finding at a queue handler a second, promoted row at the handler's direct invocation —
+  four handlers, three of which read only the queue's records — and each promoted row stood at a body row's sink, class
+  and severity, so the report held a copy of each such finding with nothing added. The invoke API's caller holds only
+  the permission to invoke, as the queue's producer holds the permission to send, so it is named on the queue's
+  finding; a handler's own branch for an event without the queue's records stays an entry point, which STEP 1
+  lists, and item (33) reads each promoted row's entry point as
+  the list entry it names, so a promoted row at a body row's entry, sink and class reads as one finding counted twice.
+  Compared as written, the cells caught only the copy whose wording matched; the list is the authority.

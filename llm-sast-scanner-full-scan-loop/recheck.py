@@ -78,6 +78,7 @@ SKILLS = ["llm-sast-scanner-full-scan-loop", "llm-sast-scanner-convergence-loop"
 
 LINES: list[str] = []
 MISMATCHES: list[str] = []
+PLAN_CUT: dict[str, str] = {}  # a printed line whose hint carries it past LINE_LIMIT -> the line as the plan records it
 
 
 # one definition of a recorded gate line and of its verdict, shared by item 29 and by --prompt's precondition
@@ -181,7 +182,7 @@ def put_set(lines: list[str]) -> None:
             partial = bool(raw) and not raw.endswith(b"\n")  # a plan without its last newline gets one first
             first = raw.count(b"\n") + (1 if partial else 0) + 1
             with open(plan_p, "ab") as fh:
-                fh.write((b"\n" if partial else b"") + (text + "\n").encode("utf-8"))
+                fh.write((b"\n" if partial else b"") + ("\n".join(PLAN_CUT.get(l, l) for l in lines) + "\n").encode("utf-8"))
             sets, lone = count_sets(plan_p.read_bytes().decode("utf-8", "replace"))
         except OSError as exc:
             sys.stderr.write(f"recorded: nothing — the set could not be appended to .llm-sast-scanner-cache/scan-plan.md ({type(exc).__name__}: {exc}); its lines follow, unrecorded\n")
@@ -209,7 +210,15 @@ def put_set(lines: list[str]) -> None:
 def emit(item: str, recomputed: str, reported: str | None, ok: bool, fix: str | None = None) -> None:
     rep = f" vs reported {reported}" if reported is not None else ""
     hint = f" | fix: {fix}" if fix and not ok else ""
-    LINES.append(f"recheck: {item} {recomputed}{rep}{hint} — {CMD}")
+    head, tail = f"recheck: {item} {recomputed}{rep}", f" — {CMD}"
+    LINES.append(head + hint + tail)
+    # a recorded set is read with a file reader, which cuts a line at LINE_LIMIT bytes: the plan's copy of a line whose
+    # hint carries it past the limit has the hint cut, at a character, with `…` — what was recomputed, what was reported
+    # and the command are never cut, and a line whose other parts leave no room for ` | fix: …` is recorded whole. The
+    # printed line keeps its whole hint: the writer and a repair read the printed lines
+    room = LINE_LIMIT - len((head + tail).encode("utf-8", "replace"))
+    if len(hint.encode("utf-8", "replace")) > room >= len(" | fix: …".encode("utf-8")):
+        PLAN_CUT[head + hint + tail] = head + hint.encode("utf-8", "replace")[:room - len("…".encode("utf-8"))].decode("utf-8", "ignore") + "…" + tail
     if not ok:
         MISMATCHES.append(item)
 
@@ -2545,8 +2554,57 @@ def main() -> int:
             hit = next((pr for pr in pr_sites if pr[0] == site[0] and pr[3] in site[2] and any(same_file(pr[1], f_) and abs(pr[2] - n_) <= 3 for f_, n_ in site[1])), None)
             if hit:
                 shadowed.append((cell_id(c), hit[4], f"{site[1][0][0]}:{site[1][0][1]}", site[2][0]))
-    emit("promoted rows", f"{len(promoted_rows)} | at a withdrawn or unverifiable record's own entry point, sink and class {len(shadowed)}", None, not shadowed,
-         (f"{', '.join(f'`{b_}` stands at `{a_}`' + chr(39) + f's own entry point, sink `{s_}` and class `{k_}`' for a_, b_, s_, k_ in shadowed[:3])}{' …' if len(shadowed) > 3 else ''} — a worker record's own finding is its own row: that row is `body` with the finding's VULN id and the promoted row goes; a promoted row is a STEP X or buried-sink promotion, or another entry point of a multi-route record") if shadowed else None)
+    # a promoted row stands at an entry point no body row at its sink and class stands at: one whose entry point cell
+    # names a body row's `## Entry points` entry, at the same sink line and class, counts that row's finding twice. The
+    # list is the authority: a direct call of a triggered function is no entry of its own unless the list holds its
+    # handler's `direct-invocation branch` (base skill, finding identity), so a cell naming the function's
+    # direct call reads as its trigger's entry when it names one — a name two list entries share reads as the cell
+    # itself, a miss and never a flag; two cells that name none (`unavailable`) are not read
+    body33 = {}
+    for c in table_rows:
+        m_b = re.search(r"([^\s`|:,;]+):(\d+)", re.sub(r"[`*]", "", c[2])) if c[4].lower() == "body" and not unavail(c[1]) else None
+        if m_b:
+            body33.setdefault((ep_id(c[1]), rel(m_b.group(1)).lstrip("./"), int(m_b.group(2)), c[3].strip("` ").lower()), c[6])
+    pr33 = []
+    for c in promoted_rows:
+        m_s = re.search(r"([^\s`|:,;]+):(\d+)", re.sub(r"[`*]", "", c[2])) if not unavail(c[1]) else None
+        if m_s:
+            pr33.append(((ep_id(c[1]), rel(m_s.group(1)).lstrip("./"), int(m_s.group(2)), c[3].strip("` ").lower()), c[6]))
+    twin33 = [(p_, body33[k_]) for k_, p_ in pr33 if k_ in body33 and body33[k_].upper() != p_.upper()]
+    # a promoted cell names its entry as the list does: one citing only files of the target that do not hold the list
+    # entry it is read as — found by its name alone — names a direct call or another unlisted part of a listed function;
+    # both sides compared target-relative, a leading `./` or dot dropped from each, and a cited host:port or URL no file
+    offlist33 = []
+    for c in promoted_rows:
+        if unavail(c[1]):
+            continue
+        e_ = ep_id(c[1])
+        cited_ = [rel(m_.group(1)).lstrip("./") for m_ in re.finditer(r"([\w./-]+\.\w+):(\d+)", re.sub(r"\s+", " ", c[1].replace("`", "")))]
+        cited_ = [f_ for f_ in cited_ if f_ and (target / f_).is_file()]
+        if isinstance(e_, tuple) and cited_:
+            ef_ = e_[0].lstrip("./")
+            if not any(ef_ == f_ or ef_.endswith("/" + f_) for f_ in cited_):
+                offlist33.append((c[6], cited_[0], f"{e_[0]}:{e_[1]}"))
+    off_ids33 = {o_[0].upper() for o_ in offlist33}
+    # two promoted rows at one entry, sink and class are one finding twice as well: the first in table order stands, a
+    # row whose cell names its entry as the list does before one citing a line no list entry holds
+    first33, ptwin33 = {}, []
+    for k_, p_ in sorted(pr33, key=lambda t_: t_[1].upper() in off_ids33):
+        if k_ in body33:
+            continue  # read against the body row above
+        if k_ in first33 and first33[k_].upper() != p_.upper():
+            ptwin33.append((p_, first33[k_]))
+        first33.setdefault(k_, p_)
+    emit("promoted rows", f"{len(promoted_rows)} | at a withdrawn or unverifiable record's own entry point, sink and class {len(shadowed)}"
+         + (f" | at a body row's entry point, sink and class {len(twin33)}" if twin33 else "")
+         + (f" | at another promoted row's entry point, sink and class {len(ptwin33)}" if ptwin33 else "")
+         + (f" | citing a line no list entry holds {len(offlist33)}" if offlist33 else ""), None, not shadowed and not twin33 and not ptwin33 and not offlist33,
+         "; ".join(x_ for x_ in (
+             (f"{', '.join(f'`{b_}` stands at `{a_}`' + chr(39) + f's own entry point, sink `{s_}` and class `{k_}`' for a_, b_, s_, k_ in shadowed[:3])}{' …' if len(shadowed) > 3 else ''} — a worker record's own finding is its own row: that row is `body` with the finding's VULN id and the promoted row goes; a promoted row is a STEP X or buried-sink promotion, or another entry point of a multi-route record") if shadowed else "",
+             (f"{', '.join(f'promoted `{p_}` stands at body `{b_}`' + chr(39) + 's entry point, sink and class' for p_, b_ in twin33[:3])}{' …' if len(twin33) > 3 else ''} — one finding counted twice: an entry point cell is read as the `## Entry points` entry it names, and a direct call of a triggered function is no entry of its own (a `direct-invocation branch` the list holds is one) — the promoted row goes, with its block, its caller named in the body block's `Description:`; a body row whose worker record names the promoted row's entry beside another takes that other one in its cell") if twin33 else "",
+             (f"{', '.join(f'promoted `{p_}` stands at promoted `{b_}`' + chr(39) + 's entry point, sink and class' for p_, b_ in ptwin33[:3])}{' …' if len(ptwin33) > 3 else ''} — one finding counted twice: the first stands and the other goes, with its block") if ptwin33 else "",
+             (f"{', '.join(f'promoted `{p_}` cites `{f_}`, a file that does not hold its `## Entry points` entry `{e_}`' for p_, f_, e_ in offlist33[:3])}{' …' if len(offlist33) > 3 else ''} — a promoted row's cell names its entry as the list does: write it as that entry, its `<file:line>` and name, or as the `direct-invocation branch` the list holds; a direct call of a triggered function is no entry of its own (its caller named in the `Description:` of the trigger's finding), so its finding is the trigger's row") if offlist33 else "",
+         ) if x_) or None)
 
     # 34. withdrawn cells — a withdrawn or unverifiable row's sink and class cells are its record's own `File:` and
     # `Reference:`, so what was withdrawn stays readable; a row whose cells were replaced says nothing of its finding
@@ -3338,7 +3396,9 @@ def main() -> int:
             return pe_norm_memo[k_]
         for b in carried_blocks:
             bad_b = citations_of(b)[1]
-            lab = re.search(r"^Carried: confirmed (\S+) at (\S+) — not re-judged this run — source (\S+)", b, re.M)
+            # the row's `last-verified` cell is copied as the ledger holds it, spaces and all — one writer keeps it as
+            # `<sha> <date>` — so the value runs, shortest first, to the ` at <sha> — not re-judged` that follows it
+            lab = re.search(r"^Carried: confirmed (\S.*?) at (\S+) — not re-judged this run — source (\S+)", b, re.M)
             crow = next((c for c in carried_rows if c[6].upper() == RECORD_RX.match(b).group(2).upper()), None)
             key = corrected_key(crow[3], crow[2]) if crow else None  # canonical, class-corrected: a range or title-class cell still names the key
             newest, cands = (cand[key] if key in cand else key_candidates(key)) if key else (None, [])
@@ -3380,7 +3440,9 @@ def main() -> int:
                     got = re.search(r"^Carried:.*$", b, re.M)
                     unver26.append(f"`{bid26}` " + (f"reads `{got.group(0)[:160]}`" if got else "has no `Carried:` line") + f" where it reads `Carried: confirmed {want_lv or '<the copy row' + chr(39) + 's last-verified>'} at {base_sha} — not re-judged this run — source {newest}`")
                 else:
-                    diff = ([f"date {lab.group(1)} where the copy row's `last-verified` reads {want_lv}" if want_lv else f"date {lab.group(1)} where the copy holds no `last-verified` cell for `{key}`"] if lab.group(1) not in lv_cells else []) \
+                    # the value runs to the label's ` at `, spaces and all: one past 100 characters is quoted cut, the hint line under the reader's limit
+                    lv26 = lab.group(1) if len(lab.group(1)) <= 100 else lab.group(1)[:98] + "…"
+                    diff = ([f"date {lv26} where the copy row's `last-verified` reads {want_lv}" if want_lv else f"date {lv26} where the copy holds no `last-verified` cell for `{key}`"] if lab.group(1) not in lv_cells else []) \
                         + ([f"sha {lab.group(2)} where base-sha reads {base_sha}"] if lab.group(2) != base_sha else []) \
                         + ([f"source {lab.group(3)} where the newest listed report holding a block of `{key}` that is a source is {newest}"
                              + (" — the report it names is of another commit, its `Base SHA:` not this run's base-sha" if lab.group(3) in src_blocks and lab.group(3) not in src26 else "")] if lab.group(3) != newest else [])
@@ -4435,8 +4497,14 @@ def main() -> int:
     prev_dir_exists = prev_dir_exists or prior_run
     # a copy is the previous plan as it stood: its own `started:` earlier than this run's, and — when that run's report was
     # written — more than the at-dispatch copy it took (a plan copied at dispatch holds no line the run wrote after it)
+    # a plan an earlier version of this skill wrote holds none of the rows this flow's STEP 1 writes — no `started:`, no
+    # `workers dispatched:`, no `recheck:` set and no residual row — so it resolved nothing this flow reads: its residual
+    # is `none`, and its missing `started:` proves nothing about the copy. A cache holding an earlier stamped run (item
+    # 16's at-dispatch copies and previous-run directories) came after that version, so a copy there without those rows
+    # is a skeleton, not an earlier version's plan
+    legacy28 = bool(prev_plan) and not older_ and not re.search(r"(?m)^(?:started:|workers dispatched:|recheck: mismatches|previous run residual:)", prev_plan)
     copy_fake = None
-    if prev_plan and started:
+    if prev_plan and started and not legacy28:
         ps_m = re.search(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", row(prev_plan, "started:") or "")
         if not ps_m or ps_m.group(0) >= started:
             copy_fake = f"its `started:` {ps_m.group(0) if ps_m else 'is absent'}{' is not earlier than this run' if ps_m else ''}"
@@ -4461,6 +4529,8 @@ def main() -> int:
         n_res, items_res = None, set()
         expected_res = ("copy present, recheck line unreadable" if has_mm_line else "copy present, no recheck set and no residual row") if prev_plan else (("copy absent" + (f" — the cache holds an earlier run's files ({'from ' + prev_stamp if prev_stamp else str(len(old_files)) + ' older than started:'}), so its plan was overwritten, not copied to previous-run-{started}/" if prior_run else "")) if prev_dir_exists else "none")
     inherited = row(prev_plan, "previous run residual:") if (prev_plan and not last_mm and not has_mm_line) else None
+    if legacy28:
+        expected_res = "none (an earlier version's plan: no recheck set, no residual row)"
     row_res = row(plan, "previous run residual:")
     def res_parse(text: str | None):
         """`<n>` and its items (after ` — `), or None; a trailing parenthetical or note after the count is ignored, and so is
@@ -4487,6 +4557,8 @@ def main() -> int:
         else:
             expected_res = f"{inherited} (inherited: the copy has no recheck set)"
             res_ok = (row_res or "").strip().lower().split()[:1] == inherited.strip().lower().split()[:1]  # the word itself, decoration aside
+    elif legacy28:
+        res_ok = re.match(r"^none\b", (row_res or "").strip().lower()) is not None  # `0 — none` would claim a set it never recorded
     elif prev_plan or prev_dir_exists:
         res_ok = False  # an earlier plan existed and its residual could not be read: the copy is missing, or its recheck line does not parse
     else:
@@ -4503,14 +4575,29 @@ def main() -> int:
     stale_ok = (not prior_run or (stale_v is not None and stale_v == stale_dir)) and not stale_left
     if copy_fake:
         res_ok = False
+    # D1 keeps architecture-threat-model.md across a re-scan at an unchanged commit; in this flow STEP 1 writes it anew
+    # when the previous plan's `wrapper:` row differs from this run's (or it holds none), its entry points read under
+    # rules the new version changed — one run built its entry list from such a kept model and missed a listed kind
+    tm28 = None
+    tm_p28 = cache / "architecture-threat-model.md"
+    # the rule holds from the wrapper version that wrote it: a run whose plan names an earlier version kept the model rightly
+    v28_ = re.search(r"v(\d+)\.(\d+)\.(\d+)", row(plan, "wrapper:") or "")
+    rule28 = bool(v28_) and tuple(int(x_) for x_ in v28_.groups()) >= (2, 26, 11)
+    if rule28 and prev_plan and not copy_fake and st_ts16 is not None and tm_p28.exists():
+        pw_, tw_ = (row(prev_plan, "wrapper:") or "").strip(), (row(plan, "wrapper:") or "").strip()
+        if pw_ != tw_:
+            t_ = mtime_of(tm_p28)
+            if t_ is not None and t_ < st_ts16:
+                tm28 = (pw_ or "none", tw_ or "none")
     hint28 = [x_ for x_ in (
         f"the previous run's plan is copied as it stands to previous-run-{started}/scan-plan.md before this plan is written, and its last `recheck: mismatches` line becomes `previous run residual:`" if (prior_run and not prev_plan) else "",
         f"the copy in previous-run-{started}/ is not the previous plan as it stood — {copy_fake}" if copy_fake else "",
         f"`stale worker files moved: <n>` counts the earlier worker files moved into previous-run-{started}/ — every `deep-*-results.md` older than `started:`" + (f", {len(stale_left)} still in the cache (first `{stale_left[0]}`)" if stale_left else f", {stale_dir} there") if not stale_ok else "",
-        f"`previous run residual:` reads the copy's last `recheck: mismatches` line: `{expected_res}`" if (not res_ok and prev_plan and not copy_fake) else "") if x_]
-    emit("previous run residual", expected_res + (f" | copy not the previous plan: {copy_fake}" if copy_fake else "") + (f" | stale worker files moved {stale_v if stale_v is not None else 'absent'}, {stale_dir} in previous-run-{started}/" if prior_run else "") + (f" | earlier worker files left in the cache {len(stale_left)}" if stale_left else ""),
-         row_res if row_res is not None else "absent", res_ok and stale_ok,
-         None if (res_ok and stale_ok) or not hint28 else "a STEP 1 line: " + "; ".join(hint28))
+        ("a copy an earlier version of this skill wrote — no `started:`, `workers dispatched:`, recheck set or residual row — gives `previous run residual: none`" if legacy28 else f"`previous run residual:` reads the copy's last `recheck: mismatches` line: `{expected_res}`") if (not res_ok and prev_plan and not copy_fake) else "",
+        f"the skill version changed since `architecture-threat-model.md` was written (`{tm28[0]}` → `{tm28[1]}`): STEP 1 writes it anew and derives the entry list from the code" if tm28 else "") if x_]
+    emit("previous run residual", expected_res + (f" | copy not the previous plan: {copy_fake}" if copy_fake else "") + (" | threat model kept across a version change" if tm28 else "") + (f" | stale worker files moved {stale_v if stale_v is not None else 'absent'}, {stale_dir} in previous-run-{started}/" if prior_run else "") + (f" | earlier worker files left in the cache {len(stale_left)}" if stale_left else ""),
+         row_res if row_res is not None else "absent", res_ok and stale_ok and not tm28,
+         None if (res_ok and stale_ok and not tm28) or not hint28 else "a STEP 1 line: " + "; ".join(hint28))
 
     # 29. uncovered partitions — roster pairs whose worker file is absent or does not end with a complete sentinel, against the
     # plan's `worker not run:` lines and the report's `uncovered:` lines; no pair may hold more than three dispatch lines
