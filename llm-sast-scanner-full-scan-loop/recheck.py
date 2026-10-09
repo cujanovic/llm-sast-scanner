@@ -82,14 +82,14 @@ PLAN_CUT: dict[str, str] = {}  # a printed line whose hint carries it past LINE_
 
 
 # one definition of a recorded gate line and of its verdict, shared by item 29 and by --prompt's precondition
-GATE_LINE_RX = re.compile(r"^gate: ([a-z-]+/p\d+) — header (ok|fail) \| pinned (ok|fail) \| phrase (ok|fail) \| sentinel (absent|files ([\d,]+)/([\d,]+) lines ([\d,]+)/([\d,]+) passes (\d+)) \| paths (\d+)/(\d+) resolve \| headings (\d+)/(\d+) \| absolute (\d+) \| references (\d+)/(\d+)(?: \| entry pipes (\d+))?(?: \| copied (?:(\d+)%(?: from \S+)?|n/a))?(?: \| digest ([0-9a-f]{12}|unreadable))?(?: \| long lines (\d+))?", re.M)
+GATE_LINE_RX = re.compile(r"^gate: ([a-z-]+/p\d+) — header (ok|fail) \| pinned (ok|fail) \| phrase (ok|fail) \| sentinel (absent|files ([\d,]+)/([\d,]+) lines ([\d,]+)/([\d,]+) passes (\d+)) \| paths (\d+)/(\d+) resolve \| headings (\d+)/(\d+) \| absolute (\d+) \| references (\d+)/(\d+)(?: \| entry pipes (\d+))?(?: \| copied (?:(\d+)%(?: from \S+)?|n/a))?(?: \| digest ([0-9a-f]{12}|unreadable))?(?: \| long lines (\d+))?(?: \| groups (\d+)/(\d+))?", re.M)
 COPY_CAP = 80  # a worker file whose prose is this share of an earlier run's file of its pair is that file, not this run's
 
 
 def gate_line_passes(line: str) -> bool | None:
     """A recorded `gate:` line's verdict by the gate rule (None when the line does not parse): every field `ok`, the sentinel
     at full coverage with passes, paths all resolving (`0/0` failing on a file with records), headings and references full,
-    and, on a line that carries them, a `copied` share below COPY_CAP and `long lines 0`."""
+    and, on a line that carries them, a `copied` share below COPY_CAP, `long lines 0` and `groups` at its full count."""
     g = GATE_LINE_RX.match(line.strip())
     if not g:
         return None
@@ -104,15 +104,18 @@ def gate_line_passes(line: str) -> bool | None:
         return False
     if g.group(21) and int(g.group(21)) > 0:
         return False  # a line over the reader's limit: the writer reads only its start
+    if g.group(22) and int(g.group(22)) < int(g.group(23)):
+        return False  # a group's `Also at:` line naming another record's own sink at its class and entry point
     return not ((km > 0 and k < km) or (km == 0 and s > 0) or s < sm or r < rm_)
 
 def gate_line_diff(recorded: str, now: str) -> list[str]:
     """What a recorded `gate:` line read in its worker file that the file's gate line now does not — the file changed after
     it was gated. Read: the file's digest (its bytes' SHA-256), then the counts its text decides, which say what changed —
     its sentinel, records (`m`), headings, absolute paths, references, entry pipes and long lines. Not read: the header, pinning and
-    phrase, which follow the skills and the plan, the resolving paths, which follow the checkout, and `copied`, which
-    follows the earlier runs' directories — within one run these do not move, and a later reading under other skills or
-    another checkout would name a change the file never had. A line written before a field existed is read by the
+    phrase, which follow the skills and the plan, the resolving paths, which follow the checkout, `copied`, which
+    follows the earlier runs' directories, and `groups`, which follows the plan's entry list and the skills' references —
+    within one run these do not move, and a later reading under other skills or another checkout would name a change the
+    file never had; the digest names any change of the text. A line written before a field existed is read by the
     fields it has."""
     a, b = GATE_LINE_RX.match(recorded.strip()), GATE_LINE_RX.match(now.strip())
     if not a or not b:
@@ -138,10 +141,17 @@ def gate_line_diff(recorded: str, now: str) -> list[str]:
 
 
 def gate_line_as(recorded: str, now: str) -> str:
-    """The file's gate line now, read by the fields the recorded line has: a line written before `long lines` existed is
-    judged without it, as every later field is."""
+    """The file's gate line now, read by the fields the recorded line has: a line written before `long lines` or
+    `groups` existed is judged without it, as every later field is."""
     a = GATE_LINE_RX.match(recorded.strip())
-    return re.sub(r" \| long lines \d+\s*$", "", now.strip()) if a and a.group(21) is None else now
+    if not a:
+        return now
+    now_ = now.strip()
+    if a.group(22) is None:
+        now_ = re.sub(r" \| groups \d+/\d+\s*$", "", now_)
+    if a.group(21) is None:
+        now_ = re.sub(r" \| long lines \d+\s*$", "", now_)
+    return now_ if now_ != now.strip() else now
 
 
 def pathlib_name(name) -> str:
@@ -423,6 +433,155 @@ def also_sinks(text: str, file_path: str | None = None) -> list[tuple[str, int, 
         cont_ = False
     return out_
 
+
+
+# one missing check's group and a line that is its own finding: STEP 2 reads, in each worker file (the gate's `groups`
+# field) and across them (`--overlaps`), every record whose `Also at:` line names a sink that another record holds as its
+# own `File:` sink at one class and entry point — one defect counted twice, or a line that needs a fix of its own on a
+# group's line (base skill, Deduplication & Sink Location). Two runs' workers put decoder-depth sinks on a schema
+# group's `Also at:` line and stopped at STEP 3 on it; a third run merged such a finding into the group and read clean.
+EP_IDENT = r"[A-Za-z_$][\w$]*"
+REC_HEAD_RX = re.compile(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]\**\s+\**(VULN-[A-Za-z0-9-]*\d)", re.I)
+ANY_HEAD_RX = re.compile(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*|CONFIRMED|LIKELY)\]", re.I)
+
+
+def entry_list(plan: str) -> list:
+    """The scan-plan's `## Entry points` list, as item (4) reads it: (path, line, the name field's last identifier, the
+    name field's words, a pattern finding those words whole — compiled once: lists of 700 entries outrun `re`'s cache)."""
+    sec = plan.split("## Entry points", 1)[1].split("\n## ", 1)[0] if "## Entry points" in plan else ""
+    out = []
+    for l in sec.splitlines():
+        f = l.split(" | ")
+        m = re.match(r"^(.+):(\d+)", f[0].strip().lstrip("|").strip().strip("`")) if len(f) >= 3 and not l.startswith("#") else None
+        if m:
+            ids = re.findall(EP_IDENT, f[2])
+            nm = " ".join(f[2].replace("`", "").split())
+            out.append((m.group(1), int(m.group(2)), ids[-1] if ids else None, nm, re.compile(r"(?<![\w$])" + re.escape(nm) + r"(?![\w$])") if nm else None))
+    return out
+
+
+def entry_at(cell: str, entries: list):
+    """The list entry a record's `Entry point:` names, as (path, line) — item (4)'s reading: a cited `file:line` as the
+    entry at it or up to three lines below it in that file, else a name only one entry's last identifier is — and, where
+    that name is several entries', the one of them whose whole name field the text holds (`QueueA Events`, whose last
+    word `QueueB Events` shares). The text itself when it names none."""
+    c = re.sub(r"\s+", " ", cell.replace("`", "")).strip()
+    for m in re.finditer(r"([\w./-]+\.\w+):(\d+)", c):
+        cited, ln = m.group(1).lstrip("./"), int(m.group(2))
+        paths = {e[0] for e in entries if e[0] == cited or e[0].endswith("/" + cited)}
+        if len(paths) != 1:
+            continue
+        near = [e for e in entries if e[0] in paths and e[1] <= ln + 3]
+        if near:
+            e = next((x for x in near if x[1] == ln), None) or max(near, key=lambda e: e[1])
+            return (e[0], e[1])
+    words = set(re.findall(EP_IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c)))
+    named = {(e[0], e[1]) for e in entries if e[2] in words}
+    if len(named) == 1:
+        return next(iter(named))
+    whole = {(e[0], e[1]) for e in entries if (e[0], e[1]) in named and e[4] is not None and e[4].search(c)}
+    return next(iter(whole)) if len(whole) == 1 else c
+
+
+def worker_records(text: str, stems: set, roots: tuple = ()) -> list:
+    """Each finding record of a worker file, read as `record_also` reads one — from its severity heading to the next
+    record heading, a `#` to `###` heading or the sentinel, outside fenced code — as a dict: `id`, `line` (its heading's
+    line number), `sink` (its `File:` line's first `path:line`, first line, `./` and a target root dropped) or None,
+    `entry` (its `Entry point:` text) or None, `cls` (the first base-skill reference its `Reference:` line names, the
+    first name when it names none) or None, and `also` (the sinks its `Also at:` lines name, each by its first line)."""
+    def norm(p_: str) -> str:
+        p_ = re.sub(r"^(?:\./)+", "", rel(p_.strip()))
+        return next((p_[len(r_) + 1:] for r_ in roots if r_ and p_.startswith(r_ + "/")), p_)
+    lines_ = text.splitlines()
+    heads_ = [i for i, l in enumerate(lines_) if ANY_HEAD_RX.match(l)]
+    head_set = set(heads_)
+    fenced_ = set()
+    for a_, b_ in zip([0] + heads_, heads_ + [len(lines_)]):
+        marks_ = [i for i in range(a_, b_) if FENCE_RX.match(lines_[i])]
+        if len(marks_) % 2:
+            marks_ = marks_[:-1]
+        for x_, y_ in zip(marks_[::2], marks_[1::2]):
+            fenced_.update(range(x_, y_ + 1))
+    out, cur = [], None
+    for i, l in enumerate(lines_):
+        if i in head_set:
+            h_ = REC_HEAD_RX.match(l)
+            cur = {"id": h_.group(2), "line": i + 1, "sink": None, "file": None, "entry": None, "cls": None, "also": []} if h_ else None
+            if cur:
+                out.append(cur)
+            continue
+        if i in fenced_ or cur is None:
+            continue
+        if re.match(r"^#{1,3} |^<!-- LLM-SAST-COMPLETE", l):
+            cur = None
+            continue
+        f_l = re.match(r"^\**Files?:\**\s*(.+)$", l)
+        if f_l and cur["sink"] is None:
+            # the path as `record_also` reads it, so `app/(auth)/page.tsx:20` keeps its route-group directory; the
+            # first `path:line` anywhere on the line only when the line does not open with one
+            s_ = (re.match(r"`?([^\s`|:,;]+):(\d+)", re.sub(r"\*", "", f_l.group(1)).strip())
+                  or re.search(r"([^\s|:,;()]+):(\d+)", re.sub(r"[`*]", "", f_l.group(1))))
+            if s_:
+                cur["file"] = norm(s_.group(1))
+                cur["sink"] = f"{cur['file']}:{s_.group(2)}"
+        e_ = re.match(r"^\s*(?:[-*+]\s+)?\**Entry points?\**\s*:\**\s*(.+)$", l, re.I)
+        if e_ and cur["entry"] is None:
+            cur["entry"] = e_.group(1).strip()
+        r_ = re.match(r"^\**Reference:\**\s*(.+)$", l)
+        if r_ and cur["cls"] is None:
+            names_ = re.findall(r"(?:^|[/\s,(])([a-z0-9_]+)\.md\b", re.sub(r"[`*]", "", r_.group(1)))
+            named_ = [n_ for n_ in names_ if n_ in stems] or names_
+            cur["cls"] = named_[0] if named_ else None
+        a_ = ALSO_RX.match(l)
+        if a_:
+            cur["also"] += [f"{norm(p_)}:{n_}" for p_, n_, _ in also_sinks(a_.group(1), cur["file"])]
+    return out
+
+
+def entry_key(rec: dict, entries: list):
+    """A record's entry point: the list entry it names, else its words; None when it names none (`unavailable`)."""
+    e = rec.get("entry")
+    if not e:
+        return None
+    k = entry_at(e, entries)
+    if isinstance(k, tuple):
+        return k
+    w = " ".join(re.sub(r"[`*]", "", e).lower().split()).strip(" .")
+    return None if w in ("", "unavailable", "n/a", "none", "unknown", "-", "—") else w
+
+
+def overlap_files(cache: Path, plan: str) -> list:
+    """The worker files `--overlaps` reads: the wave rosters' pairs' files, as the gate reads them — every
+    `deep-<lens>-p<n>-results.md` of the cache when the plan holds no roster — so a stray file is no worker's."""
+    pairs = [pr for _, body in re.findall(r"^wave roster (\d+):\s*(.*)$", plan, re.M) for pr in re.findall(r"[a-z-]+/p\d+", body)]
+    if pairs:
+        return [q for q in (cache / "deep-{}-{}-results.md".format(*pr.split("/", 1)) for pr in dict.fromkeys(pairs)) if q.is_file()]
+    return sorted(q for q in cache.glob("deep-*-results.md") if re.match(r"^deep-(.+)-(p\d+)-results\.md$", q.name))
+
+
+def own_sink_aliases(recs_by_file: dict, entries: list, cross: bool) -> list:
+    """(file A, record A, file B, record B, sink): record B's own `File:` sink stands on record A's `Also at:` line at one
+    class and entry point — within one file (`cross` False) or in two (`cross` True). A record naming no class or no
+    entry point is read by neither side."""
+    if not any(r_["also"] for recs_ in recs_by_file.values() for r_ in recs_):
+        return []  # no group: nothing to read, and a 700-entry list is not resolved for nothing
+    at_ = {}
+    for f_, recs_ in recs_by_file.items():
+        for r_ in recs_:
+            k_ = entry_key(r_, entries)
+            if r_["sink"] and r_["cls"] and k_ is not None:
+                at_.setdefault((r_["cls"], k_, r_["sink"]), []).append((f_, r_))
+    out = []
+    for f_, recs_ in recs_by_file.items():
+        for r_ in recs_:
+            k_ = entry_key(r_, entries)
+            if not r_["cls"] or k_ is None:
+                continue
+            for s_ in dict.fromkeys(r_["also"]):
+                for fo_, o_ in at_.get((r_["cls"], k_, s_), []):
+                    if o_ is not r_ and (fo_ != f_) == cross:
+                        out.append((f_, r_, fo_, o_, s_))
+    return out
 
 def cited_locations(block: str) -> list[tuple[list[str], int, int, str, str]]:
     """Every `path:line`, `path:line-line`, `path:line,line` and `path:line:col` a block's `File:` and `Flow:` lines cite, as
@@ -778,6 +937,7 @@ def gate_lines(target: Path, cache: Path, plan: str, skills: Path | None, only: 
     plan_target = corrected_str(plan, "target:")  # as the run last stated it, like the base-sha beside it
     plan_sha = plan_base_sha(plan) or ""
     start = corrected(plan, "ledger rows at start:")
+    ep_list_g = entry_list(plan)
     pairs = [pr for _, body in re.findall(r"^wave roster (\d+):\s*(.*)$", plan, re.M) for pr in re.findall(r"[a-z-]+/p\d+", body)]
     if not pairs:
         pairs = sorted(f"{m_.group(1)}/{m_.group(2)}" for m_ in (re.match(r"^deep-(.+)-(p\d+)-results\.md$", q.name) for q in cache.glob("deep-*-results.md")) if m_)
@@ -873,9 +1033,15 @@ def gate_lines(target: Path, cache: Path, plan: str, skills: Path | None, only: 
             dg = "unreadable"
         # a line over the reader's limit outside a fenced code block: the writer reads only its start
         ll = len(long_text_lines(text))
-        ok = header_ok and pinned_ok and phrase_ok and sent_ok and paths_ok and s >= m_ and r >= m_ and (c is None or c < COPY_CAP) and ll == 0
+        # the records whose `Also at:` line names a sink and those of them naming no other record's own `File:` sink in
+        # this file at their class and entry point — such a line is one finding filed twice or a line of its own on a group
+        recs_g = worker_records(text, stems, tuple(sorted(roots, key=len, reverse=True)))
+        grp_ = [r_ for r_ in recs_g if r_["also"]]
+        bad_g = {id(a_) for _, a_, _, _, _ in own_sink_aliases({f.name: recs_g}, ep_list_g, False)}
+        gk, gg = sum(1 for r_ in grp_ if id(r_) not in bad_g), len(grp_)
+        ok = header_ok and pinned_ok and phrase_ok and sent_ok and paths_ok and s >= m_ and r >= m_ and (c is None or c < COPY_CAP) and ll == 0 and gk == gg
         all_ok = all_ok and ok
-        out.append(f"gate: {pair} — header {'ok' if header_ok else 'fail'} | pinned {'ok' if pinned_ok else 'fail'} | phrase {'ok' if phrase_ok else 'fail'} | {sent} | paths {k}/{m_} resolve | headings {s}/{m_} | absolute {a} | references {r}/{m_} | entry pipes {e} | copied " + ("n/a" if c is None else f"{c}%" + (f" from {c_from}" if c else "")) + f" | digest {dg} | long lines {ll}")
+        out.append(f"gate: {pair} — header {'ok' if header_ok else 'fail'} | pinned {'ok' if pinned_ok else 'fail'} | phrase {'ok' if phrase_ok else 'fail'} | {sent} | paths {k}/{m_} resolve | headings {s}/{m_} | absolute {a} | references {r}/{m_} | entry pipes {e} | copied " + ("n/a" if c is None else f"{c}%" + (f" from {c_from}" if c else "")) + f" | digest {dg} | long lines {ll} | groups {gk}/{gg}")
     return all_ok, out
 
 
@@ -1331,6 +1497,22 @@ def prompt_lines(path: Path, skills: Path, cache: Path | None = None) -> tuple[b
                                                        f"{err_g} `gate: error` line(s), after running the gate again with `--skills <skills root>`" if err_g else "") if x))
             if failing_g:
                 missing.append("a passed gate for " + ", ".join(failing_g) + " — STEP 3 does not start while a worker file fails its gate and its pair is not recorded `worker not run:`")
+            # STEP 2's last reading of the worker files against each other, from the version that added it: its
+            # `overlaps:` line, copied as printed, counts what `--overlaps` counts in the files now
+            v_o = re.search(r"v(\d+)\.(\d+)\.(\d+)", corrected_str(plan_g, "wrapper:") or "")
+            late_o = wp_g is not None and any(_mg(p_) > wp_g + 1 for p_ in pairs_g)  # a repair's prompt over files changed since the writer's: item (29)'s
+            if v_o and tuple(int(x_) for x_ in v_o.groups()) >= (2, 26, 12) and not late_o:
+                stems_o = {q.stem for q in (skills / "llm-sast-scanner" / "references").glob("*.md")}
+                roots_o = tuple(sorted({r_ for r_ in ((corrected_str(plan_g, "target:") or "").rstrip("/"), str(cache.parent)) if r_}, key=len, reverse=True))
+                recs_o = {q.name: worker_records(read(q), stems_o, roots_o) for q in overlap_files(cache, plan_g)}
+                n_o = len(own_sink_aliases(recs_o, entry_list(plan_g), True))
+                got_o = re.findall(r"^overlaps: (\d+)\b", plan_g, re.M)
+                if len(got_o) > 1:
+                    missing.append(f"a single `overlaps:` line — the plan holds {len(got_o)}: keep one, rewritten in place with the last line `--overlaps` prints now")
+                elif not got_o:
+                    missing.append(f"STEP 2's `--overlaps` reading — run `python3 <this skill's directory>/recheck.py --overlaps` from the target, judge each pair it lists as STEP 2 says, then copy its last line as printed, on a line of its own, into .llm-sast-scanner-cache/scan-plan.md (it counts {n_o} now)")
+                elif int(got_o[-1]) != n_o:
+                    missing.append(f"an `overlaps:` line reading the worker files now — the plan's last reads {got_o[-1]}, `--overlaps` counts {n_o}: run it again and rewrite that line in place")
     if cache is not None:
         st2 = re.search(r"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}", row(read(cache / "scan-plan.md"), "started:") or "")
         if st2:
@@ -1359,11 +1541,12 @@ def main() -> int:
     ap.add_argument("--paths", nargs="+", metavar=("FILE", "PAIR"), help="STEP 2: test every path a worker prompt file names (the output path against `<lens>/p<n>`), print `paths <k>/<m>` and, when all pass, the `send:` line the worker is started with, and exit (0 all exist, 1 not)")
     ap.add_argument("--record", action="store_true", help="STEP 3, the session only: append this set to the scan plan — the recorded set; a run without it reads and records nothing")
     ap.add_argument("--checks", action="store_true", help="STEP 1: print the `checks:` line the scan plan must carry, from its entry list and the partition manifests, and exit (0 pass, 1 failed)")
+    ap.add_argument("--overlaps", action="store_true", help="STEP 2: print one `overlap:` line for each sink a record's `Also at:` line names that another worker file's record holds as its own `File:` sink at one class and entry point, then `overlaps: <n>` and the grouping workers, and exit (0 none, 1 any — a list to read, not a failure — 2 no worker files or no skills directory)")
     ap.add_argument("--duplicates", action="store_true", help="STEP 3: print every pair of table rows item (48) asks the writer to judge — kind, worker records, VULN ids, worker severities, classes, sinks, whether each key is a ledger row of the pre-write copy, entry points and the answer written — and exit")
     ap.add_argument("--needs-context", action="store_true", help="STEP 3: print every worker-file line outside a finding record that names a NEEDS CONTEXT judgement — `<lens>/p<n>:<line>`, its text, and the report's `needs context:` answer if it has one — the lines item (49) asks the writer to answer, and exit 0 (2 with no worker files)")
     ap.add_argument("--ledger-start", action="store_true", help="STEP 1: print the `ledger rows at start:` row, counted in the pre-write copy the plan's `started:` row names, and exit (0 counted; 2 no copy, a plan past STEP 1, or a copy whose ledger rows differ in number from the memory's)")
     args = ap.parse_args()
-    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "paths", "roster", "gate", "ledger-start", "checks", "duplicates", "needs-context")
+    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "paths", "roster", "gate", "ledger-start", "checks", "duplicates", "needs-context", "overlaps")
                        if getattr(args, n.replace("-", "_"), None) is not None and getattr(args, n.replace("-", "_"), None) is not False), None)  # `--roster 0` is a mode too
     if args.record and other_mode:
         sys.stderr.write(f"recorded: nothing — --record records a plain recheck set, and this run is {other_mode}\n")
@@ -1433,13 +1616,62 @@ def main() -> int:
         # the lines `long lines <n>` counts, named on stderr so the line recorded from stdout stays the gate line: a
         # character count (`wc -L`) misses the lines of 1,982 to 2,000 characters an em dash takes over the limit
         for l_g in lines_g:
-            m_g = re.match(r"^gate: ([a-z-]+)/(p\d+) — .* \| long lines (\d+)$", l_g)
+            m_g = re.match(r"^gate: ([a-z-]+)/(p\d+) — .* \| long lines (\d+)(?: \| groups (\d+)/(\d+))?$", l_g)
             if m_g and int(m_g.group(3)) > 0:
                 f_g = tgt / ".llm-sast-scanner-cache" / f"deep-{m_g.group(1)}-{m_g.group(2)}-results.md"
                 ll_g = long_text_lines(read(f_g))
                 print(f"long lines in {f_g.name}: " + ", ".join(f"line {n_} ({b_} bytes)" for n_, b_ in ll_g[:12])
                       + (f" … and {len(ll_g) - 12} more" if len(ll_g) > 12 else ""), file=sys.stderr)
+            if m_g and m_g.group(4) is not None and int(m_g.group(4)) < int(m_g.group(5)):
+                # the `Also at:` sinks `groups` counts, named on stderr as the long lines are
+                f_g = tgt / ".llm-sast-scanner-cache" / f"deep-{m_g.group(1)}-{m_g.group(2)}-results.md"
+                plan_g = read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md")
+                roots_g = tuple(sorted({r_ for r_ in ((corrected_str(plan_g, "target:") or "").rstrip("/"), str(tgt)) if r_}, key=len, reverse=True))
+                stems_g = {q.stem for q in (skills_g / "llm-sast-scanner" / "references").glob("*.md")}
+                recs_ = worker_records(read(f_g), stems_g, roots_g)
+                al_ = own_sink_aliases({f_g.name: recs_}, entry_list(plan_g), False)
+                by_a_: dict = {}
+                for _, a_, _, o_, s_ in al_:
+                    by_a_.setdefault((a_["id"], a_["line"]), []).append(f"{o_['id']}'s own sink {s_}")
+                tail_g = (" — one class and entry point: the line is its own finding (a fix of its own: keep its record, take the line"
+                          " off the group's `Also at:` line) or that group's (one missing check closes it: no record of its own)")
+                # each grouping record once, its sinks after it, cut at a sink so the line stays under the reader's limit
+                head_g, parts_g, shown_, total_ = f"groups in {f_g.name}: ", [], 0, sum(len(v_) for v_ in by_a_.values())
+                fits_ = lambda ps_: len((head_g + "; ".join(ps_) + f" … and {total_} more" + tail_g).encode("utf-8")) <= LINE_LIMIT - 20
+                for (aid_, aln_), own_ in by_a_.items():
+                    lead_, took_ = f"{aid_} (line {aln_}) names on its `Also at:` line ", []
+                    for x_ in own_:
+                        if not fits_(parts_g + [lead_ + ", ".join(took_ + [x_])]):
+                            break
+                        took_.append(x_)
+                    if took_:
+                        parts_g.append(lead_ + ", ".join(took_))
+                        shown_ += len(took_)
+                    if len(took_) < len(own_):
+                        break
+                print(head_g + "; ".join(parts_g) + (f" … and {total_ - shown_} more" if total_ > shown_ else "") + tail_g, file=sys.stderr)
         return 0 if ok_g and lines_g else 1
+    if args.overlaps:
+        # STEP 2's last reading: a record whose `Also at:` line names another worker's record's own `File:` sink at one
+        # class and entry point — the gate's `groups` field reads one file; this reads the files against each other
+        tgt = Path(args.target).resolve()
+        cache_o = tgt / ".llm-sast-scanner-cache"
+        plan_o = read(cache_o / "scan-plan.md")
+        wf_o = overlap_files(cache_o, plan_o)
+        skills_o = find_skills(args.skills, args.shipped)
+        if not wf_o or not skills_o:
+            print("overlaps: error — " + ("no worker files (`.llm-sast-scanner-cache/deep-*-results.md`) under the target" if not wf_o else "skills directory not found (pass --skills <dir>)") + "; nothing listed")
+            return 2
+        roots_o = tuple(sorted({r_ for r_ in ((corrected_str(plan_o, "target:") or "").rstrip("/"), str(tgt)) if r_}, key=len, reverse=True))
+        stems_o = {q.stem for q in (skills_o / "llm-sast-scanner" / "references").glob("*.md")}
+        pair_o = lambda q_: re.sub(r"^deep-(.+)-(p\d+)-results\.md$", r"\1/\2", q_)
+        recs_o = {q.name: worker_records(read(q), stems_o, roots_o) for q in wf_o}
+        al_o = own_sink_aliases(recs_o, entry_list(plan_o), True)
+        for fa_, a_, fb_, b_, s_ in al_o:
+            print(f"overlap: {pair_o(fa_)}/{a_['id']} ({a_['sink']}) names {pair_o(fb_)}/{b_['id']}'s own sink {s_} on its `Also at:` line, at one class ({a_['cls']}) and entry point")
+        grp_o = sorted({pair_o(fa_) for fa_, _, _, _, _ in al_o})
+        print(f"overlaps: {len(al_o)}" + (f" | grouping workers {len(grp_o)} — {', '.join(grp_o)}" if al_o else ""))
+        return 1 if al_o else 0
     if args.ledger_start:
         # the row STEP 1 copies: counted, never composed — one session counted the previous run's copy and wrote its 363
         # over a ledger of 448
@@ -1845,6 +2077,20 @@ def main() -> int:
         record_also_memo[rid_] = out_
         return out_
 
+    def block_holders(c_, skip_=None) -> list:
+        """A body or promoted row's group as its block holds it — item (40)'s reading: its record's `Also at:` sinks and
+        those of each record of its class merged into its block — so a group whose lead record was merged into another
+        block is read where its line went; as (sink, the row whose record's line names it). `skip_`: a merged row whose
+        own line is not read — the row being judged, so a record naming its own sink is no group's."""
+        out_ = [(s_, c_) for s_ in record_also(c_[0])]
+        for m_r in table_rows:
+            if m_r is not skip_ and m_r[4].lower() == "merged" and (c_[6] or "") and m_r[6].upper() == c_[6].upper() and m_r[3] == c_[3]:
+                out_ += [(s_, m_r) for s_ in record_also(m_r[0])]
+        return out_
+
+    def block_group(c_, skip_=None) -> list:
+        return [s_ for s_, _ in block_holders(c_, skip_)]
+
     def block_also_lines(block_: str) -> list:
         """The `Also at:` lines of a report block, read as item (40) reads a block: to its next `#`, `##` or `###`
         heading, outside fenced code."""
@@ -2093,9 +2339,11 @@ def main() -> int:
         if sev_rank(c_) > sev_rank(t_):
             why_.append(f"its worker record is {record_sev(c_[0])} and the kept one {record_sev(t_[0])} — the lower severity is the one merged")
         return "; ".join(why_) or None
+    ep_list_go = entry_list(plan)
     def group_overlap(c_, t_) -> bool:
         """Row `c_` and body row `t_` are one missing check's two records: one class, one entry point (the list entry each
-        cell names, or the same words), and one's sink on the other's record's `Also at:` line."""
+        cell names, or the same words), and one's sink on the other's record's `Also at:` line — the kept row's read as its
+        block holds it, with the records of its class merged into it."""
         if not t_ or c_[3] != t_[3]:
             return False
         ek_ = lambda x_: ep_id(x_[1]) or " ".join(re.sub(r"[`*]", "", x_[1] or "").lower().split())
@@ -2104,8 +2352,24 @@ def main() -> int:
         es_c_, es_t_ = ep_strict(ep_of(c_)), ep_strict(ep_of(t_))
         if es_c_ and es_t_ and es_c_ != es_t_:
             return False
+        er_c_, er_t_ = entry_at(ep_of(c_) or "", ep_list_go), entry_at(ep_of(t_) or "", ep_list_go)
+        if isinstance(er_c_, tuple) and isinstance(er_t_, tuple) and er_c_ != er_t_:
+            return False  # two list entries, as STEP 2's `--overlaps` and the gate's `groups` read the records
         sc_, st_ = canon(rel(c_[2])), canon(rel(t_[2]))
-        return sc_ in {canon(rel(x_)) for x_ in record_also(t_[0])} or st_ in {canon(rel(x_)) for x_ in record_also(c_[0])}
+        # the merged side read with the records of its own key merged into the same block: a group line its sibling holds
+        sib_ = [c_] + [m_ for m_ in table_rows if m_ is not c_ and m_[4].lower() == "merged" and m_[6].upper() == c_[6].upper()
+                       and m_[3] == c_[3] and canon(rel(m_[2])) == sc_ and ek_(m_) == ek_(c_)]
+        return sc_ in {canon(rel(x_)) for x_ in block_group(t_, c_)} or st_ in {canon(rel(x_)) for r_ in sib_ for x_ in record_also(r_[0])}
+    def group_merge(x_, y_) -> bool:
+        """A `merged` row `x_` that is a group overlap of the `body` row `y_` it points at: merged into the block that holds
+        the group's line, whatever the two worker severities — that block reads at the highest severity among its lines."""
+        if not (x_[4].lower() == "merged" and y_[4].lower() == "body" and x_[6].upper() == y_[6].upper() and group_overlap(x_, y_)):
+            return False
+        sx_ = canon(rel(x_[2]))
+        if sx_ == canon(rel(y_[2])):
+            return False  # one key: a same-key duplicate, which the Duplicates rule's order merges
+        at_x_ = {id(m_) for m_ in table_rows if m_[4].lower() == "merged" and canon(rel(m_[2])) == sx_}
+        return sx_ in {canon(rel(s_)) for s_, h_ in block_holders(y_) if id(h_) not in at_x_}
     bad_merge, merge_fix = 0, []
     for c in merged_rows:
         t = body_by_id.get(c[6].upper())
@@ -2127,7 +2391,12 @@ def main() -> int:
                 continue
             # a group overlap: two records of one missing check at one class and entry point, one's sink on the other's
             # `Also at:` line — item (48) asks for this merge, and a block cannot leave its record's `Also at:` line
+            if group_merge(c, t):
+                continue  # merged into the block that holds the group's line, the one way a group overlap is merged
             if group_overlap(c, t):
+                # the other way round: the group's line would leave the report, or stand only as a Flow hop
+                bad_merge += 1
+                merge_fix.append(f"`{c[0]}` and `{t[0]}` are a group overlap merged the wrong way round — turn the merge round: `{t[0]}`, whose sink stands on the group's `Also at:` line, is the one merged, into the block that holds that line, which reads at the highest severity among its lines")
                 continue
         if not t or (ep_id(t[1]), canon(rel(t[2])), t[3]) != (ep_id(c[1]), canon(rel(c[2])), c[3]):  # one sink, whichever line form each row cites
             bad_merge += 1
@@ -2198,7 +2467,7 @@ def main() -> int:
         for c_ in merged_rows:
             t_ = body_by_id.get(c_[6].upper())
             sc_, st_ = record_sev(c_[0]), (record_sev(t_[0]) if t_ else None)
-            if t_ and sc_ and st_ and R51.get(sc_, 0) > R51.get(st_, 0):
+            if t_ and sc_ and st_ and R51.get(sc_, 0) > R51.get(st_, 0) and not group_merge(c_, t_):
                 n51d += 1
                 print(f"merge severity: {c_[0]} ({sc_}) is merged into {t_[6]} ({t_[0]}, {st_}) — keep {c_[0]} as the `body` row and merge {t_[0]} into it")
         if n51d:
@@ -2211,12 +2480,20 @@ def main() -> int:
         for x_ in bodyd_:
             atd_.setdefault((x_[3], ekd_(x_), canon(rel(x_[2]))), []).append(x_)
         ngo_ = 0
+        vd_ = re.search(r"v(\d+)\.(\d+)\.(\d+)", corrected_str(plan, "wrapper:") or "")
+        step2d_ = bool(vd_) and tuple(int(z_) for z_ in vd_.groups()) >= (2, 26, 12)  # STEP 2 read the files against each other
         for x_ in bodyd_:
-            for s_ in dict.fromkeys(canon(rel(y_)) for y_ in record_also(x_[0])):
+            seen_ = set()
+            for s0_, h_ in block_holders(x_):
+                s_ = canon(rel(s0_))
+                if s_ in seen_:
+                    continue
+                seen_.add(s_)
                 for o_ in atd_.get((x_[3], ekd_(x_), s_), []):
                     if o_ is not x_:
                         ngo_ += 1
-                        print(f"group overlap: {o_[0]} ({o_[3]} at {s_}) stands on {x_[0]}'s `Also at:` line ({x_[6]}) at one class and entry point — merge it into that group")
+                        print(f"group overlap: {o_[0]} ({o_[3]} at {s_}) stands on {h_[0]}'s `Also at:` line (block {x_[6]}) at one class and entry point — merge it into that block, which reads at the highest severity among its lines"
+                              + ("; a fix of its own STEP 2 left on the line is named on its own `Also:` line" if step2d_ else ""))
         if ngo_:
             print(f"group overlap: {ngo_} records stand on another record's `Also at:` line")
         return 0
@@ -2242,7 +2519,7 @@ def main() -> int:
             k_ = into_.group(1).upper()
             if not (merged_to(a_, k_) and merged_to(b_, k_) and "merged" in {a_[4].lower(), b_[4].lower()}):
                 bad48.append(f"`{ids_}` reads `merged into {k_}`, but the table does not merge the pair into `{k_}` — each row `{k_}`'s body row or a `merged` row pointing at it")
-            elif any(x_[4].lower() == "merged" and y_[4].lower() == "body" and sev_rank(x_) > sev_rank(y_) for x_, y_ in ((a_, b_), (b_, a_))):
+            elif any(x_[4].lower() == "merged" and y_[4].lower() == "body" and sev_rank(x_) > sev_rank(y_) and not group_merge(x_, y_) for x_, y_ in ((a_, b_), (b_, a_))):
                 bad48.append(f"`{ids_}` merges the higher worker severity into the lower — the lower is the one merged")
         elif re.match(r"(?i)distinct\b", ans_):
             n_d += 1
@@ -2288,7 +2565,7 @@ def main() -> int:
             into_ = re.match(r"(?i)merged into\s+`?(vuln-[\w-]*\d)", ans_)
             if not (into_ and merged_to(a_, into_.group(1).upper()) and merged_to(b_, into_.group(1).upper())):
                 bad48.append(f"`{a_[0]} / {b_[0]}` reads `{ans_[:40]}`, but the table merges the pair into `{a_[6] if a_[4].lower() == 'body' else b_[6] if b_[4].lower() == 'body' else a_[6]}`")
-            elif any(x_[4].lower() == "merged" and y_[4].lower() == "body" and sev_rank(x_) > sev_rank(y_) for x_, y_ in ((a_, b_), (b_, a_))):
+            elif any(x_[4].lower() == "merged" and y_[4].lower() == "body" and sev_rank(x_) > sev_rank(y_) and not group_merge(x_, y_) for x_, y_ in ((a_, b_), (b_, a_))):
                 bad48.append(f"`{a_[0]} / {b_[0]}` merges the higher worker severity into the lower — the lower is the one merged")
     stray48 = sorted(" / ".join(sorted(k_)) for k_ in ans48 if k_ not in cand48 and k_ not in skip48)
     # a clause that names what differs in its own pair fits no pair of other classes: one clause answering three or more
@@ -2328,11 +2605,19 @@ def main() -> int:
         at_sink48.setdefault((c[3], ep_k48(c), canon(rel(c[2]))), []).append(c)
     also_twice48 = []
     for c in fins48:
-        for s_ in dict.fromkeys(canon(rel(x_)) for x_ in record_also(c[0])):
-            also_twice48 += [(c, o_, s_) for o_ in at_sink48.get((c[3], ep_k48(c), s_), []) if o_ is not c]
-    for c, o_, s_ in also_twice48[:4]:
+        seen48_ = set()
+        for s0_, h_ in block_holders(c):
+            s_ = canon(rel(s0_))
+            if s_ in seen48_:
+                continue
+            seen48_.add(s_)
+            also_twice48 += [(h_, o_, s_) for o_ in at_sink48.get((c[3], ep_k48(c), s_), []) if o_ is not c]
+    v48_ = re.search(r"v(\d+)\.(\d+)\.(\d+)", corrected_str(plan, "wrapper:") or "")
+    step2_48 = bool(v48_) and tuple(int(x_) for x_ in v48_.groups()) >= (2, 26, 12)  # STEP 2 read the files against each other
+    for k_, (c, o_, s_) in enumerate(also_twice48[:4]):
         bad48.append(f"`{o_[0]}`'s sink `{s_}` stands on `{c[0]}`'s `Also at:` line at one class and entry point — one defect counted twice: "
-                     "merge the record into that group (item (4) reads such a merge as one finding's: a block cannot leave its record's `Also at:` line)")
+                     "merge the record into the block that holds the group's line, which reads at the highest severity among its lines (item (4) reads such a merge as one finding's: a block cannot leave its record's `Also at:` line)"
+                     + (" — a fix of its own STEP 2 left on the line is named on that record's own `Also:` line" if k_ == 0 and step2_48 else ""))
     if len(also_twice48) > 4:
         bad48.append(f"… and {len(also_twice48) - 4} more sinks on an `Also at:` line that are another finding's own")
     n_lines = sum(len(v_) for v_ in ans48.values())
@@ -3751,6 +4036,11 @@ def main() -> int:
                 vs_na.append(f"`{cell_id(c)}` ({d_}) reads `{cell_[:40]}`")
             continue
         rs_ = row_sev(c) if d_ == "body" else None
+        if rs_:
+            for m_ in merged_rows:
+                ms_ = sev_key(record_sev(m_[0])) if m_[6].upper() == c[6].upper() and group_merge(m_, c) else None
+                if ms_ and SEV_RANK.get(ms_, 0) > SEV_RANK.get(rs_, 0):
+                    rs_ = ms_
         if not rs_:
             continue  # a promoted row has no record of its own, a carried row's verdict is copied, an unknown id is item (31)'s
         vs_n += 1
@@ -4349,6 +4639,10 @@ def main() -> int:
         for grp_ in by_blk51.values():
             top_ = max(grp_, key=lambda g_: RANK51.get(g_[2], 0))
             c, t_, m_, b_, a_ = top_
+            if group_merge(c, t_):
+                # a group overlap stays in the block that holds the group's line: the block is raised, never turned round
+                hints51.append(f"`{t_[6]}` is a {b_} block holding the group overlap `{c[0]}` ({m_}) — a group's block reads at the highest severity among its lines: render it at {m_}, its row's verdict Step 6's at {m_}")
+                continue
             others_ = [f"`{t_[0]}`"] + [f"`{g_[0][0]}`" for g_ in grp_ if g_ is not top_]
             hints51.append(f"`{t_[6]}` is a {b_} block{' whose verdict allows one level' if a_ else ''} holding "
                            + ", ".join(f"`{g_[0][0]}` ({g_[2]})" for g_ in grp_)
@@ -4714,7 +5008,7 @@ def run() -> int:
         tb = traceback.extract_tb(exc.__traceback__)
         own = [fr for fr in tb if os.path.abspath(fr.filename) == os.path.abspath(__file__)]
         where = f"line {(own or tb)[-1].lineno}" if tb else "unknown line"
-        mode = next((a for a in sys.argv[1:] if a.split("=")[0] in ("--gate", "--contracts", "--roster", "--prompt", "--paths", "--checks", "--ledger-start", "--duplicates", "--needs-context")), None)
+        mode = next((a for a in sys.argv[1:] if a.split("=")[0] in ("--gate", "--contracts", "--roster", "--prompt", "--paths", "--checks", "--ledger-start", "--duplicates", "--needs-context", "--overlaps")), None)
         if mode:
             # a STEP 1 or STEP 2 command checks no report: its failure is its own error line, never a report mismatch
             print(f"{mode.split('=')[0][2:]}: error — script error {type(exc).__name__}: {str(exc)[:160]} at {where}; nothing checked")

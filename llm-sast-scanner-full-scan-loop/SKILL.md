@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.26.11"
+  version: "2.26.12"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -412,7 +412,7 @@ reason, up to twice; a worker refused or failed on all three attempts is recorde
 `worker not run: <lens>/p<n> — <result, verbatim>`, its dispatch line stays, the run continues with the other workers,
 and the report's Worker dispatch appendix and Executive Summary name that lens and partition as uncovered — a
 documented gap is a result, an abandoned run is not. The cap is three attempts for every reason together — a runtime
-refusal or error, a crashed or stray file, a failed gate, an unfinished file: a lens/partition pair has at most three
+refusal or error, a crashed or stray file, a failed gate, an unfinished file, an `Also at:` overlap: a lens/partition pair has at most three
 dispatch lines in a run, the first dispatch and two re-runs, and a pair whose third attempt also ends without a passing
 gate is recorded as `worker not run: <lens>/p<n> — unfinished after 3 attempts: <the last gate line's failing field, or
 the last (re-run: …) reason, verbatim>`. Its worker file stays exactly as its last worker wrote it — partial, without a
@@ -457,7 +457,7 @@ dispatch line's `(re-run: …)` reason keeping the failure on record, so the pla
 and recheck item (29) reads that line:
 `gate: <lens>/p<n> — header <ok | fail> | pinned <ok | fail> | phrase <ok | fail> | sentinel files <f>/<mf> lines <l>/<ml>
 passes <p> | paths <k>/<m> resolve | headings <s>/<m> | absolute <a> | references <r>/<m> | entry pipes <e> | copied
-<c>%[ from <directory>] | digest <d> | long lines <n>` — its `copied` field `copied n/a` for a file too short to tell — where `m` is the file's record count, counted as its `File:` lines
+<c>%[ from <directory>] | digest <d> | long lines <n> | groups <q>/<g>` — its `copied` field `copied n/a` for a file too short to tell — where `m` is the file's record count, counted as its `File:` lines
 and its record lines written behind a list marker, a blockquote `>` or indentation
 — every record has one, read with
 its backticks removed and any `:line` or `:line-line` suffix dropped, and a record is counted by that line, never by
@@ -499,9 +499,19 @@ the gate reads it (`unreadable` for a file the gate cannot read): a write to the
 the number of the file's lines longer than 2000 bytes (UTF-8) outside a fenced code block: a file reader keeps a longer
 line's first 2,000 bytes, so the writer reads only its start, and `n` above 0 fails the gate and re-runs the worker —
 worker files of 116 of 173 earlier runs held such lines, most of them entry-point coverage lists written as one
-paragraph; `--gate <lens>/p<n>` names each such line on its error output, never in the gate line. A recorded line
-written before the field existed has none and is read by the fields it has. A worker file with no `gate:` line, or whose line shows a `fail`, `k`
-below `m`, `s` below `m`, `c` at 80 or above, `n` above 0, or sentinel values below their manifest counts, has not passed the gate, and STEP 3 does not start — unless its pair is recorded `worker not run:`, whose gate line is still written and still counted — a pair with no
+paragraph; `--gate <lens>/p<n>` names each such line on its error output, never in the gate line. `g` is the number
+of the file's records whose `Also at:` line names a sink, a `path:line`, and `q` how many of them name on it no sink
+that another record of the same file holds as its own `File:` sink at their class — the first base-skill reference
+each `Reference:` names — and entry point, each `Entry point:` read as the list entry it names, as item (4) reads a
+cell, a name several entries share read as the one of them whose whole name the line holds; a record naming no class
+or no entry point — `unavailable` — is read on neither side. Such a line is
+one finding filed twice, or a line that needs a fix of its own on a group's line, and the base skill's Deduplication &
+Sink Location rule allows neither, so `q` below `g` fails the gate and re-runs the worker, `--gate <lens>/p<n>` naming
+each such record and sink on its error output; a file with no group reads `groups 0/0`, which passes. The worker
+keeps a record of its own and takes its line off the group's `Also at:` line; a record is deleted only when the
+group's one check closes its line — every such line earlier runs held needed a fix of its own. A recorded line
+written before a field existed has none and is read by the fields it has. A worker file with no `gate:` line, or whose line shows a `fail`, `k`
+below `m`, `s` below `m`, `c` at 80 or above, `n` above 0, `q` below `g`, or sentinel values below their manifest counts, has not passed the gate, and STEP 3 does not start — unless its pair is recorded `worker not run:`, whose gate line is still written and still counted — a pair with no
 worker file at all has no gate line, so the two counts still agree; the consolidation writer's first action is to count `gate:` lines against worker files and to stop, writing nothing, if
 they differ. The gate also searches the whole target for any `deep-*-results.md` outside the cache — under a
 misspelled cache name, the repository root, or any other directory — and removes each one, recording
@@ -592,6 +602,34 @@ lens set that differs from the previous run's at the same SHA is a STEP 1 error 
 added lens in the report's appendix with the classes it owns and its table row, so coverage stays attributable
 and runs stay comparable.
 
+Once every worker file has passed the gate or its pair is recorded `worker not run:`, and before STEP 3,
+`python3 <this skill's directory>/recheck.py --overlaps` is run from the target — a run that prints
+`overlaps: error` is run again with `--skills <skills root>`. It reads the worker files against each other as the
+gate's `groups` field reads one: one `overlap:` line for each sink of a record's `Also at:` line that another worker
+file's record holds as its own `File:` sink at one class and entry point — two groups that each name the other's
+sink print twice, and are read once — then `overlaps: <n>` and the grouping workers; it exits 1 when it lists any,
+which is a list to read, not a failure. This session reads each listed pair's two records. Where the record holding
+the sink needs a fix the group's one check at its one place does not supply — the base skill's Deduplication & Sink
+Location rule: a decoder's depth or size limit, a wrong value passed, a decoder or serializer option, a missing
+default or normalization two reads share, an escaping switch or a library upgrade, a guard at another place — even
+where a broader remediation would also close it, the line does not belong on the group's `Also at:` line, and the
+grouping record's worker is re-run, `(re-run: Also at names <lens>/p<n>/<VULN id>'s own sink <path>:<line>[, …])`.
+Its prompt carries, on a line of its own after its first line, each such line and the record that holds it as
+`<lens>/p<n>/<VULN id>` — never by its file, which the path test reads as an output path — and asks the worker to take
+each line off its group's `Also at:` line, keeping a record of its own at that line where its own lens reaches it.
+Where the group's one check closes that line too, nothing is re-run, and the writer merges the pair as a group
+overlap. An overlap re-run is sent only while its pair has two attempts left, so a re-run that leaves a file short of
+its gate still has one: the file the gate passed stands until the re-run writes its own, which is gated and capped as
+any re-run's is — a pair whose last attempt ends short of its gate is recorded `worker not run:` as any is — and a refused overlap re-run is not tried again for this reason — the passed file stands and its
+overlap goes to the writer. Once the re-runs are gated the command is run once more, with no second round of re-runs
+for this reason, and its last line is copied into `scan-plan.md` verbatim, on a line of its own, rewritten in place
+when a worker file changes before the writer's prompt is written — a change after it is the writer's or a repair's,
+item (29)'s to name, and the line is left as it stands; `--prompt` reads it against the files before the writer
+starts. A pair it still lists goes to the writer. Across files the overlap is most often two lenses grouping one
+check, a merge; one run's access-auth worker put two decoder-depth sinks of the protocol-infra worker's records on its
+schema group's line, the report could not render both, and that run re-ran the worker only after its first STEP 3
+set, which this reading moves before the writer.
+
 **STEP 2a — LEDGER SINK CALLER ENUMERATION.** If `project-memory.md`'s confirmed-findings ledger is
 non-empty, a subagent OWNS a ledger sink when that sink's file is in the subagent's partition. Each subagent
 traces every sink it owns BACKWARD to all of that sink's entry points, repository-wide — reaching outside its
@@ -652,8 +690,10 @@ contains that expression verbatim; (3) `first-line tags` — every body block's 
 ending `[CONFIRMED]` or `[LIKELY]`; (4) `merges with a different entry point` — the number of `merged` rows whose entry point, sink `file:line` or class differs from their target body row's, required to be 0,
 a duplicate the writer judged under the **Duplicates** rule aside — its `duplicate candidate:` line `merged into` the kept row,
 the lower worker severity merged and, across keys, the kept block's `Also:` line and the merged key no ledger row of the copy —
-and a group overlap aside — one class and entry point, the merged record's sink on the kept record's `Also at:` line or the
-kept record's sink on the merged record's, two workers' records of one missing check —
+and a group overlap aside — one class and entry point, as each record's own `Entry point:` names it too, the merged
+record's sink on the kept block's group line (the kept record's `Also at:` line and those of the records of its class
+merged into it) — two groups that each name the other's sink either way — two workers' records of one missing check,
+never merged the other way round —
 each entry point cell read as the list entry it names — a cited `file:line` as the entry at it or up to three lines
 below it in that file, a bare name as the one entry holding it, a name two entries share as written; (5) `config clearances rewritten` — the phrase search over the
 worker files' disposition lines that hold a clearance word, cite no `file:line` and are no `ledger refuted:` line, a finding record's own lines (its `Judge:`, its `Impact:`) not among them, nor a phrase
@@ -769,8 +809,8 @@ with a complete sentinel (files and lines at or above the sentinel's own denomin
 `gate:` line shows a fail — a complete sentinel is not a passed gate — against the
 plan's `worker not run:` lines and the report's `uncovered:` lines, the three sets equal, and no pair holding more than
 three dispatch lines, and every pair's last `gate:` line, a pair recorded `worker not run:` aside, reading what the gate
-reads in its file now — its digest and the counts its text decides, never the header, pinning, resolving paths or
-`copied`, which follow the skills, the plan, the checkout and the earlier runs: `recorded gate lines off the file` counts
+reads in its file now — its digest and the counts its text decides, never the header, pinning, resolving paths,
+`copied` or `groups`, which follow the skills, the plan, the checkout and the earlier runs: `recorded gate lines off the file` counts
 the files changed after their gate — before the writer's prompt was written, a STEP 2 line the writer names and leaves
 standing; after it, a write by the writer or a repair, which read the worker files and never write them; (30) `report name` — the report name's timestamp at or after `started:` and no later than the file
 it names, written or renamed, a later one being a time chosen rather than read; a `report:` row naming a file created
@@ -803,9 +843,10 @@ line), or whose only words are the report's own — `worker entry point`, `see V
 leaves the writer the list's entry or `unavailable`, and its cell is not read — and each body block's `File:` and `Reference:` are that record's, so a merge is read
 from what the workers wrote; a record whose own sink lies past the end of its file makes its row `withdrawn` as (46)
 reads it, never copied into the row; (38) `verdict scope`
-— every `body` row's verdict follows its worker record's severity, the one Step 6 saw: a Step 6 verdict when it is in
+— every `body` row's verdict follows its worker record's severity, the one Step 6 saw — for a block holding group
+overlaps, the highest among its record and the records merged into it as group overlaps: a Step 6 verdict when it is in
 `adv=`, `not run` when it is outside, a verdict the continuity join carries excepted; a block rendered below its
-record's severity carries the `DOWNGRADED` or `DISPUTED` verdict that lowered it; `merged`, `withdrawn` and
+record's severity — a group block's, its highest line — carries the `DOWNGRADED` or `DISPUTED` verdict that lowered it; `merged`, `withdrawn` and
 `unverifiable` rows read `n/a`; (39) `section placement` — every record stands under the heading of its own severity
 tag, and none outside the five severity sections and the Unverifiable section; (40) `block layout` — every body and
 promoted block reads the one layout below: its `Worker record:` and `Entry point:` lines its row's, its Evidence a
@@ -889,11 +930,12 @@ corrects the file until the command prints `ok` — it requires no line longer t
 reader would cut, the Writer self-check paragraph below and, at an
 unchanged commit whose pre-write copy holds ledger rows, the Same-commit carry paragraph, both verbatim, and for every
 worker file one recorded `gate:` line that the file still reads — its digest and the counts its own text decides (its
-sentinel, records, headings, absolute paths, references and entry pipes) — a file changed after it was gated having its
+sentinel, records, headings, absolute paths, references, entry pipes and long lines) — a file changed after it was gated having its
 line rewritten in place from `--gate <lens>/p<n>` unless it changed after the writer's prompt was written, which is the
 writer's or a repair's write, left as it stands for item (29) to name — none failing unless its pair is recorded
 `worker not run:`, and no `gate:` line beyond them — a pair with no worker file has none, and a `gate: error` line is
-replaced by the run it asks for — so the gate lines are in the plan, as many as the writer will count, as the gate command prints them, before the writer starts — and starts
+replaced by the run it asks for — and the one `overlaps:` line STEP 2's `--overlaps` reading copied, its count what
+the command counts in the worker files now, for a plan whose `wrapper:` row is this version or later — so the gate lines are in the plan, as many as the writer will count, as the gate command prints them, before the writer starts — and starts
 the writer with the text after `send: ` on the line the command prints beneath its `ok`, `Your prompt is
 <target>/.llm-sast-scanner-cache/writer-prompt.md. Read it in full before anything else; ...`, copied as printed and nothing added, never the
 prompt re-typed into the start call, as for the workers above; a repair's
@@ -1006,7 +1048,8 @@ defined below, is not a worker record's and carries its own word):
   else the first of the function's trigger entries, in list order, with a `body` row at its sink and class, else the
   first of them — and is one finding with that row, the next sentence choosing which record is the `body` row, or is
   the `body` row when there is none. Of two records that are one finding, the one of the higher worker severity is the `body` row and the other
-  is `merged` into it, so a block never reads below a record merged into it, except by the one level a `DOWNGRADED` or
+  is `merged` into it — a group overlap aside (One missing check's other lines), merged into the block that holds the
+  group's line, which then reads at its highest line — so a block never reads below a record merged into it, except by the one level a `DOWNGRADED` or
   `DISPUTED` verdict on the block names — recheck item (51);
 - `withdrawn` — Step 6 returned WITHDRAWN, or Citation & Evidence Verification failed, and nothing else — a record that
   repeats a `body` row's entry point, sink and class is `merged`; `body record` holds the word
@@ -1043,13 +1086,14 @@ check on the same data path from one entry point; two entry points, or one topic
 or guards, are two findings. A class difference is what makes a pair `near`, never what tells it apart, and a
 `distinct` clause names what differs — the two entry points, or the two checks, parameters or guards — in its own pair:
 one clause written for pairs of different classes names it in none — a group of records that pair with each other may
-share one clause naming every difference — and recheck item (48) counts it. In a merge the
+share one clause naming every difference — and recheck item (48) counts it. In a merge — a group overlap aside,
+which is merged into the block that holds the group's line (One missing check's other lines) — the
 record of the lower worker severity is `merged` into the other — on a tie the one holding a ledger key of the pre-write
 copy is kept, then a `[CONFIRMED]` record over a `[LIKELY]` one, else the one `--duplicates` lists first — and the kept
 block gains a last line after `Reference:`, `Also: <class> — <worker record> at <sink file:line>`, when the merged
 record's class or sink differs, so neither class leaves the report, or when it names a fix the kept block lacks, with
 ` — <that fix>` after it. A record whose own key is a ledger row of the pre-write copy is never merged into another key —
-merged, that row would read as not re-found — so when the record to be merged away holds one, both stay `body` and the
+merged, that row would read as not re-found; a group overlap's, which the kept block's `Also at:` line holds, aside — so when the record to be merged away holds one, both stay `body` and the
 pair is `linked`: two findings in the counts, the price of keeping the ledger row, each block's last line after
 `Reference:` naming the other on an `Also:` line. A pair one or both of whose records are merged into blocks `linked`
 to each other — three or four records of one defect over two keys — reads `linked` too: the link its two kept blocks
@@ -1063,8 +1107,8 @@ whatever their cells read. A wrong `merged into` folds a distinct finding into t
 its block and count do not — so a pair is merged only on the records' own evidence. A merge is made before the body, the histogram and the counts are taken, like every
 merge. One run carried twenty-nine `entry` pairs as separate findings, the same defect at two severities.
 `--duplicates` also prints a `merge severity:` line for every `merged` row whose worker record outranks its kept row's
-— a same-key merge the table answers included — and the writer turns each round before the body is rendered: the
-higher record becomes the `body` row and the other is `merged` into it.
+— a same-key merge the table answers included, a group overlap not — and the writer turns each round before the body
+is rendered: the higher record becomes the `body` row and the other is `merged` into it.
 
 **Needs context.** A worker that cannot decide a candidate for want of a fact outside the repository writes NEEDS
 CONTEXT in its clearances, or calls the candidate an `Unverifiable candidate` or UNVERIFIABLE, or writes its own
@@ -1101,13 +1145,15 @@ of them is, and recheck item (49) counts it; one missing fact may decide several
 attacker must hold>`, or
 `DISPUTED — <the concrete thing the doubt is about, as the record cites it>: <the property in doubt>` (what in the code
 leaves it unsettled is the block's rationale) for every `body` row whose worker record's severity — the severity
-Step 6 saw, before any downgrade — is in `adv=`, and every `promoted` row whose severity as promoted, before Step 6, is;
-`not run` for a `body` row whose record's severity, or a `promoted` row whose severity as promoted, is outside `adv=`,
+Step 6 saw, before any downgrade; for a block holding group overlaps the highest among its record and the records
+merged into it as group overlaps, so Step 6 judges the block at its highest line — is in `adv=`, and every `promoted` row whose severity as promoted, before Step 6, is;
+`not run` for a `body` row whose record's severity, read so, or a `promoted` row whose severity as promoted, is outside `adv=`,
 so a record Step 6 disputed or downgraded below `adv=` keeps the verdict that lowered it; a `carried` row's cell is the copied block's `Adversarial:` verdict as it stands; a `refuted` row's is
 `WITHDRAWN — <the guard its worker's line names>`; `n/a` for every other row. Any other content is an invalid cell, and so is a cell that is
 specific in form but not in substance: every `DOWNGRADED` and `DISPUTED` cell contains at least one identifier in
 backticks — a permission string, configuration key, function, type, route, role or VULN id — or a `file:line`, copied
-verbatim from that row's own record (its File, Flow, Description or Evidence); a cell with no backticked identifier and
+verbatim from that row's own record (its File, Flow, Description or Evidence), or from a record merged into its block
+as a group overlap; a cell with no backticked identifier and
 no `file:line`, or whose identifiers appear in no line of the record, is an invalid cell whatever its prose says, and
 `invalid cells <c>` counts exactly those cells. Identical text on two rows is valid only when each row's record holds
 the identifier, and a `DISPUTED` clause that cites nothing but its own row's sink and is, identifiers set aside, word for
@@ -1299,7 +1345,19 @@ target: recheck item (40). Two records of one class and entry point whose groups
 other's `Also at:` line — are one finding: `--duplicates` prints a `group overlap:` line for each, and the writer merges
 one into the other before the body is rendered, a merge item (4) reads as one finding's; a block cannot leave its
 record's `Also at:` line, so keeping both counts one defect twice (item (48)), and one run whose two lenses grouped one
-schema check under two lead lines stopped on that mismatch. Its key is its `File:` sink alone: no ledger row is written for a line only an `Also at:`
+schema check under two lead lines stopped on that mismatch. A line that needs a fix of its own comes off a group's
+line before the writer starts — within one worker file the gate's `groups` field re-runs the worker, across files
+STEP 2's `--overlaps` reading re-runs the grouping worker — and the writer merges each group overlap it meets into
+the block that holds the group's line — the grouping record's own block, or the one it already stands in, never the
+sink-holder's by merging the grouping record into it; two groups that each name the other's sink merge either way — whatever the two worker severities or the **Duplicates** rule's
+order: the block reads at the highest severity among its lines, a downgrade standing only where its trigger holds
+for every line it names, and a merged record whose own key is a ledger row of the pre-write copy stays held by the
+block's `Also at:` line, so it is merged, never linked. The block's `File:` stays its own record's line, as item
+(37) reads it, where the base skill's rule would name the most severe: the merged line keeps its severity on the
+block and its key on the block's `Also at:` line. A group is read as its block holds it, its record's `Also at:`
+line and those of the records of its class merged into it, as item (40) reads it. Where a merged record needs a fix
+of its own — a line STEP 2 could not re-run off the group — the kept block names it on that record's own `Also:`
+line, `Also: <class> — <worker record> at <sink file:line> — <that fix>`, as a merged duplicate's does. Its key is its `File:` sink alone: no ledger row is written for a line only an `Also at:`
 line names — item (12). At its class, each such line is a key the record holds when the record is a finding this run (a
 `body`, `merged` or `promoted` row's): a row of the pre-write copy at one of them is re-found by it — not carried, not
 marked `not re-found`, its `last-verified` this run's — items (24), (26) and (47), whose `ledger refuted:` reading counts
@@ -1316,7 +1374,9 @@ status is updated from it. Route families are entry points: two routes reaching 
 `merged` row shares its entry point, its sink `file:line` and its class with the body row it points to; a row that
 differs in any of the three is a `body` row, not a merge, whatever the writer's reason, save a duplicate the
 **Duplicates** rule's judgement merges — one finding two lenses recorded under two classes or sink lines, its `Also:`
-line naming the merged class — de-duplication is between workers that recorded one finding, never between findings.
+line naming the merged class — or a group overlap (One missing check's other lines), a fix of its own STEP 2 left on a
+group's line named on an `Also:` line — de-duplication is between workers that recorded one finding, never between
+findings.
 
 The BURIED-SINK AUDIT is where false negatives hide, so treat it as mandatory rather than optional. Scan EVERY
 lens file's notes, observations, tables, hardening-notes, "defense-in-depth", "not-reachable", and
@@ -1999,7 +2059,7 @@ sink several routes reach keeps every route; each carried block says on its seco
   lower record**: a pair the table answers is listed to no one, so the record kept was whichever the writer took first —
   a HIGH injection record folded into a MEDIUM block read `STANDING`, others into LOW blocks outside `adv=` — and the
   report carried a severity no verdict had lowered while Step 6 never saw the higher one. Kept, the higher record meets
-  Step 6, which may still lower it one level by a named trigger; item (51) reads every merge, and `--duplicates` names
+  Step 6, which may still lower it one level by a named trigger — a group overlap's block meets it at its highest line; item (51) reads every merge, and `--duplicates` names
   one before the body exists.
 - **Duplicates are listed by the entry point a cell names, not its wording, and every pair is judged, because one run
   carried twenty-nine pairs of one finding as two**: an added lens re-applies a base lens's classes, so the same defect
@@ -2008,7 +2068,8 @@ sink several routes reach keeps every route; each carried block says on its seco
   `file:line` merged `POST /import/commit (routes.ts:369)` into `preview` at `:353`, a nearby handler line, a GraphQL
   operation or a cell naming two routes each named the wrong registration, and three of one report's near-line pairs
   across classes were distinct defects. The writer reads the two records, keeps the higher severity, names the other
-  class on the kept block, and never merges away a key the ledger holds. A pair is read from each worker record's own
+  class on the kept block, and never merges away a key the ledger holds — a group overlap, whose key the kept block's
+  `Also at:` line holds, aside. A pair is read from each worker record's own
   `Entry point:` line, never a merged row's cell, which no item reads and a writer could make agree. A record with no
   `Entry point:` line is `unavailable` beside a record of its class and sink unless its own lines name the cell the
   writer filled: one first run's checker listed none of four such pairs — an unpinned base image and three supply-chain
@@ -2107,3 +2168,16 @@ sink several routes reach keeps every route; each carried block says on its seco
   lists, and item (33) reads each promoted row's entry point as
   the list entry it names, so a promoted row at a body row's entry, sink and class reads as one finding counted twice.
   Compared as written, the cells caught only the copy whose wording matched; the list is the authority.
+- **A group's `Also at:` line is read against the other records before STEP 3, because workers put a line that needs
+  a fix of its own on a schema group's line** — a decoder's depth limit, a helper passed a string where it reads a
+  mapping — nine such lines in five worker files of earlier runs and test runs, under two models, each the error of
+  the one worker whose file held both records. The writer, told to merge a group overlap and by the base skill to keep
+  such a line off a group's, could do neither: two runs stopped on item (48), one re-running the grouping workers in a
+  repair and the other refused its re-run, and a third run merged the decoder-depth finding into the group and read
+  clean. Within one file the gate's `groups` field re-runs the worker. Across files the same reading found thirty-nine
+  overlap lines — some thirty pairs, nine read from both sides — and none a false match: twenty-eight lines two lenses
+  grouping one check, which the writer merges, and eleven a line with a fix of its own, five of them close calls — so
+  `--overlaps` lists them and the session judges each, re-running the grouping worker only where the other record
+  needs a fix of its own; simulated sessions judging twenty-seven of those lines three times agreed with that
+  reading on seventy-five of eighty-one judgements, twenty-four of twenty-seven under this text, each miss a re-run
+  more.
