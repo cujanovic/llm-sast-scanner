@@ -1,6 +1,6 @@
 ---
 name: denial_of_service
-version: "0.3"
+version: "0.4"
 description: Denial of Service detection — vulnerable code patterns for ReDoS, XML bomb, Zip bomb, resource exhaustion, unbounded operations, missing rate/size limits, Java exposed-monitor lock DoS (public static synchronized / locking on Class or this), and panic/abort/uncaught-exception crashes reachable from untrusted input (memory-safe languages — Rust unwrap/expect/index/overflow, Go type-assertion/nil-map/index, CWE-248)
 ---
 
@@ -39,11 +39,12 @@ Matcher m = p.matcher(subject);
 m.matches();  // attacker can supply catastrophic pattern
 ```
 
-**ReDoS-prone structures** (flag any of these applied to unbounded user input):
+**ReDoS-prone structures** (flag any of these applied to user input no short cap bounds — a size limit counts only as `regex_injection_redos.md` **Bounded Subjects** defines; a user-supplied pattern needs no tainted subject):
 - Nested quantifiers: `(a+)+`, `(a*)*`, `(a|a?)+`
 - Alternation with overlap: `(x|xx)*`, `(a|ab)+`
 - Backtracking-heavy lookahead: `(?=.*a)(?=.*b).*`
 - User-supplied regex patterns evaluated server-side
+- Sequential overlapping quantifiers and unanchored search-retry scans (polynomial): `regex_injection_redos.md` Vulnerable Conditions
 
 **Writing a backtracking-safe regex** — a *hardcoded* pattern can still be catastrophic (e.g. `(\w+\s*)+please`), so "the regex is a constant" is not sufficient. When you must match untrusted text:
 - Quantify only a single character class or a fixed alternation — never a *group* that itself contains a quantifier (`(\w+\s*)+` → `[\w\s]+`).
@@ -259,7 +260,7 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 
 ### TRUE POSITIVE
 
-- `Pattern.compile(userInput)` — user-controlled regex applied server-side → **CONFIRM** (ReDoS risk, unconstrained pattern complexity)
+- `Pattern.compile(userInput)` — user-controlled regex applied server-side → **CONFIRM** (ReDoS risk, unconstrained pattern complexity; report as `regex_injection_redos`)
 - `ZipInputStream` extraction with no total-size limit on user-uploaded files → **CONFIRM**
 - `DocumentBuilderFactory` without `disallow-doctype-decl` feature processing user XML → **CONFIRM** (billion laughs possible)
 - DB query / `findAll()` with user-controlled unbounded page size (no upper bound enforcement) → **CONFIRM**
@@ -268,19 +269,20 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 
 ### FALSE POSITIVE
 
-- Regex patterns that are fully hardcoded (not user-supplied) — only flag if the *pattern itself* is catastrophic AND the *subject* is unbounded user input
+- Regex patterns that are fully hardcoded (not user-supplied) — only flag if the *pattern itself* is catastrophic AND the *subject* is user input no short cap bounds (`regex_injection_redos.md` **Bounded Subjects**: a body or message size limit counts only when the work at that length is small)
 - File extraction with documented size limits enforced before write
 - Pagination enforced server-side with a hardcoded maximum page size
 - Do NOT emit `denial_of_service` merely because an endpoint lacks rate limiting or size limits — this is a defense-in-depth gap, not a confirmed DoS vulnerability. Require EXPLICIT evidence of unbounded resource consumption (e.g., user-controlled allocation size, recursive processing, entity expansion).
 - Do NOT emit `denial_of_service` for file upload size limits handled by the framework default (e.g., Spring Boot's default 1MB multipart max) unless explicitly overridden to unlimited.
-- Prefer more specific tags when applicable: `xxe` for XML bomb, `brute_force` for auth endpoint flooding, `race_conditions` for thread exhaustion.
+- Prefer more specific tags when applicable: `xxe` for XML bomb, `brute_force` for auth endpoint flooding, `race_conditions` for thread exhaustion; `regex_injection_redos` for a super-linear regex on an attacker-supplied subject or pattern (CWE-1333) — the base **Bounded DoS** guardrail's size bound does not clear it.
 
 ## Severity
 
 | Pattern | Severity |
 |---------|----------|
 | XML entity bomb (billion laughs) without entity limit | High |
-| ReDoS: user-controlled regex pattern server-side | High |
+| ReDoS: user-controlled regex pattern server-side (report as `regex_injection_redos`) | High |
+| ReDoS: fixed super-linear pattern on an attacker-supplied subject no short cap bounds (report as `regex_injection_redos`) | High |
 | Zip/Tar decompression bomb without size limit | High |
 | Unbounded file upload (no size limit) | Medium |
 | Missing pagination on bulk data endpoints | Medium |
@@ -293,7 +295,7 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 
 **Sinks**: `RegExp`/`Pattern.compile`, `Buffer.alloc(n)`, large array loops, `setTimeout(ms)`, XML parsers with entity expansion, unzip without size cap, Express handlers without rate limit middleware.
 
-**Sanitizers**: constant regex patterns; capped `Math.min(size, MAX)`; `disallow-doctype-decl` / secure XML features; rate-limit middleware (`express-rate-limit`); `ajv` without `allErrors: true`.
+**Sanitizers**: a linear-time regex engine (for one search — `regex_injection_redos.md` on iterators) or a pattern shown linear (a constant pattern alone is not — **Writing a backtracking-safe regex**); an allocation capped with `Math.min(size, MAX)` (for a regex subject a cap counts only as `regex_injection_redos.md` **Bounded Subjects** defines); `disallow-doctype-decl` / secure XML features; rate-limit middleware (`express-rate-limit`; not for a regex, where one request's match is the whole attack); `ajv` without `allErrors: true`.
 
 Commonly affected languages: JavaScript, Java, Python, Ruby, C#, Go, Rust, Swift.
 

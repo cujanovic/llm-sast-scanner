@@ -33,7 +33,7 @@ from pathlib import Path
 CMD = "python3 .llm-sast-scanner-cache/recheck.py"
 # a file reader cuts a line longer than this many UTF-8 bytes: a line past it is read only up to it (one fresh run wrote
 # every worker prompt as one line of 6,800 characters, and thirteen workers were re-run). The limit is bytes, not
-# characters: Devin's reader keeps exactly 2,000 bytes of a longer line — 1,982 to 1,994 characters on lines with em
+# characters: one agent runtime's reader keeps exactly 2,000 bytes of a longer line — 1,982 to 1,994 characters on lines with em
 # dashes, three bytes each — and Claude Code's 2,000-character limit is never the tighter of the two
 LINE_LIMIT = 2000
 FENCE_RX = re.compile(r"^\s*(?:```|~~~)")  # a fence line as `unfenced()` reads one, at any indentation
@@ -448,7 +448,7 @@ ANY_HEAD_RX = re.compile(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*|CO
 def entry_list(plan: str) -> list:
     """The scan-plan's `## Entry points` list, as item (4) reads it: (path, line, the name field's last identifier, the
     name field's words, a pattern finding those words whole — compiled once: lists of 700 entries outrun `re`'s cache)."""
-    sec = plan.split("## Entry points", 1)[1].split("\n## ", 1)[0] if "## Entry points" in plan else ""
+    sec = entry_section(plan)
     out = []
     for l in sec.splitlines():
         f = l.split(" | ")
@@ -729,8 +729,15 @@ def partition_checks(plan: str, cache: Path) -> tuple[bool, list[str], list[str]
     """STEP 1's partition checks, the one computation both `--checks` and recheck item (19) run: every partition's share of
     the `## Entry points` list at most 40%, and of the manifests' lines within 15% of one third. An entry belongs to the
     partition whose manifest holds its file — the list's `p<n>` column (a bare `<n>` reads the same) must agree with it.
-    Returns (all pass, one share part per partition, one failure per defect)."""
-    ep_sec = plan.split("## Entry points", 1)[1].split("\n## ", 1)[0] if "## Entry points" in plan else ""
+    Returns (all pass, one share part per partition, one failure per defect). A plan carrying the `partition count:` row is
+    read by partition_checks_n, at its N partitions."""
+    if partition_row(plan) is not None:
+        return partition_checks_n(plan, cache)
+    req = partition_row_required(plan, cache)
+    if req:
+        return False, [], [f"no `partition count:` row ({req}) — run `--partitions` and copy its first line into this run's "
+                           "scan-plan.md, at a line's start, above `workers dispatched:`"]
+    ep_sec = entry_section(plan)
     ep_lines = [l for l in ep_sec.splitlines() if ENTRY_LINE_RX.match(l)]
     man_text, man_lines = {}, {}
     for mp in sorted(cache.glob("partition-p*-manifest.txt")):
@@ -789,6 +796,1223 @@ def partition_checks(plan: str, cache: Path) -> tuple[bool, list[str], list[str]
             failures.append(f"{pn} holds {ls:.2f}% of lines (outside 15% of one third){one_l}")
         parts.append(f"{pn} entry points {eps:.2f}% lines {ls:.2f}%")
     return (bool(parts) and not failures), parts, failures
+
+
+# STEP 1 at N partitions (a plan carrying the `partition count:` row): no worker reads more than about PART_CAP lines. The
+# measured knee: workers' first attempts sealed nearly every partition under 15,000 lines, far fewer between 15,000 and
+# 25,000 and none above; three fixed partitions gave a large repository's workers several times that many lines each.
+PART_CAP = 12000
+# lock files by exact name: read in full by the lenses that own supply chain, dependency confusion and AI editor / agent
+# config poisoning (hardening-platform) and hardcoded secrets — a registry credential in a resolved URL — (access-auth),
+# on partitions of their own; every other lens looks a version up with `rg`
+LOCK_NAMES = frozenset({
+    "package-lock.json", "npm-shrinkwrap.json", "yarn.lock", "pnpm-lock.yaml", "bun.lock", "deno.lock", "uv.lock",
+    "poetry.lock", "Pipfile.lock", "pdm.lock", "go.sum", "Gopkg.lock", "Cargo.lock", "Gemfile.lock", "composer.lock",
+    "packages.lock.json", "paket.lock", "gradle.lockfile", "Podfile.lock", "Package.resolved", "pubspec.lock", "mix.lock",
+    "flake.lock", "MODULE.bazel.lock", "conda-lock.yml", "pixi.lock", ".terraform.lock.hcl"})
+LOCK_LENSES = ("hardening-platform", "access-auth")
+# the header line `--partitions p<k>` writes into a lock-file manifest, which its worker reads in full: what each of the
+# two lenses reads every line of a lock file for
+LOCK_READ_NOTE = ("# read every line by hardening-platform — supply chain, dependency confusion, AI editor / agent config poisoning: "
+                  "registries, sources, integrity, scopes, lifecycle entries — and by access-auth — hardcoded secrets: a credential "
+                  "in a resolved, tarball or source URL (`scheme://user:token@host`, an `_authToken`, a `token=`, `auth=` or `key=` "
+                  "query value) — a finding cited at this file's own line")
+# the added-lens families, in the derivation table's order (the wrapper's list)
+ADDED_FAMILIES = ("ai-agent", "realtime-rpc", "cloud-infra", "graphql-api", "browser", "data-pipeline", "mobile-desktop", "language-runtime")
+# a plan started from this moment with a wrapper of 2.26.13 or later carries the row: its absence is no cut of three
+PART_ROW_FROM = "2026-10-10_00-00-00"
+N_ROW_RX = re.compile(r"^(\d+)\t(.+)$")
+HDR_RX = re.compile(r"^#?\s*(?:files|lines):\s*\d+\s*$")
+# the row at a line's start, list, quote or emphasis markup before it allowed: no plan written before it carried the words
+PART_ROW_RX = re.compile(r"^[ \t>*_+-]*partition count[*_]*:[*_]*[ \t]*(.*)$", re.M | re.I)
+SCOPE_ROW_RX = re.compile(r"^\s*(\d+)(?:\t| +)(.*\S)\s*$")  # `<lines><TAB><path>`, or `wc -l`'s own `   <lines> <path>`
+ENTRY_N_RX = re.compile(r"^\|?\s*`?[^|`\s]+:\d+(?:-\d+)?`?\s*\|")  # an entry line, a `file:a-b` one included
+
+
+def is_lock(path: str) -> bool:
+    return path.rsplit("/", 1)[-1] in LOCK_NAMES
+
+
+def npath(p: str) -> str:
+    """A path as the cut compares it: leading `./` dropped, trailing whitespace dropped."""
+    p = p.rstrip()
+    while p.startswith("./"):
+        p = p[2:]
+    return p
+
+
+def line_ranges(n: int, cap: int = PART_CAP) -> list[tuple[int, int]]:
+    """A file over the cap as ceil(n / cap) ranges of near-equal size, in order: range i is lines
+    floor((i-1)n/r)+1 to floor(in/r) — the same cut every time."""
+    r = -(-n // cap)
+    return [((i - 1) * n // r + 1, i * n // r) for i in range(1, r + 1)]
+
+
+def partition_row(plan: str) -> str | None:
+    """The `partition count:` row's value as the run last stated it (a ` → corrected <value>` append read), or None."""
+    m = PART_ROW_RX.search(plan)
+    if not m:
+        return None
+    v = m.group(1)
+    fixes = re.findall(r"→ corrected (.+?)(?:\s+at\s+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})?\s*(?=→|$)", v)
+    return re.sub(r"\s+", " ", (fixes[-1] if fixes else v).replace("`", "")).strip(" *_")
+
+
+def partition_row_required(plan: str, cache: Path) -> str | None:
+    """Why a plan without the row is no cut of three: a manifest beyond p3, or a wrapper of 2.26.13 on started from
+    PART_ROW_FROM; None when it is one (a plan written before this version, as every test fixture is)."""
+    if partition_row(plan) is not None:
+        return None
+    beyond = sorted(int(m.group(1)) for mp in cache.glob("partition-p*-manifest.txt")
+                    for m in [re.fullmatch(r"partition-p0*(\d+)-manifest\.txt", mp.name)] if m and int(m.group(1)) > 3)
+    if beyond:
+        return f"a manifest beyond p3 (p{beyond[0]})"
+    wv = re.search(r"v?(\d+)\.(\d+)\.(\d+)", plan_row_value(plan, "wrapper") or "")
+    st = re.search(r"(\d{4}-\d{2}-\d{2})[_T ](\d{2})[-:](\d{2})[-:](\d{2})", plan_row_value(plan, "started") or "")
+    stamp = f"{st.group(1)}_{st.group(2)}-{st.group(3)}-{st.group(4)}" if st else None
+    if wv and tuple(int(x) for x in wv.groups()) >= (2, 26, 13) and stamp and stamp >= PART_ROW_FROM:
+        return f"a plan of wrapper v{'.'.join(wv.groups())} started {stamp}"
+    return None
+
+
+def wrapper_version(plan: str) -> tuple[int, int, int] | None:
+    """The full-scan-loop version a plan's `wrapper:` row names as first written, before any ` → corrected` append —
+    the cut was made under it; None for a plan naming none."""
+    m = re.search(r"^[ \t>*_+-]*wrapper[*_]*:[*_]*[ \t]*(.*)$", plan, re.M | re.I)
+    wr = m.group(1).split("→", 1)[0] if m else ""
+    wv = re.search(r"full-scan-loop\s+v?(\d+)\.(\d+)\.(\d+)", wr) or re.search(r"v?(\d+)\.(\d+)\.(\d+)", wr)
+    return tuple(int(x) for x in wv.groups()) if wv else None
+
+
+def cut_version(plan: str) -> int:
+    """The row form a plan's cut is read at: 1 — 2.26.13's, no test, docs or browser partitions — for a plan whose
+    `wrapper:` row, as first written, names a full-scan-loop version earlier than 2.26.14 (every 2.26.13 plan writes
+    that row), 2 for any other plan, whatever its `partition count:` row reads."""
+    wv = wrapper_version(plan)
+    return 1 if wv and wv < (2, 26, 14) else 2
+
+
+def plan_row_value(plan: str, name: str) -> str | None:
+    """A plan row's value read as the partition-count gate reads its own: list, quote or emphasis markup before the name
+    allowed, the last ` → corrected <value>` append taken."""
+    m = re.search(r"^[ \t>*_+-]*" + re.escape(name) + r"[*_]*:[*_]*[ \t]*(.*)$", plan, re.M | re.I)
+    if not m:
+        return None
+    fixes = re.findall(r"→ corrected (.+?)(?:\s+at\s+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})?\s*(?=→|$)", m.group(1))
+    return (fixes[-1] if fixes else m.group(1)).replace("`", "").strip(" *_")
+
+
+def scope_rows(cache: Path) -> list[tuple[int, str]] | None:
+    """`scope-manifest.txt`'s rows — `<lines><TAB><path>`, or the `wc -l` form D1's command writes — its `#` headers and
+    its `total` row aside, paths as npath() reads them; None when it holds none."""
+    rows = [(int(m.group(1)), npath(m.group(2))) for l in read(cache / "scope-manifest.txt").splitlines()
+            for m in [SCOPE_ROW_RX.match(l)] if m and not l.lstrip().startswith("#") and m.group(2) != "total"]
+    return rows or None
+
+
+def scope_error(cache: Path) -> str:
+    """What a scope manifest the cut cannot read holds, for the message that says so."""
+    t = read(cache / "scope-manifest.txt")
+    first = next((l.strip() for l in t.splitlines() if l.strip() and not l.lstrip().startswith("#")), None)
+    if not t:
+        return "no `scope-manifest.txt`: write it first, as D1's command does"
+    if first is None:
+        return "`scope-manifest.txt` holds no rows: write them, as D1's command does"
+    return (f"`scope-manifest.txt` holds no `<lines><TAB><path>` rows (its first row reads `{first[:80]}`): rewrite it in that "
+            "form, as D1's command writes it")
+
+
+def partition_plan(scope: list[tuple[int, str]]) -> dict:
+    """The cut's fixed part, from the scope manifest alone (a path listed twice counted once): N source partitions (at
+    least three, else one per PART_CAP lines outside lock files), the ranges of every file outside the lock files over
+    the cap, and the lock-file partitions — every lock file over the cap cut into its ranges, then each lock file or
+    range, largest first (a range by its file's largest range, so a file's ranges keep their order; ties by path, then
+    by first line), into the lowest-numbered lock-file partition it fits in under the cap, else a new one, numbered
+    after the source partitions."""
+    uniq = list({p: (n, p) for n, p in reversed(scope)}.values())[::-1]  # the first row of each path, in scope order
+    src = [(n, p) for n, p in uniq if not is_lock(p)]
+    lock = [(n, p) for n, p in uniq if is_lock(p)]
+    L, M = sum(n for n, _ in src), sum(n for n, _ in lock)
+    N = max(3, -(-L // PART_CAP))
+    ranges = {p: line_ranges(n) for n, p in src if n > PART_CAP}
+    items = []  # (lines, sort size — a range sorts by its file's largest range, so a file's ranges keep their order —, path, first line, row)
+    for n, p in lock:
+        rs = line_ranges(n) if n > PART_CAP else [(1, n)]
+        top = max(b - a + 1 for a, b in rs)
+        items += [(b - a + 1, top, p, a, f"{p}:{a}-{b}" if n > PART_CAP else p) for a, b in rs]
+    lparts: list[list] = []
+    for n, _, p, a, name in sorted(items, key=lambda x: (-x[1], x[2], x[3])):
+        for lp in lparts:
+            if lp[0] + n <= PART_CAP:
+                lp[0] += n
+                lp[1].append((n, name))
+                break
+        else:
+            lparts.append([n, [(n, name)]])
+    K = len(lparts)
+    return {"v": 1, "N": N, "K": K, "L": L, "M": M, "ranges": ranges, "lock": [lp[1] for lp in lparts],
+            "mech": [("lockfile", lp[1]) for lp in lparts], "kind": {p: ("lockfile" if is_lock(p) else "source") for _, p in uniq},
+            "row": f"{N} source + {K} lockfile — {L} lines outside lockfiles, {M} lockfile lines / cap {PART_CAP}"}
+
+
+def plan_partitions(plan: str, cache: Path) -> dict | None:
+    """N and K of a plan that carries the `partition count:` row — from its scope manifest, else as the row states them;
+    None for a plan without the row (a cut of three partitions, read as before)."""
+    if partition_row(plan) is None:
+        return None
+    scope = scope_rows(cache)
+    v = cut_version(plan)
+    if scope:
+        return partition_plan(scope) if v == 1 else partition_plan_v2(scope, plan, cache.parent)
+    if v == 2:
+        # no scope manifest (a failure `--checks` names): the counts as the row states them, in its own form or none
+        m2 = re.match(r"(\d+) source \+ (\d+) lockfile \+ (\d+) test \+ (\d+) docs \+ (\d+) browser\b", partition_row(plan) or "")
+        c2 = dict(zip(("lockfile", "test", "docs", "browser"), (int(x) for x in m2.groups()[1:]))) if m2 else dict.fromkeys(("lockfile", "test", "docs", "browser"), 0)
+        return {"v": 2, "N": int(m2.group(1)) if m2 else 0, "K": c2["lockfile"], "row": None, "counts": c2,
+                "mech": [(k_, []) for k_ in ("lockfile", "test", "docs", "browser") for _ in range(c2[k_])]}
+    m = re.match(r"(\d+) source \+ (\d+) lockfile", partition_row(plan) or "")
+    return {"N": int(m.group(1)), "K": int(m.group(2)), "row": None} if m else {"N": 0, "K": 0, "row": None}
+
+
+def manifest_rows_n(text: str) -> tuple[list[tuple[int, str]], list[str], int | None, int | None]:
+    """A partition manifest at N partitions: its `<lines><TAB><path>` rows (a final `<n><TAB>total` aside, paths as
+    npath() reads them), the lines that are neither a row nor a header (`#` lines, `files:` and `lines:`), and its
+    `files:` and `lines:` headers (None when absent)."""
+    rows, bad = [], []
+    for l in text.splitlines():
+        if not l.strip() or l.lstrip().startswith("#") or HDR_RX.match(l):
+            continue
+        m = N_ROW_RX.match(l)
+        if m and m.group(2).strip() == "total":
+            continue
+        if m:
+            rows.append((int(m.group(1)), npath(m.group(2))))
+        else:
+            bad.append(l)
+    hf = re.search(r"^#?\s*files:\s*(\d+)\s*$", text, re.M)
+    hl = re.search(r"^#?\s*lines:\s*(\d+)\s*$", text, re.M)
+    return rows, bad, (int(hf.group(1)) if hf else None), (int(hl.group(1)) if hl else None)
+
+
+def _pct(x: float) -> str:
+    """A cap as the skill writes it: 40, 8, 17.14 — two decimals at most, no trailing zeros."""
+    return f"{x:.2f}".rstrip("0").rstrip(".")
+
+
+def _few(xs: list[str], k: int = 3) -> str:
+    return ", ".join(xs[:k]) + (", …" if len(xs) > k else "")
+
+
+def partition_checks_n(plan: str, cache: Path) -> tuple[bool, list[str], list[str]]:
+    """STEP 1's partition checks at N partitions — the plan's `partition count:` row against the scope manifest; every
+    manifest named `partition-p<k>-manifest.txt`, p1 to p<N+K> and no other, its rows `<lines><TAB><path>` with its
+    `files:` and `lines:` headers equal to them; every scope path listed once, every file outside the lock files in
+    exactly one source partition, one over the cap as its ranges, each in one; lock files only in the lock-file
+    partitions, exactly as `--partitions` cuts them; every entry in the source partition whose rows hold its line, an
+    entry no source partition holds a failure; each source partition's share of the entry points at most 120/N% and of
+    p1-p<N>'s lines at most 15% above 1/N — a ceiling; the words, at N = 3, a cut of three's — a share no move can mend
+    tagged `(one file: …)`. At row v2 (cut_version) the test and docs files leave the source partitions like the lock
+    files, the partitions after p<N> are every kind `--partitions` prints, each manifest's header lines exactly as it
+    prints them, and an entry in a test, docs or lock file a failure. Returns (all pass, share parts, failures)."""
+    scope = scope_rows(cache)
+    if not scope:
+        return False, [], [scope_error(cache)]
+    # a plan of a wrapper before 2.26.14 is read as a v1 cut, one of 2.26.14 on as this version's (cut_version)
+    pp = partition_plan(scope) if cut_version(plan) == 1 else partition_plan_v2(scope, plan, cache.parent)
+    N, K = pp["N"], len(pp["mech"])  # K: every partition after the source ones (v1: the lock-file partitions)
+    fails: list[str] = []
+    stated = partition_row(plan) or ""
+    if stated != pp["row"]:
+        st_ = stated if len(stated) <= 120 else stated[:120] + "…"
+        v1_ = pp.get("v") == 2 and ROW_V1_RX.match(stated)
+        fails.append(f"the `partition count:` row reads `{st_}`" + (", the form of a wrapper before 2.26.14;" if v1_ else ",")
+                     + f" the scope manifest gives `{pp['row']}` (`--partitions` prints it)")
+    seen_p, dups = set(), []
+    for _, p in scope:
+        if p in seen_p:
+            dups.append(p)
+        seen_p.add(p)
+    if dups:
+        fails.append(f"`scope-manifest.txt` lists {len(dups)} paths more than once ({_few(sorted(set(dups)))})")
+    # the scope's line counts are the files' own: N, the ranges and every share rest on them, and a count written short
+    # puts a worker on more lines than its partition says — `wc -l`'s count, or one more for a last line without a newline
+    tgt_n = cache.parent
+    gone, miscount = [], []
+    for n, p in dict((p_, (n_, p_)) for n_, p_ in scope).values():
+        f_ = tgt_n / p
+        nl_, last_, ok_ = 0, b"", False
+        try:
+            if f_.is_file():
+                with open(f_, "rb") as fh_:  # in chunks: a large file is never held whole
+                    for chunk_ in iter(lambda: fh_.read(1 << 20), b""):
+                        nl_ += chunk_.count(b"\n")
+                        last_ = chunk_[-1:]
+                ok_ = True
+        except (OSError, ValueError):
+            ok_ = False
+        if not ok_:
+            gone.append(p)
+            continue
+        full_ = nl_ + (1 if last_ and last_ != b"\n" else 0)
+        if n not in (nl_, full_):
+            miscount.append(f"{p} ({n}, the file {full_})")
+    if gone:
+        fails.append(f"{len(gone)} scope rows name no file under the target ({_few(gone)})")
+    if miscount:
+        fails.append(f"{len(miscount)} scope rows whose line count is not the file's ({_few(miscount)}) — rewrite the scope manifest as D1's command does")
+    mans: dict[int, str] = {}
+    misnamed = []
+    for mp in sorted(cache.glob("partition-p*-manifest.txt")):
+        m = re.fullmatch(r"partition-p([1-9]\d*)-manifest\.txt", mp.name)
+        if m:
+            mans[int(m.group(1))] = read(mp)
+        else:
+            misnamed.append(mp.name)
+    if misnamed:
+        fails.append(f"{len(misnamed)} manifests not named `partition-p<k>-manifest.txt` ({_few(misnamed)}) — the gate and the prompts open that name")
+    want = set(range(1, N + K + 1))
+    if set(mans) != want:
+        miss, extra = sorted(want - set(mans)), sorted(set(mans) - want)
+        kinds_txt = ", ".join(f"{c_} {k_}" for k_, c_ in Counter(kk for kk, _ in pp["mech"]).items()) if pp.get("v") == 2 else f"{K} lockfile"
+        fails.append(f"partition manifests p1–p{N + K} expected ({N} source" + (f", {kinds_txt})" if pp.get("v") != 2 or K else ")")
+                     + (f"; absent: {_few([f'p{k}' for k in miss], 6)}" if miss else "") + (f"; not in the cut: {_few([f'p{k}' for k in extra], 6)}" if extra else ""))
+    scope_n = {p: n for n, p in scope}
+    rows_by: dict[int, list[tuple[int, str]]] = {}
+    for k in sorted(mans):
+        rows, bad, hf, hl = manifest_rows_n(mans[k])
+        rows_by[k] = rows
+        if bad:
+            fails.append(f"p{k}: {len(bad)} lines neither a header nor a `<lines><TAB><path>` row (first: {bad[0].strip()[:80]})")
+        if hf is None or hl is None:
+            fails.append(f"p{k}: no `# files:` or `# lines:` header")
+        elif hf != len(rows) or hl != sum(n for n, _ in rows):
+            fails.append(f"p{k}: headers read {hf} files / {hl} lines, its rows {len(rows)} / {sum(n for n, _ in rows)}")
+    # what the source partitions must hold between them: a file at most the cap whole, a file over it as its ranges
+    expect = {}
+    for n, p in scope:
+        if pp["kind"].get(p, "source") != "source" or p in expect:
+            continue
+        if p in pp["ranges"]:
+            for a, b in pp["ranges"][p]:
+                expect[f"{p}:{a}-{b}"] = (b - a + 1, p, a, b)
+        else:
+            expect[p] = (n, p, None, None)
+    seen: dict[str, list[int]] = {}
+    unknown, lock_in_src = [], []
+    other_in_src: dict[str, list[str]] = {}  # v2: test and docs rows in a source partition
+    for k in range(1, N + 1):
+        for n, name in rows_by.get(k, []):
+            base_ = name if name in scope_n else re.sub(r":\d+-\d+$", "", name)
+            kind_ = pp["kind"].get(base_) or (scope_kind(base_, pp.get("fit", False)) if pp.get("v") == 2 else ("lockfile" if is_lock(base_) else "source"))
+            if kind_ == "lockfile":
+                lock_in_src.append(f"{name} (p{k})")
+            elif kind_ != "source":
+                other_in_src.setdefault(kind_, []).append(f"{name} (p{k})")
+            elif name in expect and expect[name][0] == n:
+                seen.setdefault(name, []).append(k)
+            else:
+                unknown.append(f"{name} ({n}, p{k})")
+    absent = [nm for nm in expect if nm not in seen]
+    twice = [(f"{nm} ({len(ks)} times in p{ks[0]})" if len(set(ks)) == 1 else f"{nm} ({', '.join(f'p{k}' for k in ks)})")
+             for nm, ks in seen.items() if len(ks) > 1]
+    if absent:
+        fails.append(f"{len(absent)} scope files or ranges in no source partition ({_few(absent)})")
+    if twice:
+        fails.append(f"{len(twice)} rows listed more than once ({_few(twice)})")
+    if unknown:
+        fails.append(f"{len(unknown)} source rows that are no scope file at its line count, nor one of the ranges of a file over {PART_CAP} lines ({_few(unknown)})")
+    if lock_in_src:
+        fails.append(f"{len(lock_in_src)} lock files in source partitions ({_few(lock_in_src)})")
+    for kind_, xs_ in other_in_src.items():
+        fails.append(f"{len(xs_)} {kind_} files in source partitions ({_few(xs_)}) — `--partitions` puts them in partitions of their own")
+    wrong_k: dict[str, list[str]] = {}
+    for i, (kind_, lp) in enumerate(pp["mech"]):
+        k_ = N + i + 1
+        ls_k = mans.get(k_, "").splitlines()
+        note_k = KIND_NOTE[kind_] if pp.get("v") == 2 else LOCK_READ_NOTE
+        # v2: the header lines exactly as printed — its own partition and kind, its readers' line and no other `#` line
+        hdr_ok = pp.get("v") != 2 or k_ not in mans or (
+            f"# partition: p{k_} ({kind_})" in ls_k and all(l in (f"# partition: p{k_} ({kind_})", note_k) or HDR_RX.match(l)
+                                                             for l in ls_k if l.lstrip().startswith("#")))
+        if sorted(rows_by.get(k_, [])) != sorted(lp) or note_k not in ls_k or not hdr_ok:
+            wrong_k.setdefault(kind_, []).append(f"p{k_}")
+    for kind_, ws_ in wrong_k.items():
+        fails.append(f"{kind_} partitions {_few(ws_, 6)} differ from the manifests `--partitions p<k>` prints (rows and readers' line"
+                     + (", header lines" if pp.get("v") == 2 else "") + ")")
+    # from 2.27.0 on the command cuts p1 to p<N> itself: each source manifest is the one it prints, byte for byte
+    owned_ok = False
+    if pp.get("src_cut") is not None:
+        src_wrong = [f"p{k}" for k in range(1, N + 1) if mans.get(k) != source_manifest(pp, k)]
+        if src_wrong:
+            fails.append(f"source partitions {_few(src_wrong, 6)} differ from the manifests `--partitions p<k>` prints — this version's "
+                         "command cuts them: write each one as it prints it")
+        owned_ok = not src_wrong
+    # entry points: the source partition whose rows hold the entry's file — for a file cut into ranges, its line
+    cover: dict[str, list[tuple[int, int | None, int | None]]] = {}
+    for nm, ks in seen.items():
+        _, p, a, b = expect[nm]
+        for k in ks:
+            cover.setdefault(p, []).append((k, a, b))
+    ep_sec = entry_section(plan)
+    ep_per, ep_file = Counter(), Counter()
+    unassigned, misplaced, not_src, homeless, nonsrc = [], [], [], [], []
+    for l in (l for l in ep_sec.splitlines() if ENTRY_N_RX.match(l)):
+        loc = l.split(" | ", 1)[0].strip().lstrip("|").strip().strip("`")
+        lm = re.search(r":(\d+)(?:-\d+)?$", loc)
+        path, ln = npath(re.sub(r":\d+(?:-\d+)?$", "", loc)), (int(lm.group(1)) if lm else None)
+        col_m = re.search(r"\|\s*p?(\d+)\s*\|?\s*$", l)
+        col = int(col_m.group(1)) if col_m else None
+        hits = [(k, a, b) for k, a, b in cover.get(path, []) if a is None or (ln is not None and a <= ln <= b)]
+        homes = {k for k, _, _ in hits}
+        # the row that holds the entry: a range of a file cut across partitions is a unit of its own, so its entries are
+        # that range's, never its file's
+        row_of = {k: (path if a is None else f"{path}:{a}-{b}") for k, a, b in hits}
+        # a row listed in two partitions (failed above) leaves the entry its column, when that is one of them
+        home = next(iter(homes)) if len(homes) == 1 else (col if col in homes else None)
+        if col is not None and not 1 <= col <= N:
+            not_src.append(f"{loc} (p{col})")
+        if home is None and not homes:
+            if pp.get("v") == 2 and pp["kind"].get(path, "source") != "source":
+                nonsrc.append(loc)  # a test, docs or lock file registers nothing a caller reaches
+            else:
+                homeless.append(loc)  # a lock file's, a file in no source partition, a line past its file's ranges
+            continue
+        if home is None:
+            if col is None:
+                unassigned.append(loc)
+            else:
+                misplaced.append(f"{loc} (p{col}, its line in {', '.join(f'p{k}' for k in sorted(homes))})")
+            continue
+        if col is None:
+            unassigned.append(loc)
+        elif col != home:
+            misplaced.append(f"{loc} (p{col}, its line in p{home})")
+        ep_per[home] += 1
+        ep_file[(home, row_of.get(home, path))] += 1
+    if unassigned:
+        fails.append(f"{len(unassigned)} entry points name no partition ({_few(unassigned)})")
+    if misplaced:
+        fails.append(f"{len(misplaced)} entry points name a partition other than their line's ({_few(misplaced)})")
+    if not_src:
+        fails.append(f"{len(not_src)} entry points name a partition outside p1–p{N} ({_few(not_src)})")
+    if homeless:
+        fails.append(f"{len(homeless)} entry points whose line no source partition holds ({_few(homeless)})")
+    if nonsrc:
+        fails.append(f"{len(nonsrc)} entry points in test, docs or lock files ({_few(nonsrc)}) — drop those list lines: such a file "
+                     "registers nothing a caller reaches")
+    tot_ep = sum(ep_per.values()) or 1
+    src_lines = {k: sum(n for n, _ in rows_by.get(k, [])) for k in range(1, N + 1)}
+    tot_lines = sum(src_lines.values()) or 1
+    cap_e, lo, hi = 120.0 / N, 100.0 / N * 0.85, 100.0 / N * 1.15
+    band = "one third" if N == 3 else f"1/{N}"
+    eps_s = {k: 100.0 * ep_per.get(k, 0) / tot_ep for k in range(1, N + 1)}
+    ls_s = {k: 100.0 * src_lines[k] / tot_lines for k in range(1, N + 1)}
+    big_r = {k: max(rows_by.get(k, []), default=(0, None)) for k in range(1, N + 1)}
+    # at N partitions the line check is a ceiling: N is fixed by the lines, so a partition under its share pushes others
+    # toward the ceiling, and only a partition over it overloads its worker. One over it is held there by one row only
+    # when that row alone passes the ceiling and the partition holds nothing else: a row beside it may fit elsewhere once
+    # the others are rebalanced, so it is never a reason, and a tagged worker reads that one row (at most PART_CAP lines)
+    # in integers, so a share exactly at a cap or the ceiling never reads over it by a float's error
+    over_l = lambda lines_: lines_ * N * 100 > 115 * tot_lines
+    over_e = lambda eps_: eps_ * N * 100 > 120 * tot_ep
+    ceil_l = 115 * tot_lines // (N * 100)  # the most lines a partition holds without passing the ceiling
+    def held_by_one(k: int) -> bool:
+        if not (over_l(src_lines[k]) and big_r[k][1] and over_l(big_r[k][0])):
+            return False
+        return len(rows_by.get(k, [])) == 1
+    one_k = {k for k in range(1, N + 1) if held_by_one(k)}
+    # rows that must end alone in a partition — one over the line ceiling by itself, or one whose own entry points pass
+    # the cap — each take a partition, so the other entry points spread over the partitions left: no cut holds fewer than
+    # ceil(the rest / those partitions) in the fullest of them. A partition holding no such row is held to the larger of
+    # 120/N% and that bound — read so from the first move, before the rows stand alone — never to less than 120/N%
+    pinned = {}
+    for k in range(1, N + 1):
+        for n_, nm_ in rows_by.get(k, []):
+            e_ = ep_file.get((k, nm_), 0)
+            if over_l(n_) or over_e(e_):
+                pinned[(k, nm_)] = e_
+    pin_k = {k for k, _ in pinned}
+    free_n = N - len(pinned)
+    free_e = tot_ep - sum(pinned.values()) if sum(ep_per.values()) else 0
+    bound = -(-free_e // free_n) if free_n > 0 and free_e > 0 else 0
+    over_e_k = lambda k, eps_: over_e(eps_) and (k in pin_k or eps_ > bound)
+    cap_k = lambda k: cap_e if k in pin_k or not sum(ep_per.values()) else max(cap_e, 100.0 * bound / tot_ep)
+    # from 2.26.16 on a line share no move can mend, at most NO_MOVE_LINES lines, is tagged `(no move: …)` (a plan of an
+    # earlier version, or naming none, is read as its version read it)
+    wv_ = wrapper_version(plan)
+    no_move_on = wv_ is not None and wv_ >= NO_MOVE_FROM and pp.get("src_cut") is None
+    parts = []
+    for k in range(1, N + 1):
+        pn, eps, ls = f"p{k}", eps_s[k], ls_s[k]
+        if over_e_k(k, ep_per.get(k, 0)):
+            big = max(((n_, f_) for (pp_, f_), n_ in ep_file.items() if pp_ == k), default=(0, None))
+            # one row's entries over the cap by themselves, and no other row of the partition holding any: another
+            # entry-bearing row is a unit a move can take out
+            one = (f" (one file: {big[1]} holds {big[0]} of {sum(ep_per.values())} entry points)"
+                   if big[1] and over_e_k(k, big[0]) and big[0] == ep_per.get(k, 0) else "")
+            if not one and owned_ok:
+                one = " (the command's cut: no move, exchange or split it makes brings it under)"
+            fails.append(f"{pn} holds {eps:.2f}% of entry points (cap {_pct(cap_k(k))}%){one}")
+        if over_l(src_lines[k]):
+            tag = f" (one file: {big_r[k][1]} holds {big_r[k][0]} of {tot_lines} lines)" if k in one_k else ""
+            if not tag and no_move_on and src_lines[k] <= NO_MOVE_LINES:
+                # no move the cut's rule allows — one unit from one partition to another, never an exchange — can bring it
+                # under: the rows another partition could take under its line ceiling hold fewer lines than it is over. A move
+                # carries less than the giver-receiver difference, so no partition's room ever exceeds the largest room now
+                # and a row that fits nowhere now fits nowhere later; entry
+                # room is not read, since a partition that gives an entry-bearing unit away gains it, so a row counts as
+                # movable whatever its entry points
+                fit = lambda n_: any(q != k and src_lines[q] + n_ <= ceil_l for q in range(1, N + 1))
+                movable = sum(n_ for n_, _ in rows_by.get(k, []) if fit(n_))
+                excess = src_lines[k] - ceil_l
+                if movable < excess:
+                    tag = f" (no move: {excess} lines over the ceiling, {movable} in rows another partition can take)"
+            if not tag and owned_ok and src_lines[k] <= NO_MOVE_LINES:
+                tag = (f" (the command's cut: {src_lines[k] - ceil_l} lines over the ceiling, no move, exchange or split it makes "
+                       "brings it under)")
+            fails.append(f"{pn} holds {ls:.2f}% of lines (outside 15% of {band}){tag}")
+        if N <= 12:
+            parts.append(f"{pn} entry points {eps:.2f}% lines {ls:.2f}%")
+    if N > 12:
+        parts.append(f"{N} partitions: entry points {min(eps_s.values()):.2f}–{max(eps_s.values()):.2f}% (cap {_pct(cap_e)}%), "
+                     f"lines {min(ls_s.values()):.2f}–{max(ls_s.values()):.2f}% (ceiling {hi:.2f}%)")
+    for kind_ in ("lockfile", "test", "docs", "browser"):
+        ks_ = [N + i + 1 for i, (kk, _) in enumerate(pp["mech"]) if kk == kind_ and (pp.get("v") != 2 or N + i + 1 in mans)]
+        if ks_:
+            ll = sorted(sum(n for n, _ in rows_by.get(k, [])) for k in ks_)
+            parts.append(f"{len(ks_)} {kind_} partition{'s' if len(ks_) > 1 else ''}: {ll[0]}{'' if ll[0] == ll[-1] else f'–{ll[-1]}'} lines (cap {PART_CAP})")
+    if pp.get("v") == 2 and pp.get("bad_manifests"):
+        fails.append(f"the browser derivation row names {len(pp['bad_manifests'])} manifests that are no scope row ({_few(pp['bad_manifests'])}) "
+                     "— correct its `dependency signals` cell, then run `--partitions` again")
+    return (not fails), parts, fails
+
+
+IRREDUCIBLE_RX = re.compile(r"\((?:one file|no move|the command's cut): ")
+# the largest partition a `(no move: …)` tag stands for: what workers seal on their first attempt (the wrapper's
+# measured knee), and the version the tag starts at
+NO_MOVE_LINES = 15000
+NO_MOVE_FROM = (2, 26, 16)
+# from 2.27.0 on the command cuts p1 to p<N> itself (source_cut) and the session writes the manifests it prints
+OWNED_FROM = (2, 27, 0)
+# from 2.27.1 on a cut still over the caps is set against the fullest-fit packing too, and `*_test.dart` is test code
+FIT_FROM = (2, 27, 1)
+
+
+def checks_line(ok: bool, parts: list[str], fails: list[str]) -> str:
+    """The `checks:` line at N partitions, under the reader's limit: the failures as many as fit, then how many more;
+    one failure too long by itself is cut, with `…`."""
+    if ok:
+        return f"checks: pass — {'; '.join(parts)}"
+    limit = LINE_LIMIT - 100
+    shown = list(fails)
+    while True:
+        more = len(fails) - len(shown)
+        tail = (f"; … and {more} more (each on a `failure:` line of `--checks`)" if more else "") + " | " + "; ".join(parts)
+        s = "checks: failed — " + "; ".join(shown) + tail
+        if len(s.encode("utf-8")) <= limit:
+            return s
+        if len(shown) <= 1:
+            room = limit - len(("checks: failed — " + tail).encode("utf-8")) - 3
+            return "checks: failed — " + shown[0].encode("utf-8")[:max(room, 40)].decode("utf-8", "ignore") + "…" + tail
+        shown.pop()
+
+
+def lens_names(value: str | None, allowed: tuple[str, ...]) -> list[str] | None:
+    """The lens names a lens row's leading list holds, among the allowed ones: a leading count (`3 — a, b`, `2 (a, b)`)
+    and parenthesised notes after a name dropped, the list read up to the first item that is no allowed name; [] for
+    `none` or `0`; None when the row names nothing (prose, a bare count, a pointer elsewhere) or names a lens it does not
+    list (`a and b`, `a; b`, a lens after the list's end), so the plan's other records are read instead."""
+    if value is None:
+        return None
+    v = value.lower().replace("`", "").replace("*", "").strip()
+    v = re.sub(r"^\d+\s*(?:[—–:-]\s*)?", "", v).strip()
+    if v.startswith("("):
+        v = v[1:v.find(")")] if ")" in v else v[1:]
+    if not v or re.match(r"(?:none|0)\b", v):
+        return [] if re.match(r"(?:none|0)\b", v) or not v and re.match(r"^\s*0\s*$", value) else None
+    names = []
+    toks = re.sub(r"\([^)]*\)", " ", v).split(",")
+    word = lambda s_: [x for x in re.findall(r"[a-z][a-z-]*[a-z]", s_) if x in allowed]
+    for i, tok in enumerate(toks):
+        m = re.match(r"\s*([a-z][a-z-]*[a-z])", tok)
+        if not m or m.group(1) not in allowed:
+            # the list ends here: a lens named later (`…, see notes, browser`) leaves the row unreadable, not shorter
+            return None if any(word(x) for x in toks[i:]) else (list(dict.fromkeys(names)) or None)
+        if word(tok[m.end():]):
+            return None  # one item naming two lenses (`a and b`, `a; b`, `a — b rejected`): read elsewhere, never cut short
+        names.append(m.group(1))
+    return list(dict.fromkeys(names)) or None
+
+
+def lens_set(plan: str) -> tuple[list[str], str]:
+    """The plan's lens set and where it was read: the six base lenses always (a `base lenses:` row's order kept), then the
+    added lenses its `added lenses:` row's list names — `none` naming none — else the derivation table's families
+    chosen `yes` (outer pipes or none), else the families on the `## Lenses` line, else none."""
+    named = lens_names(plan_row_value(plan, "base lenses"), tuple(BASE_LENSES)) or []
+    base = named + [x for x in BASE_LENSES if x not in named]
+    row_v = plan_row_value(plan, "added lenses")
+    added = lens_names(row_v, ADDED_FAMILIES)
+    src = "the `added lenses:` row"
+    if added is None:
+        added = derivation_yes(plan)
+        src = "the derivation table's `yes` rows"
+        if not added and "## Lenses" in plan:
+            line_ = next((l for l in plan.split("## Lenses", 1)[1].split("\n## ", 1)[0].splitlines() if l.strip()), "")
+            added = [x for x in (lens_names(line_, tuple(BASE_LENSES) + ADDED_FAMILIES) or []) if x in ADDED_FAMILIES]
+            src = "the `## Lenses` line"
+        if not added:
+            src = NO_ADDED if row_v is None else f"an `added lenses:` row read as no list of lens names (`{row_v[:80]}`), and {NO_ADDED.replace('no `added lenses:` row, ', 'no ')}"
+    elif not added:
+        src = NO_ADDED_ROW  # `none`: the added lens is required, so a row naming none is no lens set either
+    return base + [x for x in dict.fromkeys(added) if x not in base], src
+
+
+NO_ADDED = "no `added lenses:` row, derivation table or `## Lenses` line naming a family"
+NO_ADDED_ROW = "an `added lenses:` row naming none — no added lens"
+
+
+def derivation_yes(plan: str) -> list[str]:
+    """The families the added-lens derivation table marks chosen: its header (outer pipes or none) gives the `chosen`
+    column — the last cell when no header is read — and a row whose first cell is a family and whose `chosen` cell
+    opens with `yes` names one."""
+    cells = lambda l: [c.strip().strip("*`") for c in l.strip().strip("|").split("|")]
+    headed = any((lambda c: c and c[0].lower() == "family" and "chosen" in [x.lower() for x in c])(cells(l)) for l in plan.splitlines() if "|" in l)
+    out, col = [], None
+    for l in plan.splitlines():
+        if "|" not in l:
+            col = None if not l.strip() else col
+            continue
+        c = cells(row_as_corrected(l))
+        if c and c[0].lower() == "family" and any(x.lower() == "chosen" for x in c):
+            col = [x.lower() for x in c].index("chosen")
+            continue
+        cell = c[col] if col is not None and len(c) > col else (c[-1] if col is None and not headed and len(c) > 2 else "")
+        if c and c[0].lower() in ADDED_FAMILIES and re.match(r"(?i)yes\b", cell):
+            out.append(c[0].lower())  # with no header read, the last cell is the `chosen` one
+    return list(dict.fromkeys(out))
+
+
+def expected_pairs(plan: str, cache: Path) -> tuple[set[str] | None, str]:
+    """The pairs a plan carrying the `partition count:` row dispatches: every lens of the plan's lens set on every source
+    partition, and hardening-platform and access-auth alone on every lock-file partition; at row v2 also access-auth on
+    every test partition, hardening-platform and access-auth on every docs partition, and browser on its own partitions
+    alone when it has any (KIND_LENSES). (None, "") for a plan without the row."""
+    pp = plan_partitions(plan, cache)
+    if pp is None:
+        return None, ""
+    lenses, src = lens_set(plan)
+    N, K = pp["N"], pp["K"]
+    if pp.get("v") != 2:
+        pairs = {f"{l}/p{k}" for l in lenses for k in range(1, N + 1)} | {f"{l}/p{k}" for l in LOCK_LENSES for k in range(N + 1, N + K + 1)}
+        return pairs, f"{len(lenses)} lenses × {N} source partitions + {' and '.join(LOCK_LENSES)} × {K} lockfile; lens set from {src}"
+    # v2: a family lens with partitions of its own reads those alone; one whose rule found no file stays on the source ones
+    narrowed = {f for f in ("browser",) if pp["counts"].get(f)}
+    pairs = {f"{l}/p{k}" for l in lenses if l not in narrowed for k in range(1, N + 1)}
+    for i, (kind_, _) in enumerate(pp["mech"]):
+        pairs |= {f"{l}/p{N + i + 1}" for l in KIND_LENSES[kind_]}
+    c = pp["counts"]
+    return pairs, (f"{len(lenses) - len(narrowed)} lenses × {N} source partitions + {' and '.join(LOCK_LENSES)} × {c['lockfile']} lockfile"
+                   f" + access-auth × {c['test']} test + {' and '.join(DOCS_LENSES)} × {c['docs']} docs + browser × {c['browser']}"
+                   f"; lens set from {src}")
+
+
+
+# STEP 1 at N partitions, row v2 (2.26.14 on): test code, prose docs and a copy of the browser family get partitions of
+# their own, each read by the lenses whose classes need it there; every other lens reads the source partitions alone. A
+# plan of an earlier wrapper (2.26.13 runs) is read as before, by partition_plan (cut_version).
+ROW_V1_RX = re.compile(r"^\d+ source \+ \d+ lockfile — \d+ lines outside lockfiles, \d+ lockfile lines / cap \d+$")
+# never test code or prose, wherever it sits: CI, container, IaC, build and package configuration, and agent / editor config
+BUILD_RX = re.compile(r"(^|/)(\.gitlab-ci\.ya?ml|Dockerfile[^/]*|[^/]*\.dockerfile|docker-compose[^/]*\.ya?ml|compose[^/]*\.ya?ml|"
+                      r"Jenkinsfile|Makefile|[^/]*\.mk|[^/]*\.tf|[^/]*\.tfvars|[^/]*\.hcl|Chart\.yaml|values[^/]*\.ya?ml|"
+                      r"kustomization\.ya?ml|package\.json|requirements[^/]*\.txt|pyproject\.toml|setup\.(py|cfg)|go\.mod|"
+                      r"Cargo\.toml|Gemfile|pom\.xml|build\.gradle(\.kts)?|settings\.gradle(\.kts)?|[^/]*\.csproj|"
+                      r"tsconfig[^/]*\.json|vite\.config\.[a-z]+|webpack\.config\.[a-z]+|playwright\.config\.[a-z]+|"
+                      r"cypress\.config\.[a-z]+|jest\.config\.[a-z]+|vitest\.config\.[a-z]+|k6[^/]*\.[a-z]+)$|"
+                      r"(^|/)(\.github|\.gitlab|\.circleci|helm|charts|k8s|kubernetes|deploy|deployment|infra|terraform)/", re.I)
+AGENT_RX = re.compile(r"(^|/)\.(agents|claude|cursor|windsurf|codex|continue|roo|kiro|aider[^/]*)/|(^|/)(AGENTS|CLAUDE|GEMINI)\.md$|"
+                      r"(^|/)SKILL\.md$|copilot-instructions\.md$|(^|/)\.(clinerules|cursorrules)$|(^|/)[^/]*\.mcp\.json$|"
+                      r"(^|/)(prompts?|templates?|skills?|agents?)/", re.I)
+# a test file by its own name, anywhere: `*.test.*` and `*.spec.*` in a code extension (an `openapi.spec.yaml`, a
+# `nginx.test.conf` or a `deploy.test.sh` is no test), Go's `*_test.go`, ExUnit's `*_test.exs`, RSpec's `*_spec.rb`, snapshots
+TEST_RX = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|py|rb|go|java|kt|kts|cs|scala|php|ex|exs|swift|dart|rs|vue|svelte)$|"
+                     r"_test\.(go|exs)$|_spec\.rb$|\.snap$|(^|/)(__tests__|__mocks__|__fixtures__|__snapshots__)/")
+# names a production module can carry too (`test_email.py` a management command, `ABTest.java` a class, `ab_test.py`): a
+# test only under a test directory — a `test` or `tests` segment, or one named like a test project (`Foo.Tests`,
+# `unit_tests`, `IntegrationTests`)
+TEST_IN_DIR_RX = re.compile(r"(^|/)test_[^/]+\.py$|_test\.(py|rb|ex)$|Tests?\.(java|kt|cs|scala)$")
+TEST_DIR_RX = re.compile(r"(^|/)((?i:tests?)|[^/]*[._-](?i:tests?)|[^/]*[a-z0-9]Tests?)/")
+# from 2.27.1 on, Dart's `*_test.dart` — the name its test runner finds, a production module's too (`lib/env/
+# cloud_env_test.dart`, `bin/speed_test.dart`): a test only under a `test`, `tests`, `integration_test` or `test_…`
+# directory (`test_driver/`, `test_goldens/`) — never a package or feature folder named `<x>_test/` — and never under a
+# `lib/` no plain `test` or `tests` directory holds, a package's library; a mirror of `lib/` inside `test/` stays test
+DART_TEST_RX = re.compile(r"_test\.dart$")
+DART_TEST_SEG_RX = re.compile(r"(?i:tests?|integration_tests?|test_[^/]+)")
+DART_PLAIN_TEST_RX = re.compile(r"(?i:tests?)")
+
+
+def dart_test_dir(dir_: str) -> bool:
+    """Whether a `*_test.dart` file in directory `dir_` (`a/b/`, or empty at the root) is test code from 2.27.1 on: a
+    `test`, `tests`, `integration_test(s)` or `test_…` segment holds it, and the first `lib` segment, if any, has a plain
+    `test` or `tests` segment before it."""
+    segs = dir_.split("/")
+    if not any(DART_TEST_SEG_RX.fullmatch(x) for x in segs):
+        return False
+    return "lib" not in segs or any(DART_PLAIN_TEST_RX.fullmatch(x) for x in segs[:segs.index("lib")])
+# prose: `.md`, `.rst`, `.adoc` (never `.mdx`, which compiles to a page) under a docs tree or under a prose name, never
+# inside a tree an application serves or renders (`app/`, `pages/`, `src/`, `content/`, `views/`)
+DOC_LOC_RX = re.compile(r"(^|/)(docs?|adrs?)/(.+/)?[^/]+\.(md|rst|adoc|excalidraw|drawio)$", re.I)
+DOC_NAME_RX = re.compile(r"(^|/)(README|CHANGELOG|CONTRIBUTING|DESIGN[^/]*|HISTORY|NOTICE|CODE_OF_CONDUCT|SECURITY)\.(md|rst|adoc)$|"
+                         r"(^|/)(README|CHANGELOG|NOTICE)\.txt$", re.I)
+SHIPPED_TREE_RX = re.compile(r"(^|/)(app|pages|src|content|views)/")
+# markup a browser renders, a server template's included (`.ejs`, `.hbs`, `.erb`, `.cshtml`, `.jinja`, …)
+BROWSER_EXT_RX = re.compile(r"\.(tsx|jsx|vue|svelte|html?|xhtml|shtml|svg|mdx|ejs|hbs|handlebars|mustache|erb|cshtml|vbhtml|razor|astro|"
+                            r"njk|liquid|twig|jinja2?|j2|pug|jade|eta|marko|haml|slim|php|phtml|jsp|jspf|jspx|tag|gsp|cfm|cfc|heex|eex|"
+                            r"leex|gohtml|templ|tmpl|ftl|ftlh|vm|vtl|mako|soy|aspx|ascx|master|asp)$", re.I)
+# the code and styles of the web: every such file is in the browser family, whatever package holds it — each rule that
+# read a package's manifest to leave a server's code out missed, in review, a package that ships to a browser (CRA and
+# Angular SSR behind express, an Nx root, a Bun build, a hoisted bundler), and on the real scopes it left out an API package
+BROWSER_PKG_RX = re.compile(r"\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|coffee|elm|cljs|dart|vue|svelte|html?|css|scss|sass|less|styl|pcss)$", re.I)
+# the names a dependency manifest goes by: a path in the browser row's cell is read only when its file name is one
+MANIFEST_NAME_RX = re.compile(r"^(package\.json|pyproject\.toml|requirements[^/]*\.txt|Pipfile|setup\.(py|cfg)|Gemfile|composer\.json|"
+                              r"pom\.xml|build\.gradle(\.kts)?|go\.mod|Cargo\.toml|pubspec\.yaml|[^/]*\.csproj|mix\.exs|deno\.json)$")
+TEST_LENSES = ("access-auth",)
+DOCS_LENSES = ("hardening-platform", "access-auth")
+TEST_READ_NOTE = ("# read every line by access-auth — hardcoded secrets and default credentials in test code, fixtures and "
+                  "snapshots; its other classes are not applied here and get no Clearance Record; this partition holds no entry "
+                  "point of its own")
+DOCS_READ_NOTE = ("# read every line by access-auth — hardcoded secrets and credentials in prose — and by hardening-platform — "
+                  "supply-chain instructions (install commands, registries, piped scripts) and AI editor / agent config "
+                  "poisoning addressed to agents; the two lenses' other classes are not applied here and get no Clearance Record; "
+                  "this partition holds no entry point of its own")
+BROWSER_READ_NOTE = ("# read every line by browser — its family's own files (markup and server templates, the web's code and "
+                     "style files whatever package holds them, the files the entry list registers browser handlers in), read "
+                     "also in their source partitions by the base lenses; their entry "
+                     "points are counted in the source partitions, and the `## Entry points` lines whose file this manifest "
+                     "holds are yours to name too")
+# cloud-infra is no family: many of its records outside CI / IaC / config files were found by no base lens (most of them
+# denial of service in code), so it reads every source partition; browser's records no base lens also found stood
+# outside its family only a few times, each in a server-side handler in no web file (browser_family)
+# at row v2 the lock-file note names, as the test and docs notes do, the classes its readers do not apply; a v1 cut's
+# lock-file manifests keep 2.26.13's note (LOCK_READ_NOTE)
+LOCK_READ_NOTE_V2 = LOCK_READ_NOTE + "; the two lenses' other classes are not applied here and get no Clearance Record"
+KIND_NOTE = {"lockfile": LOCK_READ_NOTE_V2, "test": TEST_READ_NOTE, "docs": DOCS_READ_NOTE, "browser": BROWSER_READ_NOTE}
+KIND_LENSES = {"lockfile": LOCK_LENSES, "test": TEST_LENSES, "docs": DOCS_LENSES, "browser": ("browser",)}
+
+
+def scope_kind(path: str, dart: bool = False) -> str:
+    """A scope row's kind at row v2: `lockfile` by exact name; `source` for build, CI, container, IaC, package and agent /
+    editor configuration wherever it sits (BUILD_RX, AGENT_RX); `test` by a test file's own name (or a `__tests__/`-style
+    directory), a name a production module can carry too only under a test directory — with `dart` (a 2.27.1 plan or
+    later) `*_test.dart` too, under a test or `test_…` directory outside a package's `lib/` (dart_test_dir); `docs` for
+    prose under a docs tree or under a prose name,
+    outside the trees an application serves; `source` for everything else."""
+    if is_lock(path):
+        return "lockfile"
+    if BUILD_RX.search(path) or AGENT_RX.search(path):
+        return "source"
+    dir_ = path.rsplit("/", 1)[0] + "/" if "/" in path else ""
+    if TEST_RX.search(path) or (TEST_IN_DIR_RX.search(path) and TEST_DIR_RX.search(dir_)) \
+            or (dart and DART_TEST_RX.search(path) and dart_test_dir(dir_)):
+        return "test"
+    if (DOC_LOC_RX.search(path) or DOC_NAME_RX.search(path)) and not SHIPPED_TREE_RX.search(dir_):
+        return "docs"
+    return "source"
+
+
+def row_as_corrected(l: str) -> str:
+    """A derivation-table line as its last statement reads: a whole row corrected (`browser | … → corrected browser | …
+    at <time>`, a family's name after the append) is the corrected row, its time dropped; any other line as written."""
+    fix = [m_ for m_ in re.finditer(r"→ corrected\s+\|?\s*[*_`]*([A-Za-z-]+)[*_`]*\s*\|", l) if m_.group(1).lower() in ADDED_FAMILIES]
+    if not fix:
+        return l
+    return re.sub(r"\s+at\s+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}\s*\|?\s*$", "", l[fix[-1].start() + len("→ corrected"):])
+
+
+def derivation_cell(plan: str, family: str, column: str) -> str | None:
+    """A family's cell in the added-lens derivation table, the column found by its header (outer pipes or none)."""
+    cells = lambda l: [c.strip().strip("*`") for c in l.strip().strip("|").split("|")]
+    col = None
+    for l in plan.splitlines():
+        if "|" not in l:
+            continue
+        l = row_as_corrected(l)
+        c = cells(l)
+        if c and c[0].lower() == "family" and column in [x.lower() for x in c]:
+            col = [x.lower() for x in c].index(column)
+            continue
+        if col is not None and c and c[0].lower() == family and len(c) > col:
+            fixes = re.findall(r"→ corrected (.+?)(?:\s+at\s+\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})?\s*(?=→|$)", c[col])
+            return fixes[-1].strip() if fixes else c[col]
+    return None
+
+
+def cell_manifests(plan: str, paths: set[str] | None = None) -> list[str]:
+    """The manifest paths the `browser` derivation row's `dependency signals` cell names in parentheses: each
+    parenthesis split at commas and semicolons, a part that is a scope row taken whole (a path with a space), any other
+    split at spaces; a `:<line>` dropped, `\\` read as `/`, a token kept only when its file name is a dependency manifest's
+    (`react-dom (apps/web/package.json)` → `apps/web/package.json`)."""
+    cell = derivation_cell(plan, "browser", "dependency signals") or ""
+    clean = lambda s: npath(re.sub(r":\d+$", "", s.strip().strip("`'\"").replace("\\", "/")))
+    out = []
+    for m in re.finditer(r"\(([^()]*)\)", cell):
+        for part in re.split(r"[,;]", m.group(1)):
+            toks = [clean(part)] if paths is not None and clean(part) in paths else [clean(x) for x in part.split()]
+            for tok in toks:
+                if tok and MANIFEST_NAME_RX.match(tok.rsplit("/", 1)[-1]) and tok not in out:
+                    out.append(tok)
+    return out
+
+
+def browser_family(plan: str, uniq: list[tuple[int, str]], kind: dict[str, str]) -> tuple[list[tuple[int, str]], list[str], int]:
+    """The browser family, a second copy of source rows: every file of a browser markup or template extension
+    (BROWSER_EXT_RX), every code or style file of the web (BROWSER_PKG_RX), whatever package holds it, and the files
+    holding an entry whose kind names `browser`, `postMessage`, `frontend`, `client-side`, `service worker` or `window`.
+    The browser row's cell is read for its manifest paths only to test them: one that is no scope row fails
+    `--partitions`. Returns (rows in scope order, the cell's paths that are no scope row, the entry files added)."""
+    paths = {p for _, p in uniq}
+    bad = [p for p in cell_manifests(plan, paths) if p not in paths]
+    ep_sec = entry_section(plan)
+    ep_files = set()
+    for l in ep_sec.splitlines():
+        if not ENTRY_N_RX.match(l):
+            continue
+        cells = [c.strip() for c in l.strip().strip("|").split("|")]
+        if len(cells) > 1 and re.search(r"browser|postmessage|frontend|client.?side|service.?worker|(?<![-\w])window\b", cells[1], re.I):
+            ep_files.add(npath(re.sub(r":\d+(?:-\d+)?$", "", cells[0].strip("`"))))
+    rows, added = [], 0
+    for n, p in uniq:
+        if kind[p] != "source":
+            continue
+        by_rule = BROWSER_EXT_RX.search(p) or BROWSER_PKG_RX.search(p)
+        if by_rule or p in ep_files:
+            rows.append((n, p))
+            added += 0 if by_rule else 1
+    return rows, bad, added
+
+
+def pack(items: list[tuple[int, str]]) -> list[list[tuple[int, str]]]:
+    """Rows into partitions of at most PART_CAP lines: a row over the cap cut into its ranges, then each row or range,
+    largest first (a range by its file's largest range, so a file's ranges keep their order; ties by path, then by first
+    line), into the lowest-numbered partition it fits in, else a new one."""
+    cut = []
+    for n, p in items:
+        rs = line_ranges(n) if n > PART_CAP else [(1, n)]
+        top = max(b - a + 1 for a, b in rs)
+        cut += [(b - a + 1, top, p, a, f"{p}:{a}-{b}" if n > PART_CAP else p) for a, b in rs]
+    parts: list[list] = []
+    for n, _, p, a, name in sorted(cut, key=lambda x: (-x[1], x[2], x[3])):
+        for lp in parts:
+            if lp[0] + n <= PART_CAP:
+                lp[0] += n
+                lp[1].append((n, name))
+                break
+        else:
+            parts.append([n, [(n, name)]])
+    return [lp[1] for lp in parts]
+
+
+ENTRY_SEC_RX = re.compile(r"(?m)^## Entry points[^\n]*$")
+
+
+def entry_section(plan: str) -> str:
+    """The `## Entry points` section's lines after its heading line, to the next `## ` heading — the heading read at a
+    line's start, so a `### Entry points by family` heading above it, or the words in a sentence, is no section."""
+    m = ENTRY_SEC_RX.search(plan)
+    return plan[m.end():].split("\n## ", 1)[0] if m else ""
+
+
+def cut_fit(plan: str) -> bool:
+    """Whether a plan is read as 2.27.1 reads it — a cut still over the caps set against the fullest-fit searches too,
+    `*_test.dart` under a test directory test code: a plan whose `wrapper:` row, as first written, names 2.27.1 or later.
+    An earlier plan is cut, and its rows' kinds read, as its version did."""
+    wv = wrapper_version(plan)
+    return wv is not None and wv >= FIT_FROM
+
+
+def cut_owned(plan: str) -> bool:
+    """Whether the command cuts the source partitions itself: a plan whose `wrapper:` row, as first written, names 2.27.0
+    or later. An earlier plan's source cut is its session's, read as its version read it."""
+    wv = wrapper_version(plan)
+    return wv is not None and wv >= OWNED_FROM
+
+
+def entry_rows(plan: str, rows: list[tuple[int, str, str, int | None, int | None]]) -> Counter:
+    """The `## Entry points` list counted by the source row holding each entry's line — the file's row, or the range of a
+    file cut into ranges that holds the line, read as the checks read an entry line; an entry no source row holds
+    counts nowhere."""
+    by_path: dict[str, list] = {}
+    for r in rows:
+        by_path.setdefault(r[2], []).append(r)
+    ec: Counter = Counter()
+    sec = entry_section(plan)
+    for l in sec.splitlines():
+        if not ENTRY_N_RX.match(l):
+            continue
+        loc = l.split(" | ", 1)[0].strip().lstrip("|").strip().strip("`")
+        lm = re.search(r":(\d+)(?:-\d+)?$", loc)
+        path, ln = npath(re.sub(r":\d+(?:-\d+)?$", "", loc)), (int(lm.group(1)) if lm else None)
+        for r in by_path.get(path, []):
+            if r[3] is None or (ln is not None and r[3] <= ln <= r[4]):
+                ec[r[1]] += 1
+                break
+    return ec
+
+
+def source_cut(rows: list[tuple[int, str, str, int | None, int | None]], ec: Counter, N: int, flat: bool = False,
+               fit: bool = False, second: bool = False, runs: dict | None = None) -> tuple[list[list[tuple[int, str]]], Counter]:
+    """p1 to p<N> as the command cuts them, the same every time for the same scope and entry list. Units are directories:
+    each at the shallowest depth holding at most 1/N of the source cut's lines and of its entry points, a directory over
+    either split into its subdirectories and its own files (one unit while they fit, else a unit each); a row is a file,
+    or a range of a file over PART_CAP lines. A pinned row — over the line ceiling, or over the entry cap, by itself — is a
+    unit of its own and takes a partition first; the other units go largest first to the partition with the fewest
+    lines, ties the fewest entry points then the lowest number, that their entry points leave within its allowance. Then
+    steps that each strictly lower the total excess — lines over the ceiling plus entry points over a partition's
+    allowance, as partition_checks_n counts them — run until none does: one unit moved, then one unit exchanged for
+    smaller units of another partition, and, while a partition stays over, its largest unit split into its rows. A cut
+    that still ends over is set against the same search on single-row units (`flat`), and the one with less over
+    the caps is kept, the directory cut on a tie. With `second` (a 2.27.1 plan or later) a cut still over is set too
+    against both searches packed by fullest fit (`fit`): each unit, in the same order, to the partition with the most
+    lines it leaves at most 1/N of the lines, else at most the ceiling, within its entry allowance — else as before —
+    and the first of the four cuts with the least over the caps is kept. Largest first to the fewest lines balances,
+    and fullest fit pairs big rows the other leaves over: ten rows of 4,166 to 11,730 lines at N = 8 pass by fit and
+    end 169 lines over by fewest lines. Returns (the partitions' rows, each sorted by path and first line; the moves,
+    exchanges and splits made, `flat` and `fit` for the search kept)."""
+    runs = {} if runs is None else runs  # each search's own cut, by (flat, fit): shared by the calls for one scope and N
+
+    def one(fl: bool, ft: bool) -> tuple[list[list[tuple[int, str]]], Counter]:
+        if (fl, ft) not in runs:
+            runs[(fl, ft)] = _cut_search(rows, ec, N, fl, ft)
+        o_, s_ = runs[(fl, ft)]
+        return [list(p_) for p_ in o_], Counter(s_)
+    out, stats = one(flat, fit)
+    if not stats["left"] or flat or fit:
+        return out, stats
+    # the cuts are compared by what they leave over: from 2.27.1 on (`second`) first as --checks reads the cut
+    # (cut_checks_cost) — a partition holding a row that must end alone is held to the cap once another entry-bearing
+    # row joins it, where `excess` charges only the row that joined — then by `excess`, the first on a tie
+    score = (lambda o_, s_: (cut_checks_cost(o_, ec, N), s_["left"])) if second else (lambda o_, s_: (0, s_["left"]))
+    best, best_s = (out, stats), score(out, stats)
+    for fl, ft in [(True, False)] + ([(False, True), (True, True)] if second else []):
+        out_2, stats_2 = one(fl, ft)
+        s_2 = score(out_2, stats_2)
+        if s_2 < best_s:
+            stats_2.update({k_: 1 for k_, on_ in (("flat", fl), ("fit", ft)) if on_})
+            best, best_s = (out_2, stats_2), s_2
+        if best_s == (0, 0):
+            break
+    return best
+
+
+def _cut_search(rows: list[tuple[int, str, str, int | None, int | None]], ec: Counter, N: int, flat: bool,
+                fit: bool) -> tuple[list[list[tuple[int, str]]], Counter]:
+    """One search of source_cut: units — directories, or single rows with `flat` — packed largest first to the fewest
+    lines, or with `fit` to the fullest fit, then the moves, exchanges, swaps and splits. Returns (its partitions' rows,
+    its moves, exchanges, splits and `left`, the lines and entry points it leaves over the caps)."""
+    L, E = sum(r[0] for r in rows), sum(ec.values())
+    ceil_l = 115 * L // (N * 100)
+    cap_e = 120 * E // (N * 100) if E else 0
+    pinned = {r[1] for r in rows if r[0] * N * 100 > 115 * L or (E and ec[r[1]] * N * 100 > 120 * E)}
+    free_n, free_e = N - len(pinned), E - sum(ec[nm] for nm in pinned)
+    allow_free = max(cap_e, -(-free_e // free_n) if free_n > 0 and free_e > 0 else 0) if E else 10 ** 12
+    lim_l, lim_e = L / N, E / N
+    tree: dict[str, dict] = {}
+
+    def node(d: str) -> dict:
+        return tree.setdefault(d, {"dirs": set(), "rows": []})
+    for r in rows:
+        parts_ = r[2].split("/")
+        for i in range(len(parts_) - 1):
+            node("/".join(parts_[:i]))["dirs"].add("/".join(parts_[: i + 1]))
+        node("/".join(parts_[:-1]))["rows"].append(r)
+
+    def subtree(d: str) -> list:
+        out = list(node(d)["rows"])
+        for c in sorted(node(d)["dirs"]):
+            out += subtree(c)
+        return out
+    # a unit: [name, rows, lines, entry points, pinned]
+    mk = lambda nm, rs: [nm, rs, sum(r[0] for r in rs), sum(ec[r[1]] for r in rs), len(rs) == 1 and rs[0][1] in pinned]
+
+    def build(d: str) -> list:
+        st = subtree(d)
+        # a subtree within both limits is one unit, unless it holds a pinned row beside others: that row stands alone
+        if sum(r[0] for r in st) <= lim_l and sum(ec[r[1]] for r in st) <= lim_e and (len(st) == 1 or not any(r[1] in pinned for r in st)):
+            return [mk(st[0][1] if len(st) == 1 else (d or "<root>"), st)]
+        out = []
+        for c in sorted(node(d)["dirs"]):
+            out += build(c)
+        direct = node(d)["rows"]
+        if direct:
+            if len(direct) > 1 and sum(r[0] for r in direct) <= lim_l and sum(ec[r[1]] for r in direct) <= lim_e \
+                    and not any(r[1] in pinned for r in direct):
+                out.append(mk((d or "<root>") + "/*", direct))
+            else:
+                out += [mk(r[1], [r]) for r in direct]
+        return out
+    units = ([mk(r[1], [r]) for r in rows] if flat else build("")) if rows else []
+    parts: list[list] = [[] for _ in range(N)]
+    pl, pe, pin_e, pin_n = [0] * N, [0] * N, [0] * N, [0] * N
+    allow = lambda k: pin_e[k] if pin_n[k] else allow_free
+    excess = lambda k: max(0, pl[k] - ceil_l) + max(0, pe[k] - allow(k))
+
+    def put(u: list, q: int) -> None:
+        parts[q].append(u)
+        pl[q] += u[2]
+        pe[q] += u[3]
+        if u[4]:
+            pin_n[q] += 1
+            pin_e[q] += u[3]
+
+    def take(u: list, k: int) -> None:
+        parts[k].remove(u)
+        pl[k] -= u[2]
+        pe[k] -= u[3]
+        if u[4]:
+            pin_n[k] -= 1
+            pin_e[k] -= u[3]
+    for u in sorted(units, key=lambda u: (not u[4], -u[2], u[0])):
+        order = sorted(range(N), key=lambda q: (bool(pin_n[q]) if u[4] else False, pl[q], pe[q], q))
+        if u[4]:
+            q = order[0]
+        else:
+            ok = [q for q in order if not u[3] or pe[q] + u[3] <= allow(q)]
+            # fullest fit: the partition with the most lines the unit leaves within 1/N of the lines, else the ceiling
+            fits = ([q for q in ok if pl[q] + u[2] <= lim_l] or [q for q in ok if pl[q] + u[2] <= ceil_l]) if fit else []
+            q = max(fits, key=lambda q: (pl[q], -pe[q], -q)) if fits else (ok[0] if ok else order[0])
+        put(u, q)
+    stats: Counter = Counter()
+    by_l = lambda: sorted(range(N), key=lambda q: (pl[q], pe[q], q))
+    for _ in range(20000):
+        if not any(excess(k) for k in range(N)):
+            break
+        acted = False
+        for k in sorted((k for k in range(N) if excess(k)), key=lambda k: (-excess(k), k)):
+            best = None
+            for u in sorted((u for u in parts[k] if not u[4]), key=lambda u: (u[2], u[0])):
+                for q in by_l():
+                    if q == k:
+                        continue
+                    before = excess(k) + excess(q)
+                    take(u, k); put(u, q)
+                    gain = before - excess(k) - excess(q)
+                    take(u, q); put(u, k)
+                    if gain > 0:
+                        if best is None or gain > best[0]:
+                            best = (gain, u, q)
+                        break
+            if best:
+                take(best[1], k); put(best[1], best[2])
+                stats["moves"] += 1
+                acted = True
+                break
+            for u in sorted((u for u in parts[k] if not u[4]), key=lambda u: (-u[2], u[0])):
+                for q in by_l():
+                    if q == k:
+                        continue
+                    before = excess(k) + excess(q)
+                    hi, lo = ceil_l - pl[k] + u[2], pl[q] + u[2] - ceil_l
+                    S, s = [], 0
+                    for v in sorted((v for v in parts[q] if not v[4]), key=lambda v: (-v[2], v[0])):
+                        if v[2] < u[2] and s + v[2] <= hi:
+                            S.append(v)
+                            s += v[2]
+                        if s >= max(lo, 1):
+                            break
+                    if not S:
+                        continue
+                    take(u, k); put(u, q)
+                    for v in S:
+                        take(v, q); put(v, k)
+                    if excess(k) + excess(q) < before:
+                        stats["exchanges"] += 1
+                        acted = True
+                        break
+                    for v in S:
+                        take(v, k); put(v, q)
+                    take(u, q); put(u, k)
+                if acted:
+                    break
+            if acted:
+                break
+            # one unit of k swapped for one unit of another partition, the swap lowering the pair's excess — what an
+            # entry-point overflow needs when every receiver is at its allowance
+            for u in sorted((u for u in parts[k] if not u[4]), key=lambda u: (-u[3], -u[2], u[0])):
+                for q in by_l():
+                    if q == k:
+                        continue
+                    before = excess(k) + excess(q)
+                    for v in sorted((v for v in parts[q] if not v[4]), key=lambda v: (v[3], v[2], v[0])):
+                        take(u, k); put(u, q); take(v, q); put(v, k)
+                        if excess(k) + excess(q) < before:
+                            stats["exchanges"] += 1
+                            acted = True
+                            break
+                        take(v, k); put(v, q); take(u, q); put(u, k)
+                    if acted:
+                        break
+                if acted:
+                    break
+            if acted:
+                break
+            # split the unit holding what k is over: its largest by lines while k is over the ceiling, else the one
+            # holding the most entry points
+            over_lines = pl[k] > ceil_l
+            multi = sorted((u for u in parts[k] if len(u[1]) > 1 and (over_lines or u[3])),
+                           key=lambda u: ((-u[2], u[0]) if over_lines else (-u[3], -u[2], u[0])))
+            if multi:
+                u = multi[0]
+                take(u, k)
+                for r in u[1]:
+                    put(mk(r[1], [r]), k)
+                stats["splits"] += 1
+                acted = True
+                break
+        if not acted and any(pe[k] > allow(k) for k in range(N)):
+            # entry points still over with no step left: split the unit holding the most entry points anywhere, so a
+            # partner partition's rows can take part in the swaps, then search again
+            multi = sorted(((u, q) for q in range(N) for u in parts[q] if len(u[1]) > 1 and u[3]), key=lambda x: (-x[0][3], -x[0][2], x[0][0]))
+            if multi:
+                u, q = multi[0]
+                take(u, q)
+                for r in u[1]:
+                    put(mk(r[1], [r]), q)
+                stats["splits"] += 1
+                acted = True
+        if not acted:
+            break
+    out = [sorted(((r[0], r[1]) for u in us for r in u[1]), key=lambda x: (re.sub(r":\d+-\d+$", "", x[1]), int(m_.group(1)) if (m_ := re.search(r":(\d+)-\d+$", x[1])) else 0))
+           for us in parts]
+    stats["left"] = sum(excess(k) for k in range(N))
+    return out, stats
+
+
+def cut_checks_cost(cut: list[list[tuple[int, str]]], ec: Counter, N: int) -> int:
+    """What a source cut leaves over its caps as partition_checks_n reads it: per partition the lines over the ceiling,
+    unless one row alone holds it, and the entry points over the cap — 120/N%, or for a partition holding no row that must
+    end alone the larger bound the rest of the entry points give — unless one row holds them all and passes the cap
+    itself. 0 for a cut whose every failure --checks tags `(one file: …)`."""
+    L = sum(n for p_ in cut for n, _ in p_) or 1
+    E = sum(ec[nm] for p_ in cut for _, nm in p_)
+    over_l = lambda x: x * N * 100 > 115 * L
+    over_e = lambda e: bool(E) and e * N * 100 > 120 * E
+    ceil_l, cap_n = 115 * L // (N * 100), 120 * E // (N * 100)
+    pinned = {nm for p_ in cut for n, nm in p_ if over_l(n) or over_e(ec[nm])}
+    free_n, free_e = N - len(pinned), E - sum(ec[nm] for nm in pinned)
+    bound = -(-free_e // free_n) if free_n > 0 and free_e > 0 else 0
+    cost = 0
+    for p_ in cut:
+        pl_, pe_ = sum(n for n, _ in p_), sum(ec[nm] for _, nm in p_)
+        if over_l(pl_) and not (len(p_) == 1 and over_l(p_[0][0])):
+            cost += pl_ - ceil_l
+        pin_ = any(nm in pinned for _, nm in p_)
+        over_k = lambda e: over_e(e) and (pin_ or e > bound)
+        if over_k(pe_):
+            big = max((ec[nm] for _, nm in p_), default=0)
+            if not (big == pe_ and over_k(big)):
+                cost += pe_ - (cap_n if pin_ else max(cap_n, bound))
+    return cost
+
+
+_CUT_MEMO: dict = {}
+_CUT_RUNS: dict = {}  # each search's cut per scope, entry list and N: the 2.27.1 comparison reuses the fewest-lines ones
+
+
+def _cut_memo(key: tuple, rows: list, ec: Counter, N: int, second: bool = False) -> tuple[list[list[tuple[int, str]]], Counter]:
+    """source_cut, computed once per scope, entry list, N and version in a process: --checks, --roster and the recheck
+    items each read the plan's partitions, and a scope whose N rises would cut again for every one of them."""
+    k_ = (key, N, second)
+    if k_ not in _CUT_MEMO:
+        _CUT_MEMO[k_] = source_cut(rows, ec, N, second=second, runs=_CUT_RUNS.setdefault((key, N), {}))
+    out, st = _CUT_MEMO[k_]
+    return [list(p) for p in out], Counter(st)
+
+
+def source_manifest(pp: dict, k: int) -> str:
+    """Source partition p<k>'s manifest as `--partitions p<k>` prints it, for a plan the command cuts (cut_owned)."""
+    rows_p = pp["src_cut"][k - 1]
+    return (f"# partition: p{k} (source)\n# files: {len(rows_p)}\n# lines: {sum(n for n, _ in rows_p)}\n"
+            + "".join(f"{n}\t{nm}\n" for n, nm in rows_p))
+
+
+def n_floor_rows(lines: list[int], cap: int) -> int:
+    """The fewest partitions holding rows of these line counts with none over `cap` lines can need by count alone: for
+    each j, the rows over cap / (j + 1) lines — no j + 1 of them fit one partition — divided by j, rounded up; the
+    largest over every j (0 for no rows)."""
+    desc = sorted(lines, reverse=True)
+    best, i, j = 0, 0, 1
+    # no j's bound passes ceil(all rows / j), so the search stops once that is no more than the best found
+    while desc and -(-len(desc) // j) > best:
+        while i < len(desc) and desc[i] * (j + 1) > cap:
+            i += 1
+        best = max(best, -(-i // j))
+        j += 1
+    return best
+
+
+def partition_plan_v2(scope: list[tuple[int, str]], plan: str, root: Path | None = None) -> dict:
+    """The cut's fixed part at row v2: N source partitions over the source-kind rows (at least three, else one per
+    PART_CAP lines — for a plan the command cuts, raised while its cut would leave a partition over NO_MOVE_LINES), the ranges of every source file over the cap, then the lock-file, test, docs and browser partitions,
+    packed by pack() and numbered in that order after p<N>; the browser partitions only when its lens is chosen, its
+    rule finds files (their rows are source rows, also in the source partitions) and they pack into fewer partitions
+    than the N source ones — at N or more the lens reads the source partitions instead, as many workers or fewer, every
+    family file among them. `root` is unused: the family is read from the scope rows alone."""
+    uniq = list({p: (n, p) for n, p in reversed(scope)}.values())[::-1]
+    fit_ = cut_fit(plan)
+    kind = {p: scope_kind(p, fit_) for _, p in uniq}
+    src = [(n, p) for n, p in uniq if kind[p] == "source"]
+    L = sum(n for n, _ in src)
+    N = max(3, -(-L // PART_CAP))
+    # from 2.27.0 on the command cuts p1 to p<N> (source_cut) — and N rises past the line floor, one at a time, while its
+    # cut would leave a partition over NO_MOVE_LINES: whole rows over half the ceiling can outnumber the partitions, and a
+    # partition that size is one workers stop in
+    src_cut, src_stats, src_ec, n_raised_from = None, Counter(), Counter(), None
+    if cut_owned(plan):
+        rows_s = [(b - a + 1, f"{p}:{a}-{b}", p, a, b) for n, p in src if n > PART_CAP for a, b in line_ranges(n)] \
+            + [(n, p, p, None, None) for n, p in src if n <= PART_CAP]
+        src_ec = entry_rows(plan, rows_s)
+        n0 = N
+        # j + 1 rows each over NO_MOVE_LINES / (j + 1) never share a partition under it, so no N below
+        # ceil(their count / j) can pass, for any j: the search starts at the largest such bound, and the N it ends at is
+        # the one counting up from the floor would reach
+        N = max(N, min(len(rows_s), n_floor_rows([r[0] for r in rows_s], NO_MOVE_LINES)))
+        key_ = (tuple(rows_s), tuple(sorted(src_ec.items())))
+        src_cut, src_stats = _cut_memo(key_, rows_s, src_ec, N)
+        while src_cut and max(sum(n for n, _ in r) for r in src_cut) > NO_MOVE_LINES and N < len(rows_s):
+            N += 1
+            src_cut, src_stats = _cut_memo(key_, rows_s, src_ec, N)
+        n_raised_from = n0 if N != n0 else None
+        # from 2.27.1 on the fullest-fit searches run at the N the fewest-lines cut ends at, never moving it — a fit cut
+        # just under NO_MOVE_LINES would stop the rise a partition early, over the ceiling where the next N passes — and
+        # their cut is kept only when it leaves no partition over NO_MOVE_LINES that the fewest-lines cut kept under
+        if fit_ and src_stats["left"]:
+            cut_f, stats_f = _cut_memo(key_, rows_s, src_ec, N, True)
+            top_ = lambda c_: max(sum(n for n, _ in r) for r in c_)
+            if top_(cut_f) <= max(NO_MOVE_LINES, top_(src_cut)):
+                src_cut, src_stats = cut_f, stats_f
+    lenses, lsrc = lens_set(plan)
+    fam = {"browser": []}
+    bad, ep_added = [], 0
+    if "browser" in lenses:
+        fam["browser"], bad, ep_added = browser_family(plan, uniq, kind)
+    fam_n = {"browser": (len(fam["browser"]), sum(n for n, _ in fam["browser"]))}
+    mech, lines_k, wide = [], {}, {}
+    for k_ in ("lockfile", "test", "docs", "browser"):
+        rows_k = [(n, p) for n, p in uniq if kind[p] == k_] if k_ in ("lockfile", "test", "docs") else fam[k_]
+        packed = pack(rows_k)
+        if k_ == "browser" and len(packed) >= N:
+            wide[k_] = len(packed)  # as many partitions as the source cut or more: the lens reads the source ones
+            packed, rows_k = [], []
+        lines_k[k_] = sum(n for n, _ in rows_k)
+        mech += [(k_, pr) for pr in packed]
+    cnt = {k_: sum(1 for kk, _ in mech if kk == k_) for k_ in KIND_NOTE}
+    row = (f"{N} source + {cnt['lockfile']} lockfile + {cnt['test']} test + {cnt['docs']} docs + {cnt['browser']} browser — "
+           f"{L} source lines, {lines_k['lockfile']} lockfile, {lines_k['test']} test, {lines_k['docs']} docs, "
+           f"{lines_k['browser']} browser / cap {PART_CAP}")
+    families = [f for f in ("browser",) if f in lenses]
+    return {"v": 2, "fit": fit_, "N": N, "K": cnt["lockfile"], "L": L, "ranges": {p: line_ranges(n) for n, p in src if n > PART_CAP},
+            "src_cut": src_cut, "src_stats": src_stats, "src_ec": src_ec, "n_raised_from": n_raised_from,
+            "lock": [pr for kk, pr in mech if kk == "lockfile"], "mech": mech, "kind": kind, "row": row, "families": families,
+            "lens_src": lsrc, "bad_manifests": bad, "browser_entry_files": ep_added, "counts": cnt, "family": fam_n, "wide": wide}
 
 
 COPY_FLOOR = 100  # a file with fewer eight-word phrases of composed prose than this is too short to tell a copy from a re-verification
@@ -1143,6 +2367,28 @@ def roster_lines(plan: str, k: int, cache: Path | None = None) -> tuple[bool, li
         return False, [f"wave {k}: no `wave roster {k}:` line"]
     pairs = ros[k]
     lines = [f"wave {k}: {len(pairs)} workers — start exactly these {len(pairs)} subagents and no other"] + pairs
+    wrong_r = None
+    if cache is not None:
+        exp_r, desc_r = expected_pairs(plan, cache)
+        all_r = {pr for v in ros.values() for pr in v}
+        pp_r = plan_partitions(plan, cache) if exp_r is not None else None
+        if pp_r is not None and pp_r.get("v") == 2 and pp_r.get("row") and (partition_row(plan) or "") != pp_r["row"]:
+            # the pairs follow the cut: rosters written from a row the scope does not give are rosters of another cut
+            wrong_r = ("rosters: wrong — the `partition count:` row differs from the cut the scope manifest gives: run `--partitions`, "
+                       "write its first line, the manifests after p<N> it names, and run `--checks` again, then the rosters")
+        elif exp_r is not None and desc_r.endswith((NO_ADDED, NO_ADDED_ROW, NO_ADDED.replace('no `added lenses:` row, ', 'no '))):
+            wrong_r = (f"rosters: wrong — the plan names no added lens ({desc_r.split('lens set from ', 1)[-1]}): STEP 1 chooses one at "
+                       "least and writes it on the `added lenses:` row before the rosters")
+        elif exp_r is not None and all_r != exp_r:
+            miss_r, extra_r = sorted(exp_r - all_r), sorted(all_r - exp_r)
+            wrong_r = (f"rosters: wrong — {len(all_r)} pairs, the cut {len(exp_r)} ({desc_r})" + (f"; not on a roster: {_few(miss_r)}" if miss_r else "")
+                       + (f"; no pair of the cut: {_few(extra_r)}" if extra_r else "") + " — rewrite the `wave roster` lines before any wave is sent, or "
+                       "correct the `added lenses:` row when the pairs it calls extra are a chosen lens the row omits")
+        elif exp_r is None:
+            req_r = partition_row_required(plan, cache)
+            if req_r:
+                wrong_r = (f"rosters: wrong — no `partition count:` row ({req_r}): run `--partitions`, copy its first line into this "
+                           "run's scan-plan.md and write the rosters from that cut before any wave is sent")
     firsts = {}
     for pair, when, _ in re.findall(r"^([a-z-]+/p\d+): \S+ (\S+) paths \d+/\d+(.*)$", plan, re.M):
         firsts[pair] = min(firsts.get(pair, when), when)
@@ -1167,7 +2413,11 @@ def roster_lines(plan: str, k: int, cache: Path | None = None) -> tuple[bool, li
             # the completion is read from the files, rounded up to the second, so no file is sealed after it
             lines.append(f"wave {k} files ended {done}/{len(pairs)}" + (f" — complete {time.strftime('%Y-%m-%d_%H-%M-%S', time.localtime(int(newest) + (0 if newest == int(newest) else 1)))}" if done == len(pairs) and newest else ""))
         lines.append(f"recorded first attempts in wave {k}: {len(in_wave)}" + (f" | not on this roster: {', '.join(extra)}" if extra else "") + (f" | roster pairs not yet started: {', '.join(missing)}" if missing else ""))
+        if wrong_r:
+            return False, lines + [wrong_r]
         return not extra, lines
+    if wrong_r:
+        return False, lines + [wrong_r]
     return True, lines
 
 
@@ -1541,12 +2791,13 @@ def main() -> int:
     ap.add_argument("--paths", nargs="+", metavar=("FILE", "PAIR"), help="STEP 2: test every path a worker prompt file names (the output path against `<lens>/p<n>`), print `paths <k>/<m>` and, when all pass, the `send:` line the worker is started with, and exit (0 all exist, 1 not)")
     ap.add_argument("--record", action="store_true", help="STEP 3, the session only: append this set to the scan plan — the recorded set; a run without it reads and records nothing")
     ap.add_argument("--checks", action="store_true", help="STEP 1: print the `checks:` line the scan plan must carry, from its entry list and the partition manifests, and exit (0 pass, 1 failed)")
+    ap.add_argument("--partitions", nargs="?", const="", metavar="P", help="STEP 1: print the `partition count:` row — N source partitions and the lockfile partitions, from scope-manifest.txt — each lockfile partition's rows and the ranges of every source file over the cap; with `p<k>` print lockfile partition k's manifest; exit (0, 1 not a lockfile partition, 2 no scope manifest)")
     ap.add_argument("--overlaps", action="store_true", help="STEP 2: print one `overlap:` line for each sink a record's `Also at:` line names that another worker file's record holds as its own `File:` sink at one class and entry point, then `overlaps: <n>` and the grouping workers, and exit (0 none, 1 any — a list to read, not a failure — 2 no worker files or no skills directory)")
     ap.add_argument("--duplicates", action="store_true", help="STEP 3: print every pair of table rows item (48) asks the writer to judge — kind, worker records, VULN ids, worker severities, classes, sinks, whether each key is a ledger row of the pre-write copy, entry points and the answer written — and exit")
     ap.add_argument("--needs-context", action="store_true", help="STEP 3: print every worker-file line outside a finding record that names a NEEDS CONTEXT judgement — `<lens>/p<n>:<line>`, its text, and the report's `needs context:` answer if it has one — the lines item (49) asks the writer to answer, and exit 0 (2 with no worker files)")
     ap.add_argument("--ledger-start", action="store_true", help="STEP 1: print the `ledger rows at start:` row, counted in the pre-write copy the plan's `started:` row names, and exit (0 counted; 2 no copy, a plan past STEP 1, or a copy whose ledger rows differ in number from the memory's)")
     args = ap.parse_args()
-    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "paths", "roster", "gate", "ledger-start", "checks", "duplicates", "needs-context", "overlaps")
+    other_mode = next((f"--{n}" for n in ("contracts", "prompt", "paths", "roster", "gate", "ledger-start", "checks", "partitions", "duplicates", "needs-context", "overlaps")
                        if getattr(args, n.replace("-", "_"), None) is not None and getattr(args, n.replace("-", "_"), None) is not False), None)  # `--roster 0` is a mode too
     if args.record and other_mode:
         sys.stderr.write(f"recorded: nothing — --record records a plain recheck set, and this run is {other_mode}\n")
@@ -1701,20 +2952,175 @@ def main() -> int:
             return 2
         print(f"ledger rows at start: {n_l}")
         return 0
+    if args.partitions is not None:
+        tgt = Path(args.target).resolve()
+        scope_p = scope_rows(tgt / ".llm-sast-scanner-cache")
+        if not scope_p:
+            # the row's own name: a session that copies this line gets a plan read at N partitions, which fails on it, never a
+            # plan read as a cut of three
+            print(f"partition count: error — {scope_error(tgt / '.llm-sast-scanner-cache')}")
+            return 2
+        plan_p = read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md")
+        if cut_version(plan_p) == 1:
+            # a plan of a wrapper before 2.26.14: the cut that version prints, so a resumed or repaired run keeps its own
+            pp = partition_plan(scope_p)
+            n_p, k_p = pp["N"], pp["K"]
+            if args.partitions:
+                m_p = re.fullmatch(r"p(\d+)", args.partitions.strip())
+                k_ = int(m_p.group(1)) if m_p else 0
+                if not n_p < k_ <= n_p + k_p:
+                    print(f"partitions: {args.partitions} is no lockfile partition — " + (f"the lockfile partitions are p{n_p + 1}–p{n_p + k_p}" if k_p > 1 else f"the lockfile partition is p{n_p + 1}" if k_p else "this scope holds no lock file")
+                          + f"; p1–p{n_p} are the source partitions, which the cut writes")
+                    return 1
+                rows_p = pp["lock"][k_ - n_p - 1]
+                print(f"# partition: p{k_} (lockfile)\n{LOCK_READ_NOTE}\n# files: {len(rows_p)}\n# lines: {sum(n_ for n_, _ in rows_p)}")
+                for n_, name_ in rows_p:
+                    print(f"{n_}\t{name_}")
+                return 0
+            print(f"partition count: {pp['row']}")
+            for i_, rows_p in enumerate(pp["lock"]):
+                for n_, name_ in rows_p:
+                    print(f"lockfile p{n_p + i_ + 1}: {n_}\t{name_}")
+            for path_, rs_ in sorted(pp["ranges"].items()):
+                for a_, b_ in rs_:
+                    print(f"range: {b_ - a_ + 1}\t{path_}:{a_}-{b_}")
+            return 0
+        _, lsrc_p = lens_set(plan_p)
+        if lsrc_p in (NO_ADDED, NO_ADDED_ROW) or lsrc_p.startswith("an `added lenses:` row read as no list"):
+            # the browser partitions follow the lens set: a cut printed before it is chosen is a cut without them
+            print(f"partition count: error — this run's scan-plan.md names no added lens ({lsrc_p}): write the derivation table and "
+                  "the `base lenses:` and `added lenses:` rows first, then run `--partitions`")
+            return 2
+        pp = partition_plan_v2(scope_p, plan_p, tgt)
+        n_p, mech_p = pp["N"], pp["mech"]
+        if pp["bad_manifests"]:
+            bad_p = [b_ if len(b_) <= 120 else b_[:120] + "…" for b_ in pp["bad_manifests"]]
+            print(f"partition count: error — the browser derivation row names {_few(bad_p)}, no scope row: "
+                  "correct its `dependency signals` cell to the manifests the scope holds, then run `--partitions` again")
+            return 2
+        owned_p = pp.get("src_cut") is not None
+        if args.partitions and args.partitions.strip() == "entries" and owned_p:
+            # the entry list with each line's partition column the command's cut gives it — the file's partition, or the
+            # range's that holds the line; a line no source partition holds keeps its column, for --checks to name
+            home_ = {nm_: k_i for k_i, rows_k in enumerate(pp["src_cut"], start=1) for _, nm_ in rows_k}
+            ranges_ = {}
+            for nm_, k_i in home_.items():
+                mr_ = re.fullmatch(r"(.+):(\d+)-(\d+)", nm_)
+                if mr_ and mr_.group(1) in pp["ranges"]:
+                    ranges_.setdefault(mr_.group(1), []).append((int(mr_.group(2)), int(mr_.group(3)), k_i))
+            # the section as the plan holds it: its heading line, then its lines to the next `## ` heading, trailing blank
+            # lines aside — so writing the output back and running the command again prints the same section
+            m_h = re.search(r"(?m)^## Entry points[^\n]*$", plan_p)
+            sec_lines = (plan_p[m_h.end():].split("\n## ", 1)[0].split("\n")[1:] if m_h else [])
+            while sec_lines and not sec_lines[-1].strip():
+                sec_lines.pop()
+            print(m_h.group(0) if m_h else "## Entry points")
+            for l_ in sec_lines:
+                if not ENTRY_N_RX.match(l_):
+                    print(l_)  # a line the list's form does not read (a header, a note) goes through as written
+                    continue
+                loc_ = l_.split(" | ", 1)[0].strip().lstrip("|").strip().strip("`")
+                lm_ = re.search(r":(\d+)(?:-\d+)?$", loc_)
+                path_, ln_ = npath(re.sub(r":\d+(?:-\d+)?$", "", loc_)), (int(lm_.group(1)) if lm_ else None)
+                k_e = next((kk for a_, b_, kk in ranges_.get(path_, []) if ln_ is not None and a_ <= ln_ <= b_), home_.get(path_))
+                if k_e is None:
+                    print(l_)  # in no source partition: kept as written, for --checks to name
+                    continue
+                cells_ = [c_.strip() for c_ in l_.strip().strip("|").split(" | ")]
+                # the partition column last: an earlier partition cell after the name dropped, any other cell kept
+                # the partition column last: on a line of four cells or more, earlier partition cells after the name
+                # dropped, the name kept whatever it reads; on a three-cell line its last cell dropped only when it reads
+                # `p<n>` (or `p?`), the form only a partition column takes
+                if len(cells_) >= 4:
+                    cells_ = cells_[:3] + [c_ for c_ in cells_[3:] if not re.fullmatch(r"p?(\d+|\?)", c_)] + [f"p{k_e}"]
+                else:
+                    cells_ = [c_ for i_, c_ in enumerate(cells_) if not (i_ == 2 and re.fullmatch(r"p(\d+|\?)", c_))] + [f"p{k_e}"]
+                print(" | ".join(cells_))
+            return 0
+        if args.partitions:
+            m_p = re.fullmatch(r"p(\d+)", args.partitions.strip())
+            k_ = int(m_p.group(1)) if m_p else 0
+            if owned_p and 1 <= k_ <= n_p:
+                print(source_manifest(pp, k_), end="")
+                return 0
+            if not n_p < k_ <= n_p + len(mech_p):
+                if owned_p:
+                    print(f"partitions: {args.partitions} is none of the partitions this command writes — those are p1–p{n_p + len(mech_p)}, "
+                          "and `entries` prints the entry list's partition column")
+                    return 1
+                print(f"partitions: {args.partitions} is none of the partitions this command writes — "
+                      + (f"those are p{n_p + 1}–p{n_p + len(mech_p)}" if len(mech_p) > 1 else f"that is p{n_p + 1}" if mech_p else "this scope needs none")
+                      + f"; p1–p{n_p} are the source partitions, which the cut writes")
+                return 1
+            kind_, rows_p = mech_p[k_ - n_p - 1]
+            print(f"# partition: p{k_} ({kind_})\n{KIND_NOTE[kind_]}\n# files: {len(rows_p)}\n# lines: {sum(n_ for n_, _ in rows_p)}")
+            for n_, name_ in rows_p:
+                print(f"{n_}\t{name_}")
+            return 0
+        print(f"partition count: {pp['row']}")
+        print(f"families chosen: {', '.join(pp['families']) or 'none'} (lens set from {pp['lens_src']})")
+        if "browser" in pp["families"]:
+            f_n, f_l = pp["family"]["browser"]
+            if not f_n:
+                print("browser family: none — the family holds no file: no browser partitions, browser reads every source partition")
+            elif pp["wide"].get("browser"):
+                print(f"browser family: {f_n} file{'s' if f_n != 1 else ''}, {f_l} lines — they pack into {pp['wide']['browser']} partitions, as many as "
+                      f"the {pp['N']} source partitions or more: no browser partitions, browser reads every source partition")
+            else:
+                k_b = pp["counts"]["browser"]
+                print(f"browser family: {f_n} file{'s' if f_n != 1 else ''}, {f_l} lines in {k_b} partition{'s' if k_b != 1 else ''} | entry files added: "
+                      f"{pp['browser_entry_files']}")
+        if owned_p:
+            ec_p = pp["src_ec"]
+            for k_i, rows_k in enumerate(pp["src_cut"], start=1):
+                print(f"source p{k_i}: {len(rows_k)} rows, {sum(n_ for n_, _ in rows_k)} lines, {sum(ec_p[nm_] for _, nm_ in rows_k)} entry points")
+            st_p = pp["src_stats"]
+            print(f"source cut: {st_p['moves']} moves, {st_p['exchanges']} exchanges, {st_p['splits']} splits after packing"
+                  + ((" — single-file units in fullest-fit packing, the other three cuts leaving more over the caps" if st_p.get("fit")
+                      else " — single-file units, the directory cut leaving more over the caps") if st_p.get("flat")
+                     else " — fullest-fit packing, the fewest-lines cuts leaving more over the caps" if st_p.get("fit") else "")
+                  + (f" | N raised from {pp['n_raised_from']} to {pp['N']}: a cut with no partition over {NO_MOVE_LINES} lines needs it"
+                     if pp.get("n_raised_from") else ""))
+        for i_, (kind_, rows_p) in enumerate(mech_p):
+            print(f"{kind_} p{n_p + i_ + 1}: {len(rows_p)} rows, {sum(n_ for n_, _ in rows_p)} lines")
+        for path_, rs_ in sorted(pp["ranges"].items()):
+            for a_, b_ in rs_:
+                print(f"range: {b_ - a_ + 1}\t{path_}:{a_}-{b_}")
+        return 0
     if args.checks:
         tgt = Path(args.target).resolve()
-        ok_c, parts_c, fails_c = partition_checks(read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md"), tgt / ".llm-sast-scanner-cache")
+        plan_c = read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md")
+        ok_c, parts_c, fails_c = partition_checks(plan_c, tgt / ".llm-sast-scanner-cache")
+        pp_c = plan_partitions(plan_c, tgt / ".llm-sast-scanner-cache")  # None: a cut of three, read as before
         if not parts_c:
-            print("checks: failed — no entry list or partition manifests to check")
+            nrow_c = bool(fails_c) and fails_c[0].startswith("no `partition count:` row")
+            print("checks: failed — " + ("; ".join(fails_c) if (pp_c is not None or nrow_c) and fails_c else "no entry list or partition manifests to check"))
             return 1
-        print(f"checks: pass — {'; '.join(parts_c)}" if ok_c else f"checks: failed — {'; '.join(fails_c)} | {'; '.join(parts_c)}")
+        if pp_c is not None:
+            line_c = checks_line(ok_c, parts_c, fails_c)
+            print(line_c)
+            if not ok_c and line_c != f"checks: failed — {'; '.join(fails_c)} | {'; '.join(parts_c)}":
+                for f_ in fails_c:
+                    print(f"failure: {f_}")
+        else:
+            print(f"checks: pass — {'; '.join(parts_c)}" if ok_c else f"checks: failed — {'; '.join(fails_c)} | {'; '.join(parts_c)}")
         # a line share outside the band with no file above it by itself is left to the split and the moves, which only the
         # session can run (the checker never reads units): say how, so it is not dispatched on untried; the plan carries the
         # `checks:` line alone, and once no split and no move remains the line stands as printed
-        line_f = [f_ for f_ in fails_c if "of lines (outside 15% of one third)" in f_]
-        open_l = [f_.split(" holds ")[0] for f_ in line_f if "(one file: " not in f_]
-        # one file above 100% - 2 x (one third - 15%) of the lines by itself leaves the other two no room inside the band
-        crowded = any(100.0 * int(m_.group(1)) / max(int(m_.group(2)), 1) > 100 - 2 * (100 / 3 * 0.85)
+        if pp_c is not None and pp_c.get("src_cut") is not None:
+            # this version's command cuts the source partitions: nothing is left for the session to split or move — only
+            # its manifests and its entry list's partition column to write as the command prints them
+            if any("source partitions p" in f_ and "differ from the manifests" in f_ for f_ in fails_c) \
+                    or any("entry points name" in f_ for f_ in fails_c):
+                print(f"remedy: not final — write each source manifest as `--partitions p<k>` prints it (p1–p{pp_c['N']}) and the "
+                      "`## Entry points` list as `--partitions entries` prints it, then run --checks again")
+            return 0 if ok_c else 1
+        line_f = [f_ for f_ in fails_c if re.search(r"of lines \(outside 15% of (?:one third|1/\d+)\)", f_)]
+        open_l = [f_.split(" holds ")[0] for f_ in line_f if not IRREDUCIBLE_RX.search(f_)]
+        # one file above 100% - 2 x (one third - 15%) of the lines by itself leaves the other two no room inside the band;
+        # at N partitions the `(squeezed: …)` tag says so per partition
+        n_c = pp_c["N"] if pp_c else 3
+        crowded = pp_c is None and any(100.0 * int(m_.group(1)) / max(int(m_.group(2)), 1) > 100 - 2 * (100 / 3 * 0.85)
                       for f_ in line_f for m_ in [re.search(r"\(one file: .+ holds (\d+) of (\d+) lines\)", f_)] if m_)
         if open_l and not crowded:
             print(f"remedy: not final — {', '.join(open_l)} outside the line band with no `(one file: …)` on its failure: split the "
@@ -1722,7 +3128,9 @@ def main() -> int:
                   "partition with the most lines that has a movable unit gives the partition with the fewest the smallest "
                   "movable unit whose move puts both inside the band, else its smallest movable unit, a unit being movable "
                   "when it has more than zero lines, is smaller than the difference between the two partitions' lines and "
-                  "puts the receiving partition above neither 40% cap (source lines, entry points) — each moved unit's entry "
+                  + ("puts the receiving partition above neither 40% cap (source lines, entry points) — each moved unit's entry "
+                     if pp_c is None else "puts the receiving partition above neither 40% cap (source lines, entry points — beside a row that must stand alone, the entry cap its failure line prints) nor over the line ceiling — each moved unit's entry "
+                     if n_c == 3 else f"puts the receiving partition over no cap — the entry-point cap alone, {_pct(120 / n_c)}% or, beside a row that must stand alone (over the line ceiling, or over the entry cap, by itself), the cap the failure lines print, which a unit without entry points never counts against — nor over the line ceiling — each moved unit's entry ") +
                   "points with it (their list lines' partition column rewritten); rewrite the manifests and the unit lines, "
                   "run --checks again, and copy only its `checks:` line into the plan; once no split and no move remains, "
                   "the line stands as printed")
@@ -1936,7 +3344,7 @@ def main() -> int:
     # 4. merges with a different entry point
     # an entry point is the scan-plan's `## Entry points` entry it names: workers cite one resolver at its decorator line and
     # at its method line (`R.ts:373 Mutation createX`, `R.ts:376 Mutation createX`) or by name alone (`createX`)
-    ep_list_sec = plan.split("## Entry points", 1)[1].split("\n## ", 1)[0] if "## Entry points" in plan else ""
+    ep_list_sec = entry_section(plan)
     IDENT = r"[A-Za-z_$][\w$]*"
     ep_entries = []  # (path, line, operation name — the name field's last identifier)
     for l in ep_list_sec.splitlines():
@@ -3151,7 +4559,7 @@ def main() -> int:
          f"{rep_vc[0]} | voided {rep_vc[1]}" if rep_vc else "absent", bool(rep_vc) and rep_vc[0] == carried + changed and rep_vc[1] == voided and bare == 0 and carried_stale == 0)
 
     # 15. entry points dispositioned
-    ep_sec = plan.split("## Entry points", 1)[1].split("\n## ", 1)[0] if "## Entry points" in plan else ""
+    ep_sec = entry_section(plan)
     ep_lines = [l for l in ep_sec.splitlines() if ENTRY_LINE_RX.match(l)]
     rep_ep = ints(r"^entry points dispositioned (\d+)/(\d+)", appendix)
     # an entry point no lens named may stand on an `unanalyzed` line only when its partition holds a `worker not run:`
@@ -3270,9 +4678,16 @@ def main() -> int:
     checks_row = row(plan, "checks:") or ""
     stated = "pass" if checks_row.startswith("pass") else ("failed" if checks_row.startswith("failed") else "absent")
     computed = "pass" if computed_ok else "failed"
-    # a failure is the skill's recorded outcome only when every one names a single file over the cap by itself
-    irreducible = bool(_fails) and all("(one file: " in f_ for f_ in _fails) and re.sub(r"\s+", " ", checks_row) == f"failed — {'; '.join(_fails)} | {'; '.join(parts)}"
-    emit("checks", f"{computed} ({'; '.join(parts) or 'no list or manifests'})" + (" — each failure one file over the cap by itself" if computed == "failed" and irreducible else ""),
+    # a failure is the skill's recorded outcome only when every one names a single file over the cap by itself or, from
+    # 2.26.16 on, a line share no move can mend (`(no move: …)`)
+    want19 = (checks_line(False, parts, _fails)[len("checks: "):] if partition_row(plan) is not None
+              else f"failed — {'; '.join(_fails)} | {'; '.join(parts)}")
+    irreducible = bool(_fails) and all(IRREDUCIBLE_RX.search(f_) for f_ in _fails) and re.sub(r"\s+", " ", checks_row) == want19
+    nrow19 = bool(_fails) and _fails[0].startswith("no `partition count:` row")
+    nomove19 = any("(no move: " in f_ or "(the command's cut: " in f_ for f_ in _fails)
+    emit("checks", f"{computed} ({'; '.join(parts) or (_fails[0] if nrow19 else 'no list or manifests')})"
+         + ((" — each failure one no split or move can mend" if nomove19 else " — each failure one file over the cap by itself")
+            if computed == "failed" and irreducible else ""),
          stated, computed == stated == "pass" or (computed == stated == "failed" and irreducible))
 
     # 20. STEP 1 rows unchanged — the scan plan above `workers dispatched:` against its copy taken at dispatch
@@ -3385,6 +4800,18 @@ def main() -> int:
     over_cap = sum(1 for _, r in rosters if len(r) > 15)
     matching = sum(1 for i, (_, r) in enumerate(sorted(rosters)) if i < len(waves_sorted) and sorted(r) == sorted(waves_sorted[i]))
     roster_ok = bool(rosters) and len(all_pairs) == len(set(all_pairs)) and over_cap == 0 and matching == len(rosters) == len(waves_sorted)
+    # at N partitions the rosters hold every lens on every source partition and hardening-platform alone on the lockfile
+    # partitions — nothing else checks the pair set, and item (29) reads only the pairs the rosters name
+    exp25, desc25 = expected_pairs(plan, cache)
+    set_txt25 = ""
+    if exp25 is not None and desc25.endswith((NO_ADDED, NO_ADDED_ROW, NO_ADDED.replace('no `added lenses:` row, ', 'no '))):
+        set_txt25 = f" | the plan names no added lens ({desc25.split('lens set from ', 1)[-1]})"
+        roster_ok = False
+    elif exp25 is not None and set(all_pairs) != exp25:
+        miss25, extra25 = sorted(exp25 - set(all_pairs)), sorted(set(all_pairs) - exp25)
+        set_txt25 = (f" | roster pairs {len(set(all_pairs))}, the cut {len(exp25)} ({desc25})" + (f"; not on a roster: {_few(miss25)}" if miss25 else "")
+                     + (f"; no pair of the cut: {_few(extra25)}" if extra25 else ""))
+        roster_ok = False
     # a wave's `complete` time, and the next wave's start, against its first attempts' files (pairs with no re-run line):
     # each file was sealed at or before its wave's completion and before the next wave started. File times are read only
     # when they are the run's own — every one written after the run's `started:` and before the time the report is named
@@ -3516,7 +4943,7 @@ def main() -> int:
             + " — a dispatch line is written as its subagent starts, its time a `date` output read then")
     comp_hint = ("; ".join(late_c + early_s) + " — a wave's `complete` time is a `date +%Y-%m-%d_%H-%M-%S` output read once its last file ends with its sentinel (the time `--roster <k>` prints then)") if (late_c or early_s) else ""
     hint_25 = "; ".join(x for x in (comp_hint, "; ".join(disp_msgs)) if x)
-    emit("wave rosters", f"{matching}/{len(rosters) if rosters else 'absent'} waves match | over cap {over_cap} | dispatch groups {len(waves_sorted)} sized {','.join(str(len(w)) for w in waves_sorted)}" + timing_txt, None,
+    emit("wave rosters", f"{matching}/{len(rosters) if rosters else 'absent'} waves match | over cap {over_cap} | dispatch groups {len(waves_sorted)} sized {','.join(str(len(w)) for w in waves_sorted)}" + timing_txt + set_txt25, None,
          roster_ok and not late_c and not early_s and not disp_msgs,
          (hint_25 + "; a STEP 2 line, left as it stands by the writer and named in its final message") if hint_25 else None)
     # the appendix's `dispatch lines late:` is the writer's line, counted from the plan as above

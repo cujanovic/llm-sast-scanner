@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.31"
+  version: "1.50.32"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -627,7 +627,7 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 **Protocol & Architecture**
 - Protocol-designed SSRF: skip `ssrf` when fetching a peer-supplied URL is required by spec (LNURL, UMA, OAuth discovery, WebFinger, OIDC discovery). Only report if the impl allows schemes the protocol does not require (e.g., `file://`) or skips required domain validation.
 - Blind SSRF: downgrade to `Informational` when all three hold: (a) response never reaches the attacker, (b) no meaningful side effect on the target, (c) no error oracle.
-- Bounded DoS: skip `denial_of_service` unless the upper bound of the iterated/allocated data is attacker-controllable and unbounded. Naturally bounded data (blockchain validator set, gas limits, etcd/request-body size caps) → not a finding.
+- Bounded DoS: skip `denial_of_service` unless the upper bound of the iterated/allocated data is attacker-controllable and unbounded. Naturally bounded data (blockchain validator set, gas limits, etcd/request-body size caps) → not a finding. It bounds iterated or allocated data only, never a regex match: a fixed super-linear pattern on an attacker-supplied subject (`regex_injection_redos`) is cleared only by a cap the repository enforces at which one match's worst-case work is about 10⁷ steps or fewer (about 3,000 characters for a quadratic shape, 200 for a cubic one, 20 for an exponential one) — the work of many capped matches then grows only linearly with the input, iterated data this guardrail bounds, unless the code matches the same text over and over — and a provider limit the repository does not set (the note after Step 6's verdict table) clears none and grounds no `WITHDRAWN` or `DISPUTED` of one (`regex_injection_redos.md` Bounded Subjects).
 - Brute force: skip `brute_force` only if rate limiting is visible in code, framework config, or referenced middleware in the repo. Do not assume infrastructure-level rate limiting.
 - Idempotent replay: skip replay/`business_logic` when the operation is idempotent AND parameters are cryptographically signed (no tampering possible).
 - Library dead path: if no real caller in the codebase triggers the vulnerable parameter combination AND the code has a warning log for that path → `NEEDS CONTEXT`, not a finding.

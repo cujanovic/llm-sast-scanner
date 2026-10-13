@@ -5,16 +5,18 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.26.12"
+  version: "2.27.1"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
 
 # SAST Full Scan Loop
 
-Runs the convergence loop **partitioned**: the codebase is split into three line-balanced slices and every
-vulnerability lens gets one subagent per slice, so each subagent covers a third of the code under a single lens
-and can follow call chains instead of skimming.
+Runs the convergence loop **partitioned**: the codebase is split into line-balanced slices — three, or one per
+12,000 lines when it holds more — and every vulnerability lens gets one subagent per slice of code, so each subagent
+covers at most about 12,000 lines under a single lens and can follow call chains instead of skimming; lock files, test
+code and prose docs are slices of their own, read only by the lenses whose classes find anything there, and the
+browser lens reads its own family's files.
 
 This is a thin wrapper. All audit mechanics live in
 [`llm-sast-scanner-convergence-loop`](../llm-sast-scanner-convergence-loop/SKILL.md); this file only fixes the
@@ -49,17 +51,15 @@ on, and a delegated cut cannot be checked by the session that dispatches against
 the skill's D1, writing the manifest and partition files with redirected shell commands rather than composing them
 in a response. D1's `architecture-threat-model.md` is written anew whenever the previous plan's `wrapper:` row differs
 from this run's, or the previous plan holds none, whatever D1's SHA gate allows: its entry points, stack and
-allowlist were read under rules this version changed. Then split the in-scope files into 3 partitions balanced by ATTACK SURFACE, not by line count
-alone. The manifest holds only what D1 leaves in scope: generated output derived from in-scope source — ORM
+allowlist were read under rules this version changed. The command then cuts the in-scope files into partitions balanced by lines and entry
+points — three, or more, as the `partition count:` row below fixes. The manifest holds only what D1 leaves in scope: generated output derived from in-scope source — ORM
 snapshots and journals, build and bundle output, generated route trees — is excluded in `scope-excluded.txt`
 with its reason, never classified or partitioned, and so are the orchestrating runtime's own run logs and exported
 transcripts in the repository: they are records of a scan, not code under review, and a route string inside one is
-not an entry point. Classify every remaining row as `source` (application,
-infrastructure, CI and build code), `test` (test, fixture, mock and end-to-end trees) or `text` (documentation,
-package manifests, lockfiles, editor and agent configuration). Count entry points per directory with STEP 2's entry-point
+not an entry point. Count entry points per directory with STEP 2's entry-point
 definition — every registration of every kind that a caller can invoke: an operation (query, mutation,
 subscription, field resolver), a route or handler, a message consumer, a scheduled job, a command — plain HTTP routes
-included; a direct call of a triggered function through its platform's invoke API is none (base skill, finding
+included, a page's gesture and lifecycle listeners none (the derivation table's `entry points` column); a direct call of a triggered function through its platform's invoke API is none (base skill, finding
 identity), and each triggered handler is read for a branch that, when the trigger's records are absent, goes on to
 process the event, that branch listed at its line, kind `direct-invocation branch`; a class, module, schema or
 container that only groups such registrations is not an entry point however it
@@ -72,64 +72,143 @@ a family's row holds only the registrations of that family's own protocol or dec
 belongs to no family, so it counts for the cut and for no row. The two totals are expected to differ; `scan-plan.md`
 states both on one line, `entry points: <n> counted for the cut | <m> across families`, so no later step
 reconciles them. A derivation row that reaches its count through the files a family touches, rather than through
-the registrations it owns, is a STEP 1 error. The cut is a procedure run the same way every time, not a set of bounds to satisfy creatively: (1) form
-units — each `source` directory at the shallowest depth at which it holds at most one third of the `source` lines
-AND at most one third of the entry points, and each `test` or `text` directory at the shallowest depth at which it
-holds at most one third of its own class's lines; a directory over a limit is split at its subdirectories, or at its
-files when it has none, and only that directory is split; (2) sort the units by `source` lines, largest first, ties
-by path ascending, and assign each in turn to the partition with the fewest `source` lines so far, ties broken by
-the fewest entry points, then by the lowest partition number; (3) assign the `test` units, then the `text` units,
-as two separate passes, each pass largest first with ties by path ascending, each unit to the partition with the
-fewest total lines so far, ties by the lowest partition number. The same manifest therefore yields the same three
-partitions, and a run at the same SHA is comparable worker by worker with the one before it. The result must still
-pass the checks — no partition above 40% of the `source` lines or of the entry points, every partition within 15%
-of one third of the manifest — and a failed check means one unit is too large: split only the largest unit of the
-class that failed, by the quantity that failed, one level deeper and run the procedure again; never move a file by hand — units move only by the reassignment and move rules below — and never re-form units
-that passed. The remedy repeats until the checks pass or the largest unit of the class that failed — by the quantity that
-failed — is itself a single file; only then does no split remain, and the check is recorded in `scan-plan.md` as
-`check failed: <check> — <file> holds <n> of <m> <source lines | entry points> (<share>%)`. The cut does not stand
-as formed while a partition is over a cap: the remedy continues by reassignment — the deterministic assignment is
-re-run with the over-cap partition's smallest whole units moved, in assignment order, to the partition with the
-lowest share of the failed quantity, one unit at a time, until every partition is under its caps or no move leaves
-every partition under them — and STEP 1 ends with one `checks:` line, written above `workers dispatched:`, `checks: pass — <the shares>` or, once remedy and reassignment leave no move,
-`checks: failed — <each failure> | <the shares>`, which the report repeats. A line share outside the band is remedied the
-same way — the largest unit by lines, of any class, split one level deeper while it is not a single file — and then by
-moves, one at a time: the partition with the most lines that has a movable unit gives the partition with the fewest
-the smallest movable unit whose move puts both inside the band, else its smallest movable unit, a unit being movable
-when it has more than zero lines, is smaller than the difference between the two partitions' lines and puts the
-receiving partition above neither 40% cap, of the source lines or of the entry points — ties to the lowest partition
-number, then to the unit first in assignment order; each such move narrows the spread, so
-the moves end — a moved unit's entry points moving with it, their list lines' partition column rewritten, until every
-partition that no single file holds above the band is within it or no unit is movable; the manifests and unit lines are
-rewritten to the cut that results. A line share writes no `check failed:` line of its own, and `--checks` prints a
-`remedy:` line under its `checks:` line whenever a line share has no `(one file: …)` and no file by itself holds more
-than about 43% of the lines (100% less twice the band's floor, which leaves the other two no room) — it never reads
-units, so the split and the moves decide whether the cut can still be balanced — and that line is never copied into the
-plan. One
-first run's cut left a partition at 41% of the lines, a lockfile a fifth of the manifest, and recorded its own
-`check failed:` over it instead of moving the small units that would have passed.
-The line is the output of `python3 <this skill's directory>/recheck.py --checks`, run from the target once the entry list
-and the partition manifests are written — the one computation recheck item (19) repeats — copied verbatim, never
-composed from this session's own arithmetic: while the command prints `failed` for a share, the remedy and the
-reassignment continue, except for a failure that ends `(one file: <path> holds <n> of <m> entry points)` or
-`(one file: <path> holds <n> of <m> lines)` — a file is never split, so no move can fix it; a line share without it is
-written, once no split and no move remains, as the command prints it, and item (19) reads it as a mismatch even then — the
-run's record that its cut could not be balanced; the line is written as the command prints it. It counts each entry in the partition whose manifest holds the entry's file and fails a list
-line that names no partition, or one other than that file's — a bare `<n>` reads as `p<n>` — which is corrected before
-any dispatch, because workers are assigned their entry points by that column. Nine entry lines of one plan once named
-their partition as a bare number, and a recheck that read only `p<n>` computed a failing share for a cut that passed. A scan plan carrying a
-`check failed:` line and no `checks:` line has not finished STEP 1, and nothing is dispatched on it. The named file
-is that largest unit and nothing else: a `check failed` line naming a file that is not the
-largest unit of the failed class by the failed quantity is a STEP 1 error, and a cut is never dispatched on it. The unit
-list passes its own check before the partition table is written: every unit's parent directory holds more than one third
-of its class's lines or more than one third of the entry points, or the unit was produced by the remedy for a failed
-partition check and its unit line ends `(remedy split: <check>)` — any other unit whose parent is under both limits was
-split without cause, which is a STEP 1 error, and the parent is the unit. Write the cut into `scan-plan.md` as the partition table — `partition | files | lines | source lines |
-test lines | text lines | entry points | source share | entry-point share` — followed by one line per unit,
-`<unit> -> p<n> (<source lines>, <entry points>)`, in assignment order, so the cut can be replayed. Write the file
-lists + line totals to `.llm-sast-scanner-cache/` before dispatching anything. Then derive the added lens set
-from the dependency-signal column of its derivation table — never from any count — and write the table
-into `scan-plan.md`; compile the worker contracts
+the registrations it owns, is a STEP 1 error. The partition count comes before the cut, and the lens set before it: once `scope-manifest.txt`
+is written — rows `<lines><TAB><path>`, or the `wc -l` form D1's command writes — and the entry list, the added-lens
+derivation table and its `base lenses:` / `added lenses:` rows below are in `scan-plan.md`, `python3 <this skill's
+directory>/recheck.py --partitions`, run from the target, prints `partition count: <N> source + <K> lockfile + <T>
+test + <D> docs + <B> browser — <L> source lines, <M> lockfile, <Lt> test, <Ld> docs, <Lb> browser / cap 12000` as its
+first line, copied verbatim, never composed, into this run's `scan-plan.md` — never the previous run's — at a line's
+start, above `workers dispatched:`; its next lines — `families chosen: …`, `browser family: …`, a `source p<k>:` line
+per source partition, the `source cut:` line, one line per partition after p<N> and the `range:` lines — are read, the
+partition lines copied into the plan's partition table (below). N is three, or one partition per 12,000 lines of the source
+cut (`<L>`, every class that stays in it) when they are more — raised one at a time, from 2.27.0 on, while the command's cut
+(from 2.27.1 on, its fewest-lines searches' cut) would leave a partition over 15,000 lines, which its `source cut:` line then says: a worker reads every line of its partition to convergence, and workers reliably seal a partition of up to
+15,000 lines and often stop in larger ones. Three kinds of file
+leave the source cut and one is copied, each by a fixed rule the command applies and the session never re-judges: lock files, by exact name —
+`package-lock.json`, `npm-shrinkwrap.json`, `yarn.lock`, `pnpm-lock.yaml`, `bun.lock`, `deno.lock`, `uv.lock`,
+`poetry.lock`, `Pipfile.lock`, `pdm.lock`, `go.sum`, `Gopkg.lock`, `Cargo.lock`, `Gemfile.lock`, `composer.lock`,
+`packages.lock.json`, `paket.lock`, `gradle.lockfile`, `Podfile.lock`, `Package.resolved`, `pubspec.lock`,
+`mix.lock`, `flake.lock`, `MODULE.bazel.lock`, `conda-lock.yml`, `pixi.lock`, `.terraform.lock.hcl`; test code, by the
+file's own name — `*.test.*` and `*.spec.*` in a code extension (`.ts`, `.tsx`, `.js`, `.jsx`, `.py`, `.rb`, `.go`,
+`.java`, `.kt`, `.cs`, `.php` and the like; an `openapi.spec.yaml`, a `nginx.test.conf` or a `deploy.test.sh` is none),
+`*_test.go`, `*_test.exs`, `*_spec.rb`, `*.snap` — or a `__tests__/`, `__mocks__/`, `__fixtures__/` or `__snapshots__/`
+directory; names a production module can carry too — `test_*.py`, `*_test.py`, `*_test.rb`, `*_test.ex`, `*Test.java`
+/ `*Tests.java` (and `.kt`, `.cs`, `.scala`) — only under a test directory, a `test` or `tests` segment or one named
+like a test project (`Foo.Tests`, `unit_tests`, `IntegrationTests`) — and, from 2.27.1 on, a `*_test.dart` only under
+a `test`, `tests`, `integration_test(s)` or `test_…` directory (`test_driver/`, `test_goldens/`), never a package or
+feature folder named `<x>_test/`, and never under a `lib/` that no plain `test` or `tests` directory holds, a Dart
+package's library;
+a `tests/` or `e2e/` directory by itself moves nothing;
+prose — `.md`, `.rst` or `.adoc` under a `docs/`, `doc/`, `adr/` or `adrs/` tree (and `.excalidraw`, `.drawio` there),
+or named README, CHANGELOG, CONTRIBUTING, DESIGN…, HISTORY, NOTICE, CODE_OF_CONDUCT or SECURITY in those extensions, a
+`.txt` only as README, CHANGELOG or NOTICE — never `.mdx`, which compiles to a page, and never under an `app/`,
+`pages/`, `src/`, `content/` or `views/` directory, trees an application serves; and, when browser is an added lens, a
+second copy of the browser family, which `--partitions` computes from the scope rows and the entry list alone: (i)
+every source file in `*.tsx`, `*.jsx`, `*.vue`, `*.svelte`, `*.html`, `*.htm`, `*.xhtml`, `*.shtml`, `*.svg`,
+`*.mdx`, `*.astro` or a server template's extension (`*.ejs`, `*.hbs`, `*.handlebars`, `*.mustache`, `*.erb`,
+`*.cshtml`, `*.vbhtml`, `*.razor`, `*.njk`, `*.liquid`, `*.twig`, `*.jinja`, `*.jinja2`, `*.j2`, `*.pug`, `*.jade`,
+`*.eta`, `*.marko`, `*.haml`, `*.slim`, `*.php`, `*.phtml`, `*.jsp`, `*.jspf`, `*.jspx`, `*.tag`, `*.gsp`, `*.cfm`,
+`*.cfc`, `*.heex`, `*.eex`, `*.leex`, `*.gohtml`, `*.templ`, `*.tmpl`, `*.ftl`, `*.ftlh`, `*.vm`, `*.vtl`, `*.mako`,
+`*.soy`, `*.aspx`, `*.ascx`, `*.master`, `*.asp`); (ii) every `.ts`, `.tsx`, `.mts`, `.cts`, `.js`, `.jsx`, `.mjs`,
+`.cjs`, `.coffee`, `.elm`, `.cljs`, `.dart`, `.vue`, `.svelte`, `.html`, `.htm`, `.css`, `.scss`, `.sass`, `.less`,
+`.styl` or `.pcss` source file, whatever package holds it — a server's code, a tool's and an application's alike, no manifest read; and (iii) every file an entry line
+names whose kind contains `browser`, `postMessage`, `frontend`, `client-side` or `service worker`, or the word
+`window`. When the family holds no file, or packs into as many partitions as the source cut or more, browser has no
+partitions of its own and reads every source partition, the family's files among them, so it never takes more workers
+than the source cut has; the `browser family:` line says which. CI, container, IaC, build and package configuration —
+any file under a `.github/`, `.gitlab/`, `.circleci/`, `helm/`, `charts/`, `k8s/`, `kubernetes/`, `deploy/`, `deployment/`, `infra/` or
+`terraform/` directory included — and agent and editor configuration (`.agents/`, `.claude/`, `.cursor/` and the like,
+`AGENTS.md`, `CLAUDE.md`, `SKILL.md`, anything under a `prompt(s)/`, `template(s)/`, `skill(s)/` or `agent(s)/`
+directory) never leave the source cut, whatever their name. These fill the
+partitions after p<N> — the K lock-file partitions, then T test, D docs and B browser ones — each packed under 12,000
+lines, each manifest written by `python3 <this skill's directory>/recheck.py --partitions p<k> >
+.llm-sast-scanner-cache/partition-p<k>-manifest.txt`, one command per such partition (a shell loop over the printed
+`<kind> p<k>:` lines is that), its header naming the partition's readers; the browser family's files also stay in
+their source partitions. A browser row whose cell names in parentheses a manifest path that is no scope row makes
+`--partitions` fail until the cell names the scope's own — the cell is read for that test alone, the family taking
+nothing from it; other parenthesised text is not read. The command also cuts p1 to
+p<N>, the same way every time for the same scope manifest and entry list, and the session writes each source manifest
+as it writes the others — `python3 <this skill's directory>/recheck.py --partitions p<k> >
+.llm-sast-scanner-cache/partition-p<k>-manifest.txt` for every partition the command prints, a shell loop over its
+`source p<k>:` and `<kind> p<k>:` lines — and never forms, moves or edits a unit itself: the procedure is the command's,
+so two sessions with one entry list write one cut. The cut balances lines and entry points under two caps: a line
+ceiling 15% above 1/N of the lines of p1 to p<N>, the partitions after p<N> apart — a partition under its share no
+failure, since N is fixed by the lines and only a partition over its share overloads its worker — and an entry-point
+cap of 120/N% (40% at three); beside t rows that must each end alone in a partition (a row over the ceiling by itself,
+or a row whose own entry points pass the cap), a partition holding none of them is held to the larger of 120/N% and the
+entry points those rows do not hold divided over the N − t partitions left, rounded up — the least the fullest of them
+holds in any cut. Units are directories, so a worker's slice is whole modules wherever the caps allow: each directory at
+the shallowest depth holding at most 1/N of the source cut's lines and 1/N of its entry points, a directory over either
+split into its subdirectories and its own files — those one unit while they fit both limits, else a unit each. A
+source-cut file over 12,000 lines is never one unit: it is the ranges the command's `range:` lines print, each a unit of
+its own, written in a manifest as `<lines><TAB><path>:<first>-<last>`, and an entry point in such a file belongs to the
+range holding its line. Each row that must end alone takes a partition first; the other units go largest first, ties by
+name, to the partition with the fewest lines whose entry-point cap they leave unpassed, ties the fewest entry points,
+then the lowest number; then the command moves one unit to another partition, exchanges one unit for smaller units of
+another or for one unit of another, or splits a partition's largest unit — or, while entry points stay over, the unit
+holding the most — into its rows, each step only when it lowers the lines and entry points over the caps, until every
+partition is under both or no step does; a cut still over is set, in this order, against the same search on
+single-file units and, from 2.27.1 on, against both searches packed by fullest fit, directory units first — each unit
+but the rows that end alone, in the same order, to the fullest partition whose entry-point cap it leaves unpassed and
+that it leaves at most 1/N of the lines, else at most the ceiling, ties the fewest entry points, then the lowest
+number; where none, as above — and the first of these cuts least over the caps is kept, which the `source cut:` line
+then says: least as `--checks` reads them from 2.27.1 on — a partition holding a row that must end alone held to the
+entry-point cap once another entry-bearing row joins it, a failure `(one file: …)` tags counting nothing — then by the
+lines and entry points over the caps the search counts. The N is the one the fewest-lines searches end at; from 2.27.1
+on the four are compared once, at that N, and the cut kept replaces theirs only when its largest partition holds at
+most 15,000 lines, or no more than theirs. Its `source p<k>: <rows> rows, <lines> lines,
+<entry points> entry points` lines, its `source cut: <m> moves, <x> exchanges, <s> splits after packing` line and its lines
+for the partitions after p<N> are copied, as they print, under a `## Partition table` heading of `scan-plan.md`: the
+plan's partition table. The entry list's partition column is the command's too: `python3 <this skill's
+directory>/recheck.py --partitions entries` prints the `## Entry points` list with each line's column the partition holding
+its line, and its output replaces the section, heading included — workers are assigned their entry points by that column, and an entry
+in no source partition keeps the column it had, for `--checks` to name. Every manifest is named
+`partition-p<k>-manifest.txt`, `k` unpadded, and holds `<lines><TAB><path>` rows (or that range form) under `# files:
+<rows>` and `# lines: <their sum>` headers, every path spelled as `scope-manifest.txt` spells it (a leading `./` reads as
+absent). Besides the shares, `--checks` then fails a row that differs from the command's, a scope row whose line count is
+not its file's (`wc -l`'s count, or one more for a last line without a newline) or that names no file, a scope path listed
+twice, a manifest named otherwise, missing or beyond the last partition the command prints, a manifest line of another form
+or headers that differ from its rows, a source file or range in no source partition or in two, a lock, test or docs file
+in a source partition, a partition not as the command prints it — a source one byte for byte, one after p<N> by its rows,
+readers' line and header lines — an entry whose partition column is not the one holding its line, an entry in a test, docs
+or lock file (that list line is dropped: such a file registers nothing a caller reaches), and an entry whose line no source
+partition holds — a file outside the scope, a line past its file's ranges.
+A plan whose `wrapper:` row names a version before 2.26.14 is read as that version cut it — its row in the form 2.26.13
+wrote (`<N> source + <K> lockfile — <L> lines outside lockfiles, …`), no test, docs or browser partitions, `--partitions`
+printing that cut; any other plan — of 2.26.14 or later, or naming no version — has its row and its partitions after
+p<N> as above whatever its row reads, a row in the earlier form differing from the command's and failing `--checks`,
+`--roster` and item (19) until the row `--partitions` prints is written; a plan of 2.26.14 to 2.26.16, or one naming no
+version, keeps the source cut its session made, read with its version's checks and tags; a plan of 2.27.0 is cut without
+the fullest-fit searches, and any plan before 2.27.1, or naming no version, reads a `*_test.dart` file by the earlier
+rules — source unless a `__tests__/`-style directory moves it. On any plan of 2.26.14 or later, or naming no version, `--partitions`
+fails (exit 2, its first line `partition count: error — …`) while the plan names no added lens, and `--roster` fails
+while the row differs from the cut the scope gives. A plan without the row is read as a cut of three made before this
+version only when no manifest beyond p3 exists and either its `wrapper:` row is earlier than 2.26.13 or absent, or its
+`started:` row is absent or earlier than 2026-10-10_00-00-00; any other plan without it fails `--checks`, `--roster` and
+item (19) until the row is written. STEP 1 ends with one `checks:` line, written above `workers dispatched:`: the output of
+`python3 <this skill's directory>/recheck.py --checks`, run from the target once the entry list and every manifest are
+written — the one computation recheck item (19) repeats — copied verbatim, never composed from this session's own
+arithmetic: `checks: pass — <the shares>` or `checks: failed — <each failure> | <the shares>`, which the report repeats —
+the failures as many as fit under the reader's limit, then `… and <n> more`, and, when the line is cut so, every failure
+on a `failure:` line of the command after it; above twelve partitions the shares are one summary. A share the command's
+cut leaves over a cap carries a tag that says why, and stands: `(one file: <path> holds <n> of <m> entry points)` when one
+row — a file, or one range of a file cut into ranges, each a unit of its own — holds more than the cap and every entry
+point of its partition; `(one file: <path> holds <n> of <m> lines)` when that row is over the ceiling by itself and its
+partition's only row, a tagged worker reading that one row, at most 12,000 lines; and `(the command's cut: …)` for any other
+share its moves, exchanges and splits leave over — a line share's partition holding at most 15,000 lines, which workers
+seal (as above), since N rises until none holds more. A failure with no tag — a manifest or an entry column not
+as the command prints it, a scope row miscounted — is the session's to correct before any dispatch; when a source manifest or the entry column differs, `--checks` prints a
+`remedy:` line under its `checks:` line naming what to write again, never copied into the plan. `--checks` counts each entry in the partition whose manifest holds the entry's file and fails a list
+line that names no partition, or one other than that file's — a bare `<n>` reads as `p<n>`. The entry lines of one plan
+once named their partition as a bare number, and a recheck that read only `p<n>` computed a failing share for a cut that
+passed. A scan plan with no `checks:` line has not finished STEP 1, and nothing is dispatched on it. Every manifest is on
+disk before anything is dispatched. The added lens set is derived before
+`--partitions` runs (the partition count above reads it): from the dependency-signal column of its derivation table —
+never from any count — the table written into `scan-plan.md` with the rows `base lenses: <the six, comma-separated>` and
+`added lenses: <the chosen families, comma-separated — one at least>`; a lens set, a browser-row cell, or an entry line
+added, dropped, or changed in its file, line or kind after `--partitions` ran means running it, every manifest it prints,
+`--partitions entries` and `--checks` again;
+compile the worker contracts
 only after the lens set is fixed, and check each one before any dispatch: a contract contains the four-field
 first-line form `procedure: <convergence-loop skill name> v<its version> / <base skill name> v<its version> | target:
 <pwd output> | base-sha: <git output>` together with the instruction that the names and versions come from the two
@@ -201,9 +280,9 @@ the written record of a decision that otherwise stays in one agent's context and
 | `scope-manifest.txt` | STEP 1 | every in-scope file with its line count, and the total |
 | `scope-excluded.txt` | STEP 1 | every path dropped from scope, one per line, each with its reason |
 | `project-memory.md.pre-write-<started>` | STEP 1 | `project-memory.md` as it stood before the run touched it — the `ledger rows at start` count and the writer's redo source; never overwritten; on a first run, with no `project-memory.md` yet, an empty file written before the template is initialised, so it exists under that name and the count reads `0` |
-| `partition-p<n>-manifest.txt` | STEP 1 | one per partition — its file list and line total, cut by the STEP 1 attack-surface rule |
+| `partition-p<n>-manifest.txt` | STEP 1 | one per partition — its file list and line total, written by `--partitions p<k>`: p1 to p<N> the command's source cut, p<N+1> on the partitions after p<N> (lock-file, test, docs, browser) |
 | `<lens>-agent-procedure.md` | STEP 1 | the compiled worker contract every STEP 2 subagent reads |
-| `scan-plan.md` | STEP 1 | invocation as given, model (this session's model identifier per the base skill's header rule, else `unknown`), base SHA, mode, adv, the partition table with source and entry-point shares, both entry-point totals, the lens set with its added-lens derivation table, stack-gated exclusions, and the STEP 2 dispatch list with its waves |
+| `scan-plan.md` | STEP 1 | invocation as given, model (this session's model identifier per the base skill's header rule, else `unknown`), base SHA, mode, adv, the `partition count:` row, the partition table (the command's `source p<k>:`, `source cut:` and later-partition lines), both entry-point totals, the lens set with its added-lens derivation table, stack-gated exclusions, and the STEP 2 dispatch list with its waves |
 | `prompts/<lens>-p<n>.md` | STEP 2 | the worker's prompt, one per lens per partition — tested by `--paths` and named by the one line its worker was started with; a re-run's prompt replaces it |
 | `deep-<lens>-p<n>-results.md` | STEP 2 | one per lens per partition |
 | `disposition-table.md` | STEP 3 | one row per Judge-passed worker record — id in the form `<lens>/p<n>/<the record's VULN id as its heading states it>`, entry point, sink `file:line`, class, disposition, verdict, body record — written before any body block |
@@ -219,8 +298,9 @@ old one that passes — recording `stale worker files moved: <n>`; the earlier r
 `writer-prompt.md` and `repair-prompt.md` go into the same directory, uncounted, and `--paths` and `--prompt` reject a
 prompt file older than `started:`, so a write that missed its path cannot pass on the last run's copy; the previous plan already sits in that directory, copied
 before this plan was written, and its residual row above is what this run's writer must not carry forward — a run that
-ended with a residual left artifacts the next run would otherwise trust. Then verify the STEP 1 artifacts exist and that the partition line counts sum to the
-manifest total. A partition file that is absent, empty, or a glob pattern instead of an enumerated file list
+ended with a residual left artifacts the next run would otherwise trust. Then verify the STEP 1 artifacts exist and that the
+line counts of p1 to p<N> and of the lock-file, test and docs partitions sum to the manifest total, the browser
+partitions — a second copy of files p1 to p<N> hold — apart. A partition file that is absent, empty, or a glob pattern instead of an enumerated file list
 means STEP 1 did not finish — rebuild it. Never dispatch a subagent against a partition whose file list is not
 on disk; a worker that cannot read its partition will invent a scope and report against it.
 
@@ -255,7 +335,24 @@ name each Unverifiable entry by its id and title (`UNV-001 — <title>`; a range
 two ends), so the start of the report shows what could not be decided beside what was found (a non-convergence
 warning, when D3 requires one, still comes first).
 
-**STEP 2** — Dispatch every lens x 3 partitions, in waves of at most 15 workers (WORKER DISPATCH, below). Each subagent gets exactly ONE lens and ONE
+**STEP 2** — Dispatch every lens on every source partition, p1 to p<N> (browser on none when it has partitions of its
+own), and hardening-platform and access-auth alone on
+every lock-file partition — the lenses whose classes read lock-file content line by line: supply chain, dependency
+confusion and AI editor / agent config poisoning (hardening-platform), and hardcoded secrets, a registry credential in
+a resolved URL (access-auth). Every other lens reads a lock file only to look a version up with `rg`, as its
+references do, so the source partitions are its whole coverage; the `ai-agent` lens, a second pass over AI editor /
+agent config poisoning, leaves the lock files to the base lens that keeps that class. Under a row of this version's
+form the other partitions after p<N> have readers of their own too: access-auth alone on every test partition —
+hardcoded secrets and default credentials in test code, fixtures and snapshots, its other classes having no surface
+there — access-auth and hardening-platform on every docs partition — credentials in prose, supply-chain instructions
+(install commands, registries, piped scripts) and AI editor / agent config poisoning addressed to agents — and browser
+alone on its own partitions, the browser lens then on no source partition (with no partition of its own it reads
+every source partition, as every other added lens does). In earlier runs no record of any lens stood in a file the
+test rule names — hardening-platform's own, whose references give test-fixture examples, included — and few in docs
+files came from a lens that now reads none; browser's records that no base lens also found were few outside its
+family, every one in a server-side handler whose class a base lens applies there, while cloud-infra found records
+outside CI, IaC and configuration files that no base lens found, so cloud-infra keeps every source partition. Each manifest `--partitions p<k>` writes carries a header line
+naming what its readers read it for, which its workers read with the manifest. Workers start in waves of at most 15 (WORKER DISPATCH, below). Each subagent gets exactly ONE lens and ONE
 partition and runs its own full convergence loop over only that partition's files. Write results to
 `.llm-sast-scanner-cache/deep-<lens>-<partition>-results.md`.
 
@@ -336,7 +433,8 @@ names that file (the path test below):
 
 `<skills root>` is the directory that contains this skill's directory. Workers start in **waves of at most 15**:
 order the worker list by lens — the six base lenses in the class table's order, then the added lenses in
-derivation-table order — and by partition p1, p2, p3 within each lens; the first 15 are wave 1, the next 15 wave 2,
+derivation-table order — and by partition number within each lens, a lens's partitions after p<N> (lock-file, test,
+docs, browser) after its source partitions; the first 15 are wave 1, the next 15 wave 2,
 and so on, counted across lens boundaries: a lens whose partitions fall on both sides of the fifteenth position is
 split between two waves, and the sixteenth pair waits for the next wave even though its lens has begun — one
 orchestrator started a sixth lens's first partition beside five lenses' fifteen and recorded its own wave-cap error,
@@ -347,13 +445,21 @@ The batch is built from `python3 <this skill's directory>/recheck.py --roster <k
 and no other, the calls counted against its count before any is sent. The base lenses are not a wave: a lens
 whose partitions the roster puts in the next wave waits for it, and one run sent the six base lenses' eighteen
 partitions as its first batch. Once a batch has started, the same command's `recorded first attempts` line names no
-pair `not on this roster`. Recheck item (25) reads the rosters
+pair `not on this roster`. At N partitions the command also reads the rosters' pairs against the cut — every lens on
+p1 to p<N> (browser on none of them when it has partitions of its own), and on each partition after p<N> its readers
+alone — hardening-platform and access-auth on a lock-file partition, access-auth on a test one, access-auth and
+hardening-platform on a docs one, browser on its own — the lens set being the six base
+lenses and the added lenses the plan's `added lenses:` row names (a comma-separated list of lens names, or `none`),
+else the derivation table's `yes` rows, else the lens names on the line under a `## Lenses` heading, the line saying
+which it read — and prints `rosters: wrong — …` and exits 1 when they differ: the
+rosters are rewritten before any wave is sent. Recheck item (25) reads the rosters
 against the dispatch lines. A wave starts only when every file of the wave before it ends with its sentinel, or that worker has
 been re-run under the crashed-file rule below, or its pair is recorded `worker not run:` under the attempt cap below. A start the runtime rejects with a rate-limit or retryable error is
 retried after the interval the error states; the wave size is never raised to catch up. Such a retry is the same attempt, not a new one: an attempt's dispatch line is written when its subagent starts, or when the runtime refuses it for good
 — `refused` then standing in the subagent-id slot — and a start retried after an interval keeps its own later time
 and still belongs to the wave it was dispatched with. The dispatch is recorded in
-`scan-plan.md` as `workers dispatched: <n>` — `n` equal to lenses × 3 — then `waves: <w> of at most 15`, and for
+`scan-plan.md` as `workers dispatched: <n>` — `n` the rosters' pair count, the lenses on the source partitions
+plus each later partition's readers — then `waves: <w> of at most 15`, and for
 each wave `wave <k>: <m> workers | started <time> | complete <time>` followed by one line per worker,
 `<lens>/p<n>: <subagent id> <time> paths <k>/<k>`, written as each subagent starts, its time a `date +%Y-%m-%d_%H-%M-%S` output read after that pair's prompt file has passed the path test below and before its start call — one reading serving a batch started together — and the `paths` field from that test. A wave is the set of first-attempt dispatch lines from its `started` time up to the next wave's; the `wave <k>:` line summarizes them — written before the wave's first start call, its start time a `date +%Y-%m-%d_%H-%M-%S` output read then; its worker count and start time are never edited afterwards,
 only `complete <time>` is filled in, with a `date +%Y-%m-%d_%H-%M-%S` output read once the wave's last file ends with its
@@ -581,11 +687,21 @@ defined, not interpreted:
   infrastructure file declares them, the URL, integration and grant each for the cut and for no derivation row; a
   grant to a cloud service's own principal is part of the trigger that service is, and no entry point when no trigger
   of the function uses it. Nothing else is an entry point:
-  UI event props, goroutine or thread spawns, decode and parse calls, init functions, mocks, Kubernetes and IaC
-  resources, CI jobs, Dockerfile stages and configuration files all count as zero. A registration counts once,
+  UI event props and every gesture, lifecycle or device listener of a page — a click, pointer, mouse, key, touch,
+  focus, blur, input, change, submit, scroll, resize, drag, drop, copy, paste, media (`play`, `seeked`), sensor
+  (`deviceorientation`), `load`, `DOMContentLoaded`, `pageshow`, `pagehide`, `visibilitychange`, `beforeunload`,
+  `online`, `offline`, `popstate` or `hashchange` handler, or one for an event the page dispatches itself, as a prop,
+  an `on<event>` property or an `addEventListener` call alike, its data the user's act, the page's state or its URL,
+  which the lens reads as a source where it is read — goroutine or thread spawns,
+  decode and parse calls, init functions, mocks, Kubernetes and IaC resources, CI jobs, Dockerfile stages and
+  configuration files all count as zero. A registration counts once,
   for the family whose protocol or declaration it registers, on the side of the connection that runs in the
   process under audit: server-side registrations count for their protocol family, and browser-side handler
-  registrations (`socket.on`, `onmessage`, `addEventListener('message')`) count for `browser`. A plain HTTP route
+  registrations for a channel another origin, tab or server writes to (`socket.on`, a `message` listener —
+  `onmessage` or `addEventListener('message')` — on `window`, a `MessagePort` or a `SharedWorker`, never on a
+  dedicated `Worker` the page starts; a `storage` or `BroadcastChannel` listener; an `EventSource` handler; a service
+  worker's `fetch`, `push` or `sync` handler) count for `browser`, and their entry lines' kind names the word
+  `browser` (`browser socket handler`, `browser message handler`), one of the words `--partitions` reads them by. A plain HTTP route
   registration — REST, form or webhook receiver — registers no family's protocol: it is an entry point for the
   partition cut and for no derivation row, and a family whose dependency signals are imported by the route files
   does not inherit those routes. `cloud-infra`, `mobile-desktop` and `language-runtime` therefore carry `0`
@@ -748,7 +864,17 @@ appendix's `rekeyed to stem <r>`, with `trail missing <x>` the number of those w
 required to be 0; (19) `checks` — the scan-plan's `checks:` line reads `pass` only if it should: the entry-point share of every partition, each entry of the `## Entry points` list counted in the partition whose manifest
 holds its file and the list's partition column required to agree, is at most 40%, and every
 partition's line share, recounted from the `partition-p<n>-manifest.txt` headers, is within 15% of one third — a
-`checks: failed` line whose every failure names one file (`(one file: …)`) reads as the plan's outcome, not a mismatch; (20)
+`checks: failed` line whose every failure carries `(one file: …)`, from 2.26.16 on `(no move: …)` or, from 2.27.0 on, `(the command's cut: …)` reads as the plan's outcome, not a mismatch;
+at N partitions (the `partition count:` row; a plan of a wrapper before 2.26.14 read as that version cut it) the same reading at 120/N% and a line ceiling 15% above 1/N over the
+source partitions alone, a line share's one-file tag only for a partition holding that one row alone and an entry
+share's only for one row (a range its own) holding all its partition's entry points, with the
+row recomputed from `scope-manifest.txt`, every scope file or range in exactly one source partition, the lock, test and
+docs files and the browser copy exactly in the partitions after p<N> `--partitions` prints, from 2.27.0 on a source
+manifest not byte for byte what `--partitions p<k>` prints a failure, a test or docs file in a
+source partition and an entry in a test, docs or lock file a failure, an entry in a file cut into ranges counted where its line
+is and an entry no source partition holds a failure, a manifest after p<N> whose readers' line or header lines differ
+from what `--partitions p<k>` writes a failure, and a plan without the row a failure unless STEP 1's legacy condition holds (no manifest beyond p3, and a `wrapper:` row
+earlier than 2.26.13 or none, or a `started:` row earlier than 2026-10-10_00-00-00 or none); (20)
 `step 1 rows unchanged` — the scan plan above `workers dispatched:` equals `scan-plan.md.at-dispatch-<started>`, the copy
 this session makes of `scan-plan.md` the moment it writes `workers dispatched:`, line for line, blank lines ignored,
 except lines carrying
@@ -767,7 +893,8 @@ the pre-write copy — read after STEP X's class correction — that holds neith
 `not re-found <this run's date>`, counted `<marked>/<such keys>` with `rows gone <g>`, required equal and `0`: the
 same-commit rule's mark is how a later reader tells a miss from a fix, and one write left one hundred and
 twenty-eight missed sinks unmarked while the run ended clean; (25) `wave rosters` — the scan-plan's `wave roster <k>:`
-lines hold every lens/partition pair once, none above fifteen, and the first-attempt dispatch lines of each wave — those at or after its `started` time and before the next wave's,
+lines hold every lens/partition pair once — at N partitions exactly every lens on p1 to p<N> (browser on none of them
+when it has partitions of its own) and each later partition's readers alone — none above fifteen, and the first-attempt dispatch lines of each wave — those at or after its `started` time and before the next wave's,
 so a start retried after a rate-limit interval stays in its wave — are exactly that wave's roster, counted `<waves matching>/<rosters>` with `over cap <c>`,
 and, where the worker files' times are the run's own, every first attempt's file was sealed at or before its wave's
 `complete` time and before the next wave's `started`, and every first attempt's dispatch time lies at or after its prompt
@@ -1402,7 +1529,10 @@ sink can be cleared by every agent that saw it and examined by none in full. Bui
 any other non-finding disposition in ANY lens file. For each sink appearing in two or more lens files, compare
 the rationales. When each clearing agent scoped its rationale to its own partition or lens, that is a COVERAGE
 GAP, not a clearance — no agent evaluated the union of entry points. Promote it into the findings body at its
-class floor.
+class floor. A line of a lock-file, test or docs file is no such gap, whoever cleared it: such a file has no callers to
+enumerate, and its partition's readers read every line of it. A browser-family file sits in a source partition and a browser
+partition by design, no cut defect; a sink there cleared by a base lens and by browser is read by the rule above as any
+two lenses' clearances of one sink.
 
 A multi-agent clearance stands ONLY when one agent's rationale enumerates that sink's callers repo-wide from
 code that agent actually read.
@@ -1552,9 +1682,9 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   entry copies the file's own convergence status line and reads `passes: none (worker not run)`, or `no worker file`
   when the file is absent.
 - Line-count reconciliation of each partition against the manifest, the scan-plan's `checks:` line copied verbatim,
-  and the partition table from `scan-plan.md`
-  with each partition's source share and entry-point share, none above 40% — or, when one is, the `check failed` line
-  copied from `scan-plan.md`, so the single file that forced it is named in the report.
+  and the partition table from `scan-plan.md` — the command's `source p<k>:` and `source cut:` lines and its lines for
+  the partitions after p<N> — each share over its cap (40% at three partitions, 120/N% at N) named with the tag the
+  `checks:` line gives it, so the single file or the cut that forced it is named in the report.
 - Worker record disposition: `disposition-table.md` copied in full (one row per Judge-passed worker record), the
   `promoted` rows, the totals line `worker records: <n> | body: <b> | merged: <m> | withdrawn: <w> |
   unverifiable: <u> | promoted: <p> | carried: <c>` (then `| refuted: <r>` when the table holds `refuted` rows) with `b + m + w + u = n` and `b + p + c` equal to the body record count, and the
@@ -1661,7 +1791,8 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
 - **Waves are defined by dispatch timestamps because a wave line was re-labelled.** An orchestrator started 18 workers
   together, then rewrote the summary as waves of 15 and 3 sharing one start time. The dispatch lines could not be
   re-labelled; the check reads them.
-- **Unit formation checks parents because a directory under both limits was split anyway,** moving 128 of 178 units
+- **The command forms the units, whole directories at the shallowest depth the caps allow, because a session's
+  directory under both limits was split anyway,** moving most of its units
   between partitions at an unchanged SHA and ending the worker-by-worker comparability the deterministic cut exists for.
 - **STEP 2a is in the worker template because workers never read this file;** a run whose contracts omitted it produced no
   enumeration and no `new entry points` lines, after a run whose contracts included it had produced 183.
@@ -1767,10 +1898,10 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   One report carried `invalid cells 0` computed on a table with two verdict cells while its body held thirty-three,
   thirty of them without clause or identifier; the orchestrator then spent an hour of in-place repairs converging the
   body toward the table. The `recheck:` lines make the recomputation a recorded step instead of an instinct.
-- **The cut continues by reassignment because a cut that failed its own check was dispatched.** One partition held 47
-  percent of the entry points against a 40 percent cap; the remedy stopped when its largest unit was a single file,
-  the plan recorded `check failed` and no verdict, and that partition produced records at a third of the rate of the
-  lightest one.
+- **The cut keeps moving, exchanging and splitting units after packing because a cut that failed its own check was
+  dispatched.** One partition held entry points well over the 40 percent cap; the remedy stopped when its
+  largest unit was a single file, the plan recorded `check failed` and no verdict, and that partition produced records
+  at a fraction of the rate of the lightest one.
 - **Merges are constrained to identical entry point, sink and class because one writer merged 31 of 132 records,**
   three of them across different entry points, where the run before merged 8 of 176. The **Duplicates** rule's merges
   across classes or sink lines keep that constraint's point — one entry point, the merged class named on the kept
@@ -1852,8 +1983,8 @@ every withdrawn row; all three are items now, and the table rules say plainly th
   appending them, and its session ran its last recheck without recording it.** A rule about where output goes held for
   neither agent, so the script decides what a redirect records: only `--record` appends, what it prints is one
   `recorded:` line that is never a set, and a plain run redirected into the plan is dropped with a note. A `checks: failed` line whose failures each name
-  one file over the cap is accepted by item (19) because the same rehearsal's plan was flagged for a cut no move could
-  fix.
+  one file over the cap — or carry `(no move: …)` (2.26.16) or `(the command's cut: …)` (2.27.0 on) — is accepted by item
+  (19) because the same rehearsal's plan was flagged for a cut no move could fix.
 - **A worker is started with one line naming its tested prompt file, never with the prompt re-typed, because the
   four misspelled cache directories of one run were all typed into the start calls,** which no test reads. A test of
   the file says nothing about a second copy made after it; the one line leaves a single path to type, and a worker
@@ -2181,3 +2312,66 @@ sink several routes reach keeps every route; each carried block says on its seco
   needs a fix of its own; simulated sessions judging twenty-seven of those lines three times agreed with that
   reading on seventy-five of eighty-one judgements, twenty-four of twenty-seven under this text, each miss a re-run
   more.
+- **A repository is cut into one partition per 12,000 lines, and its lock files into partitions of their own that
+  hardening-platform and access-auth read, because workers stop at what they cannot read.** Workers' first attempts
+  sealed nearly every partition under 15,000 lines, far fewer between 15,000 and 25,000 and none above — they stopped at a
+  large lock file, or deep in an oversized partition, and every stop was re-run at a high cost. A second model sealed the
+  same partitions and claimed more lines read than it could have, a large lock file twice. Every finding sited in a lock
+  file was supply chain or dependency confusion, and those citing a lock-file line elsewhere were nearly all supply
+  chain, so the lock files go to the lens holding those classes, and to access-auth for a registry credential in a
+  resolved URL, cut at the same cap, and the others look a version up as their references already do. The files over the
+  cap outside lock files — fixtures, data, diagrams, snapshots, specifications, an agent script — held no finding; they
+  are read as ranges, not dropped, because no size tells such a file from code. A digest of the lock files was built and
+  dropped: no extractor could be shown complete over their formats. Three partitions stay the floor, so a repository
+  under 36,000 lines outside lock files is cut into three as before, its lock files apart. The command cuts p1 to p<N>
+  because STEP 1 sessions cutting by hand under the earlier text, each from its own entry list, failed their checks in
+  different ways: a partition over the ceiling with no row any other partition could take, then one over with a row
+  that could move, then one just over the entry cap with no file over it by itself. One exchange — a large fixture for
+  a few entry-free rows of another partition — would have balanced the first two, a step the hand procedure lacked, and
+  a cut a session makes by hand is one no checker can replay, so a cut shaped to pass, or to earn a tag, is not seen.
+  The command's cut of each of those entry lists held every partition under the ceiling, its entry cap passed only by
+  one file over it by itself, and split far fewer directories across partitions than the sessions did; on other
+  repositories it needed no exchange and few moves. N rises past the line floor when the command's cut would leave a
+  partition over 15,000 lines — four 8,000-line files at three partitions take four, eleven 7,600-line files take
+  eleven, from a floor of seven or nine — because whole rows over half the ceiling can outnumber the partitions, and a
+  partition that size is one workers often stop in; on every real scope N stayed at its floor.
+  Fullest fit joined the search in 2.27.1: on synthetic scopes of big generated files beside directories of small ones,
+  the fewest-lines cut failed some beyond one-file tags that a randomized search lowered, and fullest fit reaches the
+  randomized search's excess on all of them and raises none elsewhere; a cut the fewest-lines search leaves at no excess
+  is unchanged, and so is every real scope's cut. The four cuts are compared as `--checks` reads them because the
+  search's own count let a partition holding a row that must end alone take another entry-bearing row for that row's
+  entry points alone, and so kept a cut one entry point further over in rare entry-tight scopes; compared so, no scope
+  of big rows and tight entry lists ends further over than at 2.27.0. Fit runs at the N the fewest-lines cut ends at:
+  left to set N, a fit cut just under 15,000 lines stopped the rise one partition early in some scopes of big rows,
+  some of them over the ceiling where the next N passed. The rise starts at a lower bound the rows' sizes give — j + 1
+  rows over 15,000 / (j + 1) lines never share a partition under 15,000 — which ends where counting up from the floor
+  does, in seconds where counting up took minutes on hundreds of big rows.
+- **Test code and prose docs have partitions of their own, and the browser lens reads its own family's files, because
+  the base lenses found nothing there.** In earlier runs no worker record stood in a file the test-name rule names and
+  few in docs files, nearly all from the two lenses that still read them; of the browser lens's records that no base
+  lens also found, the few outside its family each stood in a server-side handler in a file of no web extension. The
+  family is read from file names and the entry list, never from a manifest or the derivation cell: the cell of a
+  monorepo's plan named only one of its React packages, and a family taken from it would have left most browser
+  registrations to no browser worker, while a rule for markup alone would have left many more outside. Every narrower
+  reading tried in review missed a package that ships to a browser: the cell alone missed a React package; a list of
+  the packages that ship missed CRA and Angular SSR behind express and let a test runner's bundler take the lens off the
+  source partitions; and a rule leaving out a server's own package missed one pairing a server framework and an email or
+  PDF renderer with a browser client, an Nx root, a Bun build and a bundler hoisted to the workspace root — while on the
+  real scopes that rule left out an API package. A missed package is a lost file where an extra one is a worker, and a
+  family that would pack into as many partitions as the source cut or more — a PHP or JSP application's, whose pages
+  are its code — gets none, so browser never takes more workers than the source partitions, which are never more than
+  the partitions 2.26.13 gave it unless N rises past the line floor, which it did on no real scope. The rules stay
+  narrow on purpose: a `tests/` or `e2e/` directory moves nothing by itself — many findings stood in CI files under
+  such trees — names a production module can carry (`test_*.py`, `*Test.java`) move only under a test directory
+  (`*_test.dart`, from 2.27.1 on, under a `test`, `tests`, `integration_test` or `test_…` directory outside a package's
+  `lib/`: in public Flutter repositories nearly all sat under a test directory or under `test_driver/`,
+  `test_goldens/`, `test_benchmarks/` or `test_app/`; the few under an agent directory stay source by the
+  agent-configuration rule, and the few under a package's `lib/` — an environment module reading cloud keys and a
+  test-utility package's library, under no test directory, and, by the `lib/` rule, a card test filed in a `tests/`
+  folder there; the directory rule keeps a `bloc_test` package's `lib/`, a `speed_test` package's `bin/`, a
+  `lib/features/speed_test/` or a `tool/ab_test/` folder source, and a repository whose own package is named `test`
+  would read that library as test), `.mdx` and the trees an application serves are never prose, agent skills
+  (`.agents/skills/*/SKILL.md`) and prompts are never prose, and cloud-infra was measured and kept on every source
+  partition, many of its records outside CI, IaC and configuration files being found by no base lens. On the largest
+  scopes this cuts a full scan's workers by a third or more; a repository with docs and no lock files, test code or
+  browser family gains two workers, the docs partition's readers.

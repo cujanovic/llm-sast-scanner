@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.17.4"
+  version: "1.17.5"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -569,7 +569,14 @@ COVERAGE VERIFICATION (run whenever the loop stops — at convergence, the pass-
   that already named the file.
   A manifest's rows are its `<line-count><TAB><path>` entries alone: a line beginning `#` is a header and the
   final row is the `total`. Whatever compares path sets — this checklist, D3's reconcile, any integrity check —
-  counts only those entries; reading a header or the total as a path reports a gap that does not exist.
+  counts only those entries; reading a header or the total as a path reports a gap that does not exist. A row
+  `<line-count><TAB><path>:<first>-<last>` is a range of a file the partitioned wrapper cut across partitions
+  because it is longer than one worker reads: that row is read from line `<first>` to line `<last>` — the file's other
+  lines are another partition's, so neither its scope-manifest row nor `1..total_lines` applies — and it counts as one
+  file of `<line-count>` lines; lines outside it are read only as the context its code needs (imports, module-level
+  setup, a function the range boundary cuts), counted toward nothing; findings cite the file's own line numbers; a
+  ledger sink in the file is this range's when the range holds its line; and an unread range in it is written
+  `<path>:<from>-<to>` within those bounds.
   List excluded paths (binaries, `node_modules/`, build output, derived artifacts cleared by the Step 1 skip
   rule, the scanner's own `.llm-sast-scanner-cache/` + `sast_report-*.md`) separately as "excluded" — they are
   not coverage gaps. Lock files and vendored code that ships are in scope, so they never appear in that list.
