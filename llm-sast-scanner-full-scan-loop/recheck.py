@@ -32,9 +32,9 @@ from pathlib import Path
 
 CMD = "python3 .llm-sast-scanner-cache/recheck.py"
 # a file reader cuts a line longer than this many UTF-8 bytes: a line past it is read only up to it (one fresh run wrote
-# every worker prompt as one line of 6,800 characters, and thirteen workers were re-run). The limit is bytes, not
-# characters: one agent runtime's reader keeps exactly 2,000 bytes of a longer line — 1,982 to 1,994 characters on lines with em
-# dashes, three bytes each — and Claude Code's 2,000-character limit is never the tighter of the two
+# every worker prompt as one line far over it, and workers had to be re-run). The limit is bytes, not
+# characters: one agent runtime's reader keeps exactly 2,000 bytes of a longer line — fewer characters on lines with em
+# dashes, three bytes each — and another runtime's 2,000-character limit is never the tighter of the two
 LINE_LIMIT = 2000
 FENCE_RX = re.compile(r"^\s*(?:```|~~~)")  # a fence line as `unfenced()` reads one, at any indentation
 
@@ -438,16 +438,88 @@ def also_sinks(text: str, file_path: str | None = None) -> list[tuple[str, int, 
 # one missing check's group and a line that is its own finding: STEP 2 reads, in each worker file (the gate's `groups`
 # field) and across them (`--overlaps`), every record whose `Also at:` line names a sink that another record holds as its
 # own `File:` sink at one class and entry point — one defect counted twice, or a line that needs a fix of its own on a
-# group's line (base skill, Deduplication & Sink Location). Two runs' workers put decoder-depth sinks on a schema
-# group's `Also at:` line and stopped at STEP 3 on it; a third run merged such a finding into the group and read clean.
+# group's line (base skill, Deduplication & Sink Location). In some runs, workers put decoder-depth sinks on a schema
+# group's `Also at:` line and stopped at STEP 3 on it; another run merged such a finding into the group and read clean.
 EP_IDENT = r"[A-Za-z_$][\w$]*"
 REC_HEAD_RX = re.compile(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\]\**\s+\**(VULN-[A-Za-z0-9-]*\d)", re.I)
 ANY_HEAD_RX = re.compile(r"^(?:#+ )?\**\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*|CONFIRMED|LIKELY)\]", re.I)
 
 
+HTTP_RX = re.compile(r"(?i)\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[^\s()`,;]*)")
+
+
+def route_path(p_: str) -> str:
+    """A path ends at the sentence around it: a trailing `.`, `:`, `!` or quote is prose, never the route's. A `?` is
+    left as written — a route's own optional marker (`/:id?`, `/abc?`) looks the same as a question's — as are `*`,
+    `]` and `>` (`/files/*`, `/[id]`, `/<int:id>`) and an ellipsis (`/api/...`), whatever follows it."""
+    if not re.search(r"\.\.[.:!?'\"]*$", p_):
+        p_ = p_.rstrip(".:!'\"")
+    return p_.rstrip("/") or "/"
+
+
+def routes_of(t_: str | None) -> set:
+    """Every `METHOD /path` a text names, its path ended as `route_path` ends it."""
+    return {f"{m_.group(1).upper()} {route_path(m_.group(2))}" for m_ in HTTP_RX.finditer(t_ or "")}
+
+
+def entry_name(e, name_at: int) -> str:
+    """A list entry's name field as its identity reads it: backticks dropped, whitespace collapsed."""
+    return " ".join(((e[name_at] if len(e) > name_at else "") or "").replace("`", "").split())
+
+
+_SHARED_MEMO: dict = {}
+
+
+HTTP_MULTI_RX = re.compile(r"(?i)\b((?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)(?:\s*[/,|]\s*(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS))*)\s+(/[^\s()`,;]*)")
+
+
+def routes_all(t_: str | None) -> set:
+    """As `routes_of`, every method of a `GET/POST /graphql` or `PATCH, DELETE /:id` citation a route of its own — read
+    where a cell must name one of a line's entries alone."""
+    out = set()
+    for m_ in HTTP_MULTI_RX.finditer(t_ or ""):
+        for meth_ in re.split(r"\s*[/,|]\s*", m_.group(1)):
+            out.add(f"{meth_.upper()} {route_path(m_.group(2))}")
+    return out
+
+
+def shared_lines(entries, name_at: int = 3) -> set:
+    """The `(path, line)` pairs list entries of two or more different names are registered on — one handler serving
+    `GET /graphql` and `POST /graphql`, listed as two entries at one line. A row listed twice is one entry."""
+    hit = _SHARED_MEMO.get((id(entries), name_at))
+    if hit is not None and hit[0] is entries and hit[1] == len(entries):
+        return hit[2]
+    names: dict = {}
+    for e in entries:
+        names.setdefault((e[0], e[1]), set()).add(entry_name(e, name_at))
+    out = {k for k, v in names.items() if len(v) > 1}
+    _SHARED_MEMO[(id(entries), name_at)] = (entries, len(entries), out)
+    return out
+
+
+def line_ident(path: str, line: int, name: str | None, shared: set) -> tuple:
+    """A list entry's identity: its `(path, line)`, and its name field as well when another entry is registered on that
+    line — two list entries are two entry points wherever they sit."""
+    return (path, line, " ".join((name or "").replace("`", "").split())) if (path, line) in shared else (path, line)
+
+
+def pick_on_line(cell: str, group: list, name_at: int):
+    """Of the list entries registered on one line, the one a text names: every `METHOD /path` the text names that entry's
+    own, or, the text naming no route, the entry's whole name field in the text. None when none or several are."""
+    c = " ".join((cell or "").replace("`", "").split())
+    rc = routes_all(c)
+    if rc:
+        hit = [e for e in group if rc <= routes_all(e[name_at])]
+    else:
+        hit = [e for e in group if entry_name(e, name_at) and re.search(
+            r"(?<![\w$])" + re.escape(entry_name(e, name_at)) + r"(?![\w$])", c)]
+    one = {entry_name(e, name_at): e for e in hit}  # one entry listed twice is one entry
+    return next(iter(one.values())) if len(one) == 1 else None
+
+
 def entry_list(plan: str) -> list:
     """The scan-plan's `## Entry points` list, as item (4) reads it: (path, line, the name field's last identifier, the
-    name field's words, a pattern finding those words whole — compiled once: lists of 700 entries outrun `re`'s cache)."""
+    name field's words, a pattern finding those words whole — compiled once: long lists outrun `re`'s cache)."""
     sec = entry_section(plan)
     out = []
     for l in sec.splitlines():
@@ -464,8 +536,11 @@ def entry_at(cell: str, entries: list):
     """The list entry a record's `Entry point:` names, as (path, line) — item (4)'s reading: a cited `file:line` as the
     entry at it or up to three lines below it in that file, else a name only one entry's last identifier is — and, where
     that name is several entries', the one of them whose whole name field the text holds (`QueueA Events`, whose last
-    word `QueueB Events` shares). The text itself when it names none."""
+    word `QueueB Events` shares). Two entries registered on one line are told apart by the routes or the whole name
+    field the text names (`pick_on_line`), the entry then read as `(path, line, name)`. The text itself when it names
+    none, or one line's entries without telling them apart."""
     c = re.sub(r"\s+", " ", cell.replace("`", "")).strip()
+    shared = shared_lines(entries)
     for m in re.finditer(r"([\w./-]+\.\w+):(\d+)", c):
         cited, ln = m.group(1).lstrip("./"), int(m.group(2))
         paths = {e[0] for e in entries if e[0] == cited or e[0].endswith("/" + cited)}
@@ -474,12 +549,16 @@ def entry_at(cell: str, entries: list):
         near = [e for e in entries if e[0] in paths and e[1] <= ln + 3]
         if near:
             e = next((x for x in near if x[1] == ln), None) or max(near, key=lambda e: e[1])
+            if (e[0], e[1]) in shared:
+                p = pick_on_line(c, [x for x in entries if (x[0], x[1]) == (e[0], e[1])], 3)
+                return line_ident(p[0], p[1], p[3], shared) if p else c
             return (e[0], e[1])
     words = set(re.findall(EP_IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c)))
-    named = {(e[0], e[1]) for e in entries if e[2] in words}
+    named = {line_ident(e[0], e[1], e[3], shared) for e in entries if e[2] in words}
     if len(named) == 1:
         return next(iter(named))
-    whole = {(e[0], e[1]) for e in entries if (e[0], e[1]) in named and e[4] is not None and e[4].search(c)}
+    whole = {line_ident(e[0], e[1], e[3], shared) for e in entries
+             if line_ident(e[0], e[1], e[3], shared) in named and e[4] is not None and e[4].search(c)}
     return next(iter(whole)) if len(whole) == 1 else c
 
 
@@ -564,7 +643,7 @@ def own_sink_aliases(recs_by_file: dict, entries: list, cross: bool) -> list:
     class and entry point — within one file (`cross` False) or in two (`cross` True). A record naming no class or no
     entry point is read by neither side."""
     if not any(r_["also"] for recs_ in recs_by_file.values() for r_ in recs_):
-        return []  # no group: nothing to read, and a 700-entry list is not resolved for nothing
+        return []  # no group: nothing to read, and a long entry list is not resolved for nothing
     at_ = {}
     for f_, recs_ in recs_by_file.items():
         for r_ in recs_:
@@ -799,8 +878,8 @@ def partition_checks(plan: str, cache: Path) -> tuple[bool, list[str], list[str]
 
 
 # STEP 1 at N partitions (a plan carrying the `partition count:` row): no worker reads more than about PART_CAP lines. The
-# measured knee: workers' first attempts sealed nearly every partition under 15,000 lines, far fewer between 15,000 and
-# 25,000 and none above; three fixed partitions gave a large repository's workers several times that many lines each.
+# measured knee: workers' first attempts sealed nearly every partition under 15,000 lines and far fewer above it; three
+# fixed partitions gave a large repository's workers several times that many lines each.
 PART_CAP = 12000
 # lock files by exact name: read in full by the lenses that own supply chain, dependency confusion and AI editor / agent
 # config poisoning (hardening-platform) and hardcoded secrets — a registry credential in a resolved URL — (access-auth),
@@ -1436,7 +1515,7 @@ AGENT_RX = re.compile(r"(^|/)\.(agents|claude|cursor|windsurf|codex|continue|roo
 # `nginx.test.conf` or a `deploy.test.sh` is no test), Go's `*_test.go`, ExUnit's `*_test.exs`, RSpec's `*_spec.rb`, snapshots
 TEST_RX = re.compile(r"\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|py|rb|go|java|kt|kts|cs|scala|php|ex|exs|swift|dart|rs|vue|svelte)$|"
                      r"_test\.(go|exs)$|_spec\.rb$|\.snap$|(^|/)(__tests__|__mocks__|__fixtures__|__snapshots__)/")
-# names a production module can carry too (`test_email.py` a management command, `ABTest.java` a class, `ab_test.py`): a
+# names a production module can carry too (`test_data.py` a management command, `ABTest.java` a class, `ab_test.py`): a
 # test only under a test directory — a `test` or `tests` segment, or one named like a test project (`Foo.Tests`,
 # `unit_tests`, `IntegrationTests`)
 TEST_IN_DIR_RX = re.compile(r"(^|/)test_[^/]+\.py$|_test\.(py|rb|ex)$|Tests?\.(java|kt|cs|scala)$")
@@ -2222,7 +2301,7 @@ def gate_lines(target: Path, cache: Path, plan: str, skills: Path | None, only: 
         a = sum(1 for ps in records_paths if any(pth.startswith("/") and under(pth) is not None for pth in ps))
         s = sum(1 for l in lines_ if re.match(r"^(?:#+ )?\[(CRITICAL|HIGH|MEDIUM|LOW|INFO[A-Z]*)\] VULN-", l, re.I))
         # `r` counts RECORDS carrying a Reference line, never Reference lines: a Clearance Record section names reference files
-        # too, and counting its lines once showed `references 22/3`. A record's block runs from the heading above its File:
+        # too, and counting its lines once showed more references than records. A record's block runs from the heading above its File:
         # line to the next heading.
         def names_stem(l: str) -> bool:
             return re.match(r"^\**Reference:\**", l) is not None and any(re.search(r"(?:^|[/`\s])" + re.escape(st) + r"\.md\b", l) for st in stems)
@@ -2580,7 +2659,7 @@ def paths_lines(path: Path, target: Path, pair: str | None, skills: Path | None 
         # the worker is started with this one line, never with the prompt re-typed: a re-typed prompt is a copy this test never read
         lens_, part_ = pair.split("/")
         # a typo in the one path heals without a re-run: the fallback names the file without the cache directory's spelling
-        # read, then check, then follow: with the check after "follow it", four of five test workers followed a file naming another partition
+        # read, then check, then follow: with the check after "follow it", most test workers followed a file naming another partition
         lines.append(f"send: You are the {lens_} worker for partition {part_}. Your prompt is {path.resolve()}. Read it in full before anything else; if that path cannot be read, read prompts/{lens_}-{part_}.md in the directory of {target} whose name begins .llm-sast instead. Before you follow it, check its first line: it must name the {lens_} worker and partition {part_}. If neither path can be read, or the first line names another lens or partition, stop: write nothing and reply \"prompt file not found\". Otherwise follow the file; it is your whole task.")
     return ok, lines
 
@@ -2865,7 +2944,7 @@ def main() -> int:
         ok_g, lines_g = gate_lines(tgt, tgt / ".llm-sast-scanner-cache", read(tgt / ".llm-sast-scanner-cache" / "scan-plan.md"), skills_g, args.gate)
         print("\n".join(lines_g) if lines_g else f"gate: no worker file for {args.gate}")
         # the lines `long lines <n>` counts, named on stderr so the line recorded from stdout stays the gate line: a
-        # character count (`wc -L`) misses the lines of 1,982 to 2,000 characters an em dash takes over the limit
+        # character count (`wc -L`) misses lines under 2,000 characters that em dashes take over the limit
         for l_g in lines_g:
             m_g = re.match(r"^gate: ([a-z-]+)/(p\d+) — .* \| long lines (\d+)(?: \| groups (\d+)/(\d+))?$", l_g)
             if m_g and int(m_g.group(3)) > 0:
@@ -2924,8 +3003,8 @@ def main() -> int:
         print(f"overlaps: {len(al_o)}" + (f" | grouping workers {len(grp_o)} — {', '.join(grp_o)}" if al_o else ""))
         return 1 if al_o else 0
     if args.ledger_start:
-        # the row STEP 1 copies: counted, never composed — one session counted the previous run's copy and wrote its 363
-        # over a ledger of 448
+        # the row STEP 1 copies: counted, never composed — one session counted the previous run's copy and wrote its count
+        # over a larger ledger
         cache_l = Path(args.target).resolve() / ".llm-sast-scanner-cache"
         plan_l = read(cache_l / "scan-plan.md")
         row_l = row(plan_l, "started:")
@@ -3343,16 +3422,31 @@ def main() -> int:
 
     # 4. merges with a different entry point
     # an entry point is the scan-plan's `## Entry points` entry it names: workers cite one resolver at its decorator line and
-    # at its method line (`R.ts:373 Mutation createX`, `R.ts:376 Mutation createX`) or by name alone (`createX`)
+    # at its method line (`R.ts:10 Mutation createX`, `R.ts:13 Mutation createX`) or by name alone (`createX`)
     ep_list_sec = entry_section(plan)
     IDENT = r"[A-Za-z_$][\w$]*"
-    ep_entries = []  # (path, line, operation name — the name field's last identifier)
+    ep_entries = []  # (path, line, operation name — the name field's last identifier, the name field)
     for l in ep_list_sec.splitlines():
         f = l.split(" | ")
         m = re.match(r"^(.+):(\d+)", f[0].strip().lstrip("|").strip().strip("`")) if len(f) >= 3 and not l.startswith("#") else None
         if m:
             ids = re.findall(IDENT, f[2])
-            ep_entries.append((m.group(1), int(m.group(2)), ids[-1] if ids else None))
+            ep_entries.append((m.group(1), int(m.group(2)), ids[-1] if ids else None, f[2].strip()))
+    ep_shared = shared_lines(ep_entries)  # lines two list entries are registered on: told apart by name (`line_ident`)
+
+    def ep_line_group(e):
+        """The list entries registered on entry `e`'s line, when it holds more than `e`."""
+        return [x for x in ep_entries if (x[0], x[1]) == (e[0], e[1])] if (e[0], e[1]) in ep_shared else None
+
+    def ep_named(c: str) -> set:
+        """The entries a cell's words name by last identifier — one line's entries narrowed to the one the cell's routes
+        or whole name field name, when they alone collide."""
+        words = set(re.findall(IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c)))
+        named = [e for e in ep_entries if e[2] in words]
+        if len({(e[0], e[1]) for e in named}) == 1 and len(named) > 1:
+            p = pick_on_line(c, named, 3)
+            return {line_ident(p[0], p[1], p[3], ep_shared)} if p else {line_ident(e[0], e[1], e[3], ep_shared) for e in named}
+        return {line_ident(e[0], e[1], e[3], ep_shared) for e in named}
     def ep_id(cell: str):
         c = re.sub(r"\s+", " ", cell.replace("`", "")).strip()
         for m in re.finditer(r"([\w./-]+\.\w+):(\d+)", c):
@@ -3362,11 +3456,15 @@ def main() -> int:
                 continue  # a basename two list files share names neither
             near = [e for e in ep_entries if e[0] in paths and e[1] <= ln + 3]  # a decorator sits up to three lines above
             if near:
-                # the entry on the cited line itself first: `manage.py:344` among entries at :344, :345 and :346 is :344
+                # the entry on the cited line itself first: `app.py:10` among entries at :10, :11 and :12 is :10
                 e = next((x for x in near if x[1] == ln), None) or max(near, key=lambda e: e[1])
+                grp = ep_line_group(e)
+                if grp:
+                    # two entries on one line: the one the cell's routes or whole name field name, else the cell itself
+                    p = pick_on_line(c, grp, 3)
+                    return line_ident(p[0], p[1], p[3], ep_shared) if p else c
                 return (e[0], e[1])
-        words = set(re.findall(IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c)))
-        named = {(e[0], e[1]) for e in ep_entries if e[2] in words}
+        named = ep_named(c)
         return next(iter(named)) if len(named) == 1 else c
     def ep_single(text: str):
         """The one list entry a worker record's `Entry point:` names, None when it names none or several — a record that
@@ -3379,10 +3477,12 @@ def main() -> int:
             near = [e for e in ep_entries if e[0] in paths and e[1] <= ln + 3] if len(paths) == 1 else []
             if near:
                 e = next((x for x in near if x[1] == ln), None) or max(near, key=lambda e: e[1])
-                found.add((e[0], e[1]))
+                grp = ep_line_group(e)
+                p = pick_on_line(c, grp, 3) if grp else e
+                # one line's entries the text does not tell apart: it names several
+                found.update({line_ident(p[0], p[1], p[3], ep_shared)} if p else {line_ident(x[0], x[1], x[3], ep_shared) for x in grp})
         if not found:
-            words = set(re.findall(IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c)))
-            found = {(e[0], e[1]) for e in ep_entries if e[2] in words}
+            found = ep_named(c)
         return next(iter(found)) if len(found) == 1 else None
     def record_entry(row_id: str) -> str | None:
         """The `Entry point:` line of the worker record a table row id names (`<lens>/p<n>/<VULN id>`), None when unfound."""
@@ -3544,21 +3644,24 @@ def main() -> int:
         m = re.match(r"^(.+):(\d+)", f[0].strip().lstrip("|").strip().strip("`")) if len(f) >= 3 and not l.startswith("#") else None
         if m:
             ep_full.append((m.group(1), int(m.group(2)), f[2].strip()))
-    HTTP_RX = re.compile(r"(?i)\b(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+(/[^\s()`,;]*)")
-    def route_path(p_):
-        """A path ends at the sentence around it: a trailing `.`, `:`, `!` or quote is prose, never the route's. A `?` is
-        left as written — a route's own optional marker (`/:id?`, `/abc?`) looks the same as a question's — as are `*`,
-        `]` and `>` (`/files/*`, `/[id]`, `/<int:id>`) and an ellipsis (`/api/...`), whatever follows it."""
-        if not re.search(r"\.\.[.:!?'\"]*$", p_):
-            p_ = p_.rstrip(".:!'\"")
-        return p_.rstrip("/") or "/"
-    routes_of = lambda t_: {f"{m_.group(1).upper()} {route_path(m_.group(2))}" for m_ in HTTP_RX.finditer(t_ or "")}
+    full_shared = shared_lines(ep_full, 2)  # (`routes_of` and `route_path` are module level, as `entry_at` reads routes too)
     route_entries: dict = {}
     for e_ in ep_full:
         for r_ in routes_of(e_[2]):
-            route_entries.setdefault(r_, set()).add((e_[0], e_[1]))
+            route_entries.setdefault(r_, set()).add(line_ident(e_[0], e_[1], e_[2], full_shared))
     # a route one list entry holds names that entry; `GET /:id`, which many routers hold, names none
     unique_routes = lambda t_: {r_ for r_ in routes_of(t_) if len(route_entries.get(r_, ())) == 1}
+
+    def route_keys(text) -> set:
+        """The list entries a text names by route: every `METHOD /path` it names (each method of `GET/POST /x` its own) that
+        exactly one list entry holds — an exact reading, never a guess from words; a route no entry holds, or several
+        do, names none."""
+        out_ = set()
+        for r_ in routes_all(text):
+            es_ = route_entries.get(r_, set())
+            if len(es_) == 1:
+                out_ |= es_
+        return out_
     PATH_CITE = re.compile(r"([\w./()\[\]@+-]+\.\w+):(\d+)")
     memo48: dict = {}
 
@@ -3583,6 +3686,11 @@ def main() -> int:
             near_ = [e_ for e_ in ep_full if e_[0] in paths_ and abs(e_[1] - ln_) <= 3]
             if len(near_) == 1:
                 found_.add(near_[0])
+            elif near_ and len({(e_[0], e_[1]) for e_ in near_}) == 1 and (near_[0][0], near_[0][1]) in full_shared:
+                # entries registered on one line: the one whose routes or whole name field the cell names, else unsure
+                p_ = pick_on_line(c_, near_, 2)
+                if p_:
+                    found_.add(p_)
         res_ = None
         if len(found_) == 1:
             e_ = next(iter(found_))
@@ -3592,7 +3700,7 @@ def main() -> int:
             else:
                 last_ = (re.findall(IDENT, e_[2]) or [None])[-1]
                 ok_ = bool(last_) and last_ in set(re.findall(IDENT, re.sub(r"\S+:\d+(?:-\d+)?", " ", c_)))
-            res_ = (e_[0], e_[1]) if ok_ else None
+            res_ = line_ident(e_[0], e_[1], e_[2], full_shared) if ok_ else None
         memo48[("strict", cell)] = res_
         return res_
 
@@ -3732,6 +3840,57 @@ def main() -> int:
         if m_:
             ans48.setdefault(frozenset({m_.group(1).upper(), m_.group(2).upper()}), []).append(m_.group(3).strip(" `*"))
 
+    FLOW_STEP = re.compile(r"\s*(?:→|->|⇒|=>|⟶|➜|➔)\s*")
+    FLOW_CITE = re.compile(r"([\w./()\[\]@+-]+\.\w+):(\d+)(?:\s*[-–]\s*(\d+))?")
+
+    def flow_hops(c_) -> set:
+        """The `path:line` hops a row's worker record's `Flow:` line names: the first citation of each step between its
+        arrows (`A:12 → B:40 (calls C:9) → D:7` hops A:12, B:40 and D:7), never a step's later citations — an aside, a
+        comparison — and, with no arrow, its first citation alone; a leading `(`, `[` or `./` dropped from the path;
+        every line of a `path:<a>-<b>` range of at most 30 lines. Read as `sink_of` reads a sink."""
+        if ("hops", c_[0]) not in memo48:
+            parts_ = record_parts(re.sub(r"[`*]", "", c_[0]).strip())
+            out_ = set()
+            for step_ in FLOW_STEP.split(re.sub(r"[`*]", "", parts_[0] if parts_ else "")):
+                m_ = FLOW_CITE.search(step_)
+                if not m_:
+                    continue
+                lo_ = int(m_.group(2))
+                hi_ = int(m_.group(3)) if m_.group(3) and lo_ <= int(m_.group(3)) <= lo_ + 30 else lo_
+                for p_ in {m_.group(1), re.sub(r"^(?:\./)+", "", m_.group(1).lstrip("(["))}:
+                    out_.update(canon(rel(f"{p_}:{n_}")) for n_ in range(lo_, hi_ + 1))
+            memo48[("hops", c_[0])] = out_
+        return memo48[("hops", c_[0])]
+
+    def hop_pair(a_, b_) -> bool:
+        """Two records of one entry point at two sinks, one record's `File:` sink a hop on the other's `Flow:` line: one
+        missing check two workers report at two points of one data path — the Duplicates rule's hop merge, which the writer
+        declares and `--duplicates` does not list. Both worker records must be found, and their `Entry point:` lines (read
+        as `ep_same` reads them) must name one list entry by an exact reading — one strict entry or one set of route
+        keys, neither naming two — never by words alone; the entry's own registration line is no hop between two of its
+        findings."""
+        if a_[3] == b_[3] and sink_of(a_) == sink_of(b_):
+            return False  # one key: the Duplicates rule's own pairs
+        if any(record_parts(re.sub(r"[`*]", "", x_[0]).strip()) is None for x_ in (a_, b_)):
+            return False  # a row naming no worker record: nothing joins it
+        pa_, pb_ = ep_same(a_), ep_same(b_)  # a cell the record does not bear out reads `unavailable`
+        if unavail(pa_) or unavail(pb_):
+            return False  # an entry point not stated: the Flow alone joins nothing
+        ra_, rb_ = routes_of(pa_), routes_of(pb_)
+        if ra_ and rb_ and not (ra_ & rb_):
+            return False  # two cells naming other routes: two entry points
+        ea_, eb_ = ep_strict(pa_), ep_strict(pb_)
+        ka_, kb_ = route_keys(pa_), route_keys(pb_)
+        if (ea_ and eb_ and ea_ != eb_) or (ka_ and kb_ and not (ka_ & kb_)):
+            return False  # two list entries: two findings
+        if not ((ea_ and ea_ == eb_) or (len(ka_) == 1 and ka_ == kb_)):
+            return False  # one entry only by an exact reading: one strict entry, or one set of route keys — never words alone
+        # the entry's own registration line stands on every Flow from it: two of its findings join at no hop there
+        keys_ = {x_ for x_ in (ea_, eb_) if isinstance(x_, tuple)} | ka_ | kb_
+        ent_ = {canon(rel(f"{k_[0]}:{k_[1]}")) for k_ in keys_}
+        sa_, sb_ = sink_of(a_), sink_of(b_)
+        return (sa_ not in ent_ and sa_ in flow_hops(b_)) or (sb_ not in ent_ and sb_ in flow_hops(a_))
+
     def answered_into(c_, t_) -> bool:
         """The pair's one answer line reads `merged into <t_'s VULN id>`."""
         got_ = ans48.get(frozenset({wr_id(c_), wr_id(t_)}), [])
@@ -3744,6 +3903,20 @@ def main() -> int:
             why_.append(f"the kept block `{t_[6]}` holds no `Also: {c_[3]} — {c_[0]} at {c_[2]}` line")
         if corrected_key(c_[3], c_[2]) in copy_keys48:
             why_.append(f"its key `{c_[3]}|{sink_of(c_)}` is a ledger row of the pre-write copy — it stays a `body` row and the pair is `linked`")
+        if sev_rank(c_) > sev_rank(t_):
+            why_.append(f"its worker record is {record_sev(c_[0])} and the kept one {record_sev(t_[0])} — the lower severity is the one merged")
+        return "; ".join(why_) or None
+    def hop_why(c_, t_):
+        """Why a declared hop merge of row `c_` into body row `t_` does not stand, or None when it does: a merged record
+        whose key is a ledger row of the pre-write copy is never a hop merge's — undone, never `linked` (a hop pair is no
+        listed pair); the kept block's `Also:` line; the lower worker severity merged."""
+        if corrected_key(c_[3], c_[2]) in copy_keys48:
+            return (f"its key `{c_[3]}|{sink_of(c_)}` is a ledger row of the pre-write copy, which no hop merge merges: undo "
+                    f"`{c_[0]}` into its own body block and table row and drop the pair's `duplicate candidate:` line — a hop "
+                    f"merge is never `linked`")
+        why_ = []
+        if not also_line(block_id.get(t_[6].upper(), ""), c_):
+            why_.append(f"the kept block `{t_[6]}` holds no `Also: {c_[3]} — {c_[0]} at {c_[2]}` line")
         if sev_rank(c_) > sev_rank(t_):
             why_.append(f"its worker record is {record_sev(c_[0])} and the kept one {record_sev(t_[0])} — the lower severity is the one merged")
         return "; ".join(why_) or None
@@ -3778,7 +3951,8 @@ def main() -> int:
             return False  # one key: a same-key duplicate, which the Duplicates rule's order merges
         at_x_ = {id(m_) for m_ in table_rows if m_[4].lower() == "merged" and canon(rel(m_[2])) == sx_}
         return sx_ in {canon(rel(s_)) for s_, h_ in block_holders(y_) if id(h_) not in at_x_}
-    bad_merge, merge_fix = 0, []
+    bad_merge, merge_fix, hop_merges = 0, [], 0
+    ek_txt = lambda k_: f"{k_[0]}:{k_[1]}" + (f" {k_[2]}" if len(k_) > 2 else "")  # an entry key, its name when its line holds two
     for c in merged_rows:
         t = body_by_id.get(c[6].upper())
         kind4 = None
@@ -3787,7 +3961,17 @@ def main() -> int:
             es_c, es_t = ep_strict(ep_of(c)), ep_strict(ep_of(t))
             if es_c and es_t and es_c != es_t:
                 bad_merge += 1
-                merge_fix.append(f"`{c[0]}`'s record names the entry `{es_c[0]}:{es_c[1]}` and the kept `{t[0]}`'s `{es_t[0]}:{es_t[1]}` — two list entries are two findings: undo `{c[0]}` into its own body block and table row, its cell its record's entry point")
+                merge_fix.append(f"`{c[0]}`'s record names the entry `{ek_txt(es_c)}` and the kept `{t[0]}`'s `{ek_txt(es_t)}` — two list entries are two findings: undo `{c[0]}` into its own body block and table row, its cell its record's entry point")
+            elif not (es_c and es_t):
+                # records naming their entry points by route, not `file:line`: routes that each name one list entry, those
+                # entries none in common, are two entry points (`GET /graphql` and `POST /graphql` of one line); a route no
+                # entry holds, or words alone, decide nothing here
+                kc4, kt4 = route_keys(ep_of(c)), route_keys(ep_of(t))
+                if kc4 and kt4 and not (kc4 & kt4):
+                    bad_merge += 1
+                    merge_fix.append(f"`{c[0]}`'s record and the kept `{t[0]}`'s name two entry points, "
+                                     f"`{', '.join(sorted(routes_all(ep_of(c))))}` and `{', '.join(sorted(routes_all(ep_of(t))))}` — two entry points "
+                                     f"are two findings: undo `{c[0]}` into its own body block and table row, its cell its record's entry point")
             continue
         if t and (ep_id(t[1]), canon(rel(t[2])), t[3]) != (ep_id(c[1]), canon(rel(c[2])), c[3]):
             # a duplicate the writer judged: its `duplicate candidate:` line reads `merged into` the kept row, and a merge
@@ -3806,6 +3990,27 @@ def main() -> int:
                 bad_merge += 1
                 merge_fix.append(f"`{c[0]}` and `{t[0]}` are a group overlap merged the wrong way round — turn the merge round: `{t[0]}`, whose sink stands on the group's `Also at:` line, is the one merged, into the block that holds that line, which reads at the highest severity among its lines")
                 continue
+        if t and kind4 is None and (ep_id(t[1]), canon(rel(t[2])), t[3]) != (ep_id(c[1]), canon(rel(c[2])), c[3]) and hop_pair(c, t):
+            # a hop merge: one entry point's records of one missing check at two points of one data path, declared on a
+            # `duplicate candidate:` line, the lower worker severity merged and the kept block's `Also:` line naming it — read
+            # after the group overlaps, so a group merged the wrong way round stays that
+            why_h = hop_why(c, t)
+            if answered_into(c, t) and not why_h:
+                hop_merges += 1
+                continue
+            bad_merge += 1
+            hop_s = sink_of(c) if sink_of(c) in flow_hops(t) else sink_of(t)
+            n_l = len(ans48.get(frozenset({wr_id(c), wr_id(t)}), []))
+            if answered_into(c, t):
+                merge_fix.append(f"`{c[0]}` is merged into `{c[6]}` as a hop merge, but {why_h}")
+            else:
+                merge_fix.append((f"`{c[0]}` and `{t[0]}` hold {n_l} `duplicate candidate:` lines — one line answers a pair, "
+                                  f"`merged into {c[6]}`" if n_l > 1 else
+                                  f"`{c[0]}` and `{t[0]}` name one entry point and `{hop_s}` is a hop on the other's `Flow:` line — a hop merge "
+                                  f"stands as the writer's judgement: write `duplicate candidate: {c[0]} / {t[0]} — merged into {c[6]}` when "
+                                  f"both records name one missing check on that path, else undo `{c[0]}` into its own body block and table row")
+                                 + (f"; the merge also needs: {why_h}" if why_h else ""))
+            continue
         if not t or (ep_id(t[1]), canon(rel(t[2])), t[3]) != (ep_id(c[1]), canon(rel(c[2])), c[3]):  # one sink, whichever line form each row cites
             bad_merge += 1
             if t and kind4 and answered_into(c, t):
@@ -3828,7 +4033,8 @@ def main() -> int:
                 continue
             own = next((b[6] for b in body_rows if (ep_id(b[1]), canon(rel(b[2])), b[3]) == (ep_id(c[1]), canon(rel(c[2])), c[3])), None)
             merge_fix.append((f"point `{c[0]}` at `{own}`, the body row with its own entry point, sink and class" if own else f"undo `{c[0]}` into its own body block and table row") + dup_note4)
-    emit("merges with a different entry point", f"{bad_merge} (of {len(merged_rows)} merged rows; table rows {len(table_rows)} | malformed rows {malformed})", None, bad_merge == 0 and malformed == 0,
+    emit("merges with a different entry point", f"{bad_merge} (of {len(merged_rows)} merged rows; table rows {len(table_rows)} | malformed rows {malformed})"
+         + (f" | hop merges {hop_merges}" if hop_merges else ""), None, bad_merge == 0 and malformed == 0,
          "; ".join([x for x in ("; ".join(merge_fix[:6]) + (" …" if len(merge_fix) > 6 else "") + (", then re-count the histogram, the close-out and the ledger from what is written" if any(m.startswith("undo") for m in merge_fix) else ""),
                               "rewrite each malformed row as seven cells whose fifth is a disposition word" if malformed else "") if x]))
 
@@ -3975,7 +4181,23 @@ def main() -> int:
                 bad48.append(f"`{a_[0]} / {b_[0]}` reads `{ans_[:40]}`, but the table merges the pair into `{a_[6] if a_[4].lower() == 'body' else b_[6] if b_[4].lower() == 'body' else a_[6]}`")
             elif any(x_[4].lower() == "merged" and y_[4].lower() == "body" and sev_rank(x_) > sev_rank(y_) and not group_merge(x_, y_) for x_, y_ in ((a_, b_), (b_, a_))):
                 bad48.append(f"`{a_[0]} / {b_[0]}` merges the higher worker severity into the lower — the lower is the one merged")
-    stray48 = sorted(" / ".join(sorted(k_)) for k_ in ans48 if k_ not in cand48 and k_ not in skip48)
+    rows_wr48: dict = {}
+    for c_ in table_rows:
+        if c_[4].lower() in ("body", "merged"):
+            rows_wr48.setdefault(wr_id(c_), c_)
+
+    def hop_line48(k_) -> bool:
+        """The one line on a hop merge the table makes (the Duplicates rule), which `--duplicates` does not list: no stray.
+        Any other line on such a pair — a second line, another answer, a merge the table does not make — is one."""
+        ids_ = sorted(k_)
+        got_ = ans48.get(k_, [])
+        if len(ids_) != 2 or len(got_) != 1 or not all(i_ in rows_wr48 for i_ in ids_):
+            return False
+        a_, b_ = rows_wr48[ids_[0]], rows_wr48[ids_[1]]
+        into_ = re.match(r"(?i)merged into\s+`?(vuln-[\w-]*\d)", got_[0])
+        return bool(into_ and "merged" in (a_[4].lower(), b_[4].lower()) and merged_to(a_, into_.group(1).upper())
+                    and merged_to(b_, into_.group(1).upper()) and hop_pair(a_, b_))
+    stray48 = sorted(" / ".join(sorted(k_)) for k_ in ans48 if k_ not in cand48 and k_ not in skip48 and not hop_line48(k_))
     # a clause that names what differs in its own pair fits no pair of other classes: one clause answering three or more
     # pairs of two or more class pairs, across two or more groups of records its pairs join, judged none of them (an
     # analogous pair's clause repeats over one class pair; one clause may name every difference in one group of records
@@ -4003,7 +4225,7 @@ def main() -> int:
         bad48.append(f"{len(unans_l)} pair(s) have no one `duplicate candidate:` line — judge each from its two records: one finding only when both name the same absent check on the same data path from one entry point, the lower severity then `merged into` the other's VULN id (the kept block's last line `Also: <class> — <worker record> at <sink>` when class or sink differ), never merging away a ledger key of the pre-write copy (then `linked`, both blocks naming each other on `Also:` lines), else `distinct: <what differs>`; `python3 .llm-sast-scanner-cache/recheck.py --duplicates` lists every pair with its ledger keys: "
                      + ", ".join(unans_l[:10]) + (f" … and {len(unans_l) - 10} more" if len(unans_l) > 10 else ""))
     if stray48:
-        bad48.append(f"`duplicate candidate:` lines at {', '.join('`' + x_ + '`' for x_ in stray48[:3])} — no pair: a line is written only for a pair `--duplicates` lists")
+        bad48.append(f"`duplicate candidate:` lines at {', '.join('`' + x_ + '`' for x_ in stray48[:3])} — no pair: a line is written only for a pair `--duplicates` lists, or for a hop merge the table makes (the Duplicates rule)")
     # a line both on one finding's `Also at:` line and another finding's own `File:` sink, at one class and entry point,
     # is one defect counted twice: the line is the group's (the record merged into it) or its own (off the `Also at:` line)
     fins48 = [c for c in table_rows if c[4].lower() in ("body", "promoted")]
@@ -4321,10 +4543,10 @@ def main() -> int:
 
     # 37. record cells — a body or merged row's sink and class cells are its worker record's own: the first sink of its
     # `File:` line, the same `path:line` read by first line, and a stem its `Reference:` names; a body row's block keeps
-    # them too. A merge read from cells the writer rewrote proves nothing: one write rewrote 213 rows onto one sink and class,
+    # them too. A merge read from cells the writer rewrote proves nothing: one write rewrote nearly every row onto one sink and class,
     # merged them into one body row, and every other item read the table it had made consistent with itself. The
     # entry-point cell is read too, by ep_meets: records name their entry point in forms the plan's list does not, so the
-    # cell is met by what names it, never by equality — one writer put `worker entry point` in all 328 of its rows.
+    # cell is met by what names it, never by equality — one writer put `worker entry point` in every one of its rows.
     def rc_path(p_: str) -> str:
         return re.sub(r"^(?:\./)+", "", rel(p_.strip()))  # target-relative, `./` dropped — never a leading dot of the name
     def rc_same(cell_p: str, rec_p: str) -> bool:
@@ -5430,7 +5652,7 @@ def main() -> int:
     # 38. verdict scope — a body row's verdict follows its worker record's severity, the severity Step 6 saw: a Step 6
     # verdict when it is in `adv=`, `not run` outside it; a block rendered below its record's severity carries the
     # DOWNGRADED or DISPUTED verdict that lowered it; merged, withdrawn and unverifiable rows read `n/a`. One writer tabled
-    # forty-six Low records STANDING or DISPUTED, and its repair, reading the block's severity, set `not run` on forty-six
+    # Low records STANDING or DISPUTED, and its repair, reading the block's severity, set `not run` on the
     # Medium records Step 6 had disputed down to Low — erasing the verdicts that made them Low.
     SEV_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1, "INFO": 0}
     sev_key = lambda s_: "INFO" if (s_ or "").upper().startswith("INFO") else (s_ or "").upper()
@@ -5494,7 +5716,7 @@ def main() -> int:
          None, not (vs_in or vs_out or vs_low or vs_na), "; ".join(fix38) or None)
 
     # 39. section placement — a record stands under the heading of its own severity tag, and no Finding Format record stands
-    # outside the five severity sections and the Unverifiable section: one report held two [MEDIUM] records under
+    # outside the five severity sections and the Unverifiable section: one report held [MEDIUM] records under
     # `## Low Findings`, and every count, read by tag, agreed.
     SEC_SEV = {"critical findings": "CRITICAL", "high findings": "HIGH", "medium findings": "MEDIUM", "low findings": "LOW", "informational": "INFO", "informational findings": "INFO"}
     cur_sec, misplaced, outside = None, [], []
@@ -5612,7 +5834,7 @@ def main() -> int:
 
     # 42. scope exclusions — the appendix reproduces `scope-excluded.txt`, every row, and `excluded: <p> paths / <l> lines`
     # with `p` its row count and `l` the lines of the regular files it names: one report wrote `excluded: 0 paths / 0 lines`
-    # over eighteen rows. A listed file that grows during the run (the runtime's own log) reads by its size then, so `l`
+    # over a populated list. A listed file that grows during the run (the runtime's own log) reads by its size then, so `l`
     # lies between the lines of the files unchanged since `started` and all of them now.
     ex_rows = [l_.strip() for l_ in read(cache / "scope-excluded.txt").splitlines() if l_.strip() and not l_.strip().startswith("#")]
     ex_split = [re.split(r"\s+\|\s+|\t+|\s+[—–]\s+", r_, maxsplit=1) for r_ in ex_rows]  # `path | reason`, `path — reason`, a tab
@@ -5673,7 +5895,7 @@ def main() -> int:
          None if (cc_st and cc_st[0] == cc_n) else f"the STEP X line reads `class clearances {cc_n} | contradicted by body records <m>` — `{cc_n}` the lines across the `deep-*-results.md` files holding `SAFE in p<n> — no <surface>`, one search, never a count of what the writer reads as a clearance")
 
     # 44. pass log — one entry per pair, its passes copied from the worker file's sentinel `passes=` (`passes: none
-    # (worker not run)` for a pair recorded `worker not run:`): one report wrote a sentence for all twenty-seven
+    # (worker not run)` for a pair recorded `worker not run:`): one report wrote one sentence for every pair
     pl_m = re.search(r"^###\s+Per-lens-per-partition pass log\b.*$", appendix, re.M | re.I)
     pl_txt = appendix[pl_m.end():].split("\n### ", 1)[0] if pl_m else ""
     pl_pairs = sorted({pr for pr, _, _ in dispatch})
@@ -5721,7 +5943,7 @@ def main() -> int:
     emit("pass log", f"{len(pl_pairs) - len(pl_abs) - len(pl_bad)}/{len(pl_pairs)} pairs with their entry | absent {len(pl_abs)} | passes not the sentinel's {len(pl_bad)}", None, not pl_abs and not pl_bad,
          None if not (pl_abs or pl_bad) else f"the pass log holds one entry per pair — passes run, what the last pass added, stop reason, converged yes/no — its passes copied from the worker file's sentinel `passes=`, `passes: none (worker not run)` for a pair recorded `worker not run:`: " + "; ".join(x_ for x_ in (f"absent: {', '.join('`' + p_ + '`' for p_ in pl_abs[:5])}{' …' if len(pl_abs) > 5 else ''}" if pl_abs else "", ", ".join(pl_bad[:3])) if x_))
 
-    # 45. routed hand-offs — `routed: <n>` counts the rows of `handoff-table.md`, which exists: one report stated two
+    # 45. routed hand-offs — `routed: <n>` counts the rows of `handoff-table.md`, which exists: one report stated
     # hand-offs and wrote no table
     ho_file = cache / "handoff-table.md"
     ho_rows = []
@@ -5740,7 +5962,7 @@ def main() -> int:
          None if ho_ok else f"`handoff-table.md` holds one row per STEP Y hand-off, each with its final disposition, and the appendix's `routed: <n>` counts those rows: {len(ho_rows)} in the file" + ("" if ho_file.exists() else " — the file is absent: write it, a header alone when there were none"))
 
     # 46. citations — every `file:line` a block's `File:` and `Flow:` lines cite in a file of the target lies within it: one
-    # carried block cited line 533 of a 496-line file across six reports, and a repair that corrected it had no legal path
+    # carried block cited a line past the end of its file across reports, and a repair that corrected it had no legal path
     cit_n, cit_bad = 0, []
     for b in blocks:
         seen46, bad46 = citations_of(b)
@@ -5774,10 +5996,10 @@ def main() -> int:
     # (`--needs-context` lists them) has one `needs context: <lens>/p<n>:<line> — <answer>` line in the Unverifiable
     # section: `<path:line> — <what is missing>`, `carried by <the report's VULN or UNV id>`, or `mention: <what the line
     # restates>`. The base skill reports NEEDS CONTEXT under Unverifiable, and a worker writes it in its clearances, where
-    # no row carries it: one run's writer brought five such observations into its Unverifiable section and left out two
-    # candidates — a message-chosen sender address a worker called an `Unverifiable candidate`, and a secret in a URL query.
-    # Reading the sink out of the prose was tried: over the earlier runs the cite nearest the words was the judgement's
-    # sink in ten of nineteen and thirty of sixty-four named none, so the checker lists the lines and the writer, who can
+    # no row carries it: one run's writer brought such observations into its Unverifiable section and left out
+    # candidates its workers could not decide — one called an `Unverifiable candidate`, one judged NEEDS CONTEXT.
+    # Reading the sink out of the prose was tried: over the earlier runs the cite nearest the words was often not the
+    # judgement's sink and many passages named none, so the checker lists the lines and the writer, who can
     # read them, names the sink. One `mention:` text naming no line or id, over three or more lines of two or more worker
     # files, says what none of them is.
     nc_list = nc_lines(worker_files)
@@ -5807,7 +6029,7 @@ def main() -> int:
     idlike_ = lambda x_: x_.split("-", 1)[0].upper() in nc_pref
     nc_unans, nc_noform, nc_kind, nc_same = [], [], Counter(), {}
     # a text read for repeats: its words, and the references it names kept as written — a line key, a VULN or UNV id, a
-    # `path:line`, `line <n>` — so a counter `(2)` tells nothing apart while `restates injection/p2:215` does
+    # `path:line`, `line <n>` — so a counter `(2)` tells nothing apart while `restates injection/p2:21` does
     ref_rx = re.compile(r"[a-z][a-z0-9-]*(?:/p\d+)?:\d{1,9}|(?:vuln|unv)-[a-z0-9-]*\d|[\w.@+-]+(?:/[\w.@+-]+)*\.\w+:\d{1,9}|\bline\s+\d{1,9}", re.I)
     words_ = lambda s_: len(re.findall(r"[A-Za-z][A-Za-z'-]*", ref_rx.sub(" ", s_)))
     norm_ = lambda s_: " ".join(re.sub(r"[^a-z\s]", " ", ref_rx.sub(" ", s_.lower())).split())
@@ -5887,11 +6109,11 @@ def main() -> int:
                     err_ = err_ or nc_cite(last_, int(n_), f"{last_}:{n_}")
                 q_ = b_.group(2)
             else:
-                # the cite read before the separators go, so a dotfile's (`.gitlab-ci.yml:37`) keeps its leading `.`
+                # the cite read before the separators go, so a dotfile's (`.env:3`) keeps its leading `.`
                 c_ = cite_rx.match(re.sub(r"^[\s\u00a0,|=~\u00b7'\"\u2018\u2019\u201c\u201d\u2014\u2013\u2192()*_<>-]+", "", q_))
                 q_ = sep_(q_)
                 c_ = c_ or cite_rx.match(q_)
-                # a line key (`protocol-infra/p3:130`) a mention lists is a line of the worker files, not a file's cite
+                # a line key (`protocol-infra/p3:13`) a mention lists is a line of the worker files, not a file's cite
                 if c_ and re.search(r"/|\.\w+$", c_.group(1)) and not re.fullmatch(r"[a-z][a-z0-9-]*/p\d+", c_.group(1), re.I):
                     last_ = rel(c_.group(1))
                     err_ = nc_cite(last_, int(c_.group(2)), f"{c_.group(1)}:{c_.group(2)}")
@@ -5993,7 +6215,7 @@ def main() -> int:
 
     # 50. unverifiable summary — the Executive Summary's severity table holds, after Total, a row `| Unverifiable | <u> |`,
     # `u` the entries of the Unverifiable section, which Total does not count, and the summary's sentences name each entry
-    # by its id: one report held nine Unverifiable entries two thousand lines down while its summary table showed only the
+    # by its id: one report held its Unverifiable entries far down the report while its summary table showed only the
     # five severities. With no entry the row reads 0, or stands absent.
     unv_ids = []
     for l_ in nc_section(report).splitlines():
@@ -6010,7 +6232,7 @@ def main() -> int:
     # an UNV id on a line no entry opens — another line of the section that is not an answer, or the `body record` cell of
     # an `unverifiable` row — is an entry in a shape no item reads (`### UNV-001. <title>`) when the row stands absent or
     # counts more than the entries read: a count of the readable entries alone told a writer `| Unverifiable | 0 |` over
-    # nine. A sentence's mention of another id, under a row that counts the entries, is no such entry.
+    # entries the report held. A sentence's mention of another id, under a row that counts the entries, is no such entry.
     unv_loose = []
     for l_ in nc_section(report).splitlines():
         if not NC_ANS_RX.match(l_):
@@ -6035,7 +6257,7 @@ def main() -> int:
 
     # 51. merge severity — a block never reads below a record merged into it by more than the one level a `DOWNGRADED` or
     # `DISPUTED` verdict on it names: of two records of one finding the higher worker severity is the kept one, and Step 6
-    # alone may lower it (one same-key merge in sixteen in past reports kept the lower record, its block below a severity
+    # alone may lower it (same-key merges in past reports have kept the lower record, a block below a severity
     # no verdict had lowered); a merged record whose severity cannot be read is counted, not judged
     RANK51 = {"CRITICAL": 5, "HIGH": 4, "MEDIUM": 3, "LOW": 2, "INFO": 1, "INFORMATIONAL": 1}
     n51, unread51, bad51 = 0, 0, []
@@ -6120,7 +6342,7 @@ def main() -> int:
     # doubt that names nothing are no grounds. Read mechanically: a fresh block (never a same-commit carried one, which
     # keeps its source's words) whose `DISPUTED` clause cites nothing but its own sink — its `File:` path, with or without
     # its line — or nothing at all, in words, identifiers set aside, that such clauses at two other sinks share, is
-    # boilerplate: one fresh run disputed 78 of 355 findings in two such sentences, each citing its own sink, and every one
+    # boilerplate: one fresh run disputed many findings in a few such sentences, each citing its own sink, and every one
     # passed item (2) and the identical-text rule because the sinks differed; one doubt about the code at one sink, which
     # several routes reach (one record per route), is one doubt, however many rows repeat it
     def sink_only53(clause_: str, sink_: str | None) -> bool:
@@ -6180,7 +6402,7 @@ def main() -> int:
     # `file:line` of the code its reason rests on — for a guard that stops the attack, the guard's; a dependency's at the
     # line of its code that shows it, never a version alone; another ground at the line that shows it — a line of a file
     # the target holds, never the row's own sink (base skill, Step 6's verdict table and the note after it): one
-    # writer, told a settled question decides, withdrew three findings on "the pinned library encodes it" and cited nothing
+    # writer, told a settled question decides, withdrew findings on "the pinned library encodes it" and cited nothing
     step6_54 = [(n_, why) for n_, why in wd_lines if re.search(r"(?i)\bstep[\s-]*6\b", why) and not re.match(r"(?i)^[\s`*_:]*citation\b", why)]
     wd_sink54 = {cell_id(c).upper(): canon(rel(c[2])) for c in table_rows if c[4].lower() == "withdrawn"}
     def cites54(n_: str, why: str) -> bool:
@@ -6285,7 +6507,7 @@ def main() -> int:
     else:
         res_ok = re.match(r"^none\b", (row_res or "").strip().lower()) is not None  # `none`, or `none — no earlier plan`
     # `stale worker files moved: <n>` counts the worker files the previous-run directory holds: one STEP 1 wrote `0` and
-    # left twenty-seven earlier files where this run's workers would write
+    # left the earlier run's files where this run's workers would write
     stale_v = corrected(plan, "stale worker files moved:")  # a row above `workers dispatched:` is corrected by appending
     try:
         stale_dir = len(list(prev_plan_path.parent.glob("deep-*-results.md"))) if prev_plan_path and prev_plan_path.parent.is_dir() else 0
@@ -6351,8 +6573,8 @@ def main() -> int:
     uncovered_rep = sorted(set(re.findall(r"^(?:[-*] )?uncovered: ([a-z-]+/p\d+)", report, re.M)))
     attempts = Counter(pr for pr, _, _ in dispatch)
     over_cap = sorted(pr for pr, n in attempts.items() if n > 3)
-    # a recorded gate line is the file as it was gated: one worker rewrote its file after its sentinel and its gate, 47
-    # records to 40, and every item read the new file while the plan held the old verdict's line
+    # a recorded gate line is the file as it was gated: one worker rewrote its file after its sentinel and its gate,
+    # dropping records, and every item read the new file while the plan held the old verdict's line
     _, now29_l = gate_lines(target, cache, plan, skills, "all", with_copied=False) if skills else (True, [])
     now29 = {m_.group(1): m_.group(0) for m_ in (GATE_LINE_RX.match(l_) for l_ in now29_l) if m_}
     # a pair recorded `worker not run:` is uncovered whatever its file holds: its line is not read against the file
@@ -6381,7 +6603,7 @@ def main() -> int:
               + "; ".join(f"{pr} ({', '.join(d_)})" for pr, d_ in stale_post[:4]) + (" …" if len(stale_post) > 4 else "") + " — the report is read from a file no gate read") if stale_post else "") if x_) or None)
 
     # 30. report name: its timestamp is the moment the report was written — never before the run's start, never after the
-    # file it names. One writer named its report 22-30-00 while writing it at 22-0x and said so; no line caught it.
+    # file it names. One writer named its report for a later time than it wrote it and said so; no line caught it.
     if report_name:
         import datetime
         m_ts = re.search(r"sast_report-(\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2})\.md$", report_name)

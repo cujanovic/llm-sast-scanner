@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.27.1"
+  version: "2.27.2"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -223,13 +223,13 @@ is a header of the contract document, not an instruction to the worker, and does
 around them may be the orchestrator's own; the two forms and their placeholders may not. The third checked element
 is the ledger sink caller enumeration itself, copied from the WORKER DISPATCH template below from the words `for every
 ledger sink whose file is in your partition` through the sentence that writes the `new entry points: <count>` line, with
-that placeholder intact — a summary of it in the orchestrator's words is not the procedure, and a contract that reduced it
-to one clause sent twenty-seven workers who wrote thirty-seven re-verification lines where the run before had written
-two hundred and thirty-three, so a report at an unchanged commit lost ninety-three of its predecessor's sinks. The fourth checked element is the
+that placeholder intact — a summary of it in the orchestrator's words is not the procedure, and a contract that
+reduced it to one clause sent workers who re-verified far fewer ledger sinks than the run
+before, so a report at an unchanged commit lost many of its predecessor's sinks. The fourth checked element is the
 self-gate, copied from the WORKER DISPATCH template from the words `Before the final line, check your own file`
 through the words `before you write it.`, `<skills root>` replaced by its path and `<lens>` by the contract's lens,
-`p<n>` left for the worker: a run whose prompts were condensed carried it to none of twenty-seven workers, while the
-three checked elements reached every one. A contract lacking any of the four is recompiled, never dispatched — an
+`p<n>` left for the worker: a run whose prompts were condensed carried it to none of its workers, while
+the three checked elements reached every one. A contract lacking any of the four is recompiled, never dispatched — an
 omitted form is how a whole wave comes back with the wrong header — and `scan-plan.md` records `contracts checked:
 <k>/<n>` before the first wave line, the output of `python3 <this skill's directory>/recheck.py --contracts` run from
 the target and copied verbatim; it names each contract that fails an element, and a contract it names is recompiled
@@ -239,8 +239,8 @@ worker files join it below), because writing this plan destroys it; its last `re
 plan's row `previous run residual: <n> — <items>` — `previous run residual: 0` when that line listed no items (`0 — none`
 reads the same) — or `previous run residual: none` when no earlier plan existed. When the copy has no `recheck: mismatches` line at all — the previous run ended before its recheck set (stopped, killed or crashed) and so resolved nothing — its own `previous run residual:` row is copied forward unchanged as this plan's row; a copy with neither that line nor that row — a plan an earlier version of this skill wrote, no `started:` or `workers dispatched:` row in it either — gives `previous run residual: none`. This run's `scan-plan.md` is then written
 anew: no dispatch, gate, wave, join or `recheck:` line of the previous run stays in it — those live in the copy — because
-the recheck reads the plan's dispatch lines, join line and rosters as this run's, and a plan edited in place carried a
-previous run's twenty-seven dispatch lines and twenty-nine recheck lines under a new header. `scan-plan.md` opens with the rows `invocation: <the skill invocation as given>`, `model: <the model this
+the recheck reads the plan's dispatch lines, join line and rosters as this run's, and a plan edited in place
+carried a previous run's dispatch lines and recheck lines under a new header. `scan-plan.md` opens with the rows `invocation: <the skill invocation as given>`, `model: <the model this
 session runs on, written as the base skill's header `<model>` rule prescribes — the exact model ID when the runtime
 states one, else the stated display name, else `unknown`; the identifier alone, never the sentence around it>` and
 `base-sha: <sha>`, `target: <the absolute path of the target directory, from pwd>`, `wrapper:
@@ -257,9 +257,9 @@ run's past STEP 1, whose row is corrected by appending the count recheck item (1
 a different number of ledger rows from `project-memory.md`, since nothing before the dispatch adds a ledger row to the
 memory (a first run's template holds none): the command counts, in the copy the `started:` row names and no other, the lines between the `## Confirmed findings ledger` heading and the next `## `
 heading that match the ledger row pattern of STEP 3's recheck item (6), the same measure as `ledger rows after`, and no
-line outside that section — the false-positive section's rows share the shape, six runs in a row counted the whole file
-and corrected the row afterwards, and one session counted the previous run's copy and wrote its 363 over a ledger of
-448; `0`, over an empty copy, when the file is absent or empty. An existing `project-memory.md` is the ledger every later run builds on: STEP 1
+line outside that section — the false-positive section's rows share the shape, run after run counted the whole file
+and corrected the row afterwards, and one session counted the previous run's copy and wrote its count over a larger
+ledger; `0`, over an empty copy, when the file is absent or empty. An existing `project-memory.md` is the ledger every later run builds on: STEP 1
 copies it and never deletes it, re-creates it or initialises it from the base skill's template — only an absent file is
 initialised, after its empty copy is written — and an existing `scan-plan.md` is copied into `previous-run-<started>/`
 before this plan replaces it, never discarded; at a `new-scan` the copy's ledger is what the Same-commit carry and the
@@ -437,14 +437,14 @@ derivation-table order — and by partition number within each lens, a lens's pa
 docs, browser) after its source partitions; the first 15 are wave 1, the next 15 wave 2,
 and so on, counted across lens boundaries: a lens whose partitions fall on both sides of the fifteenth position is
 split between two waves, and the sixteenth pair waits for the next wave even though its lens has begun — one
-orchestrator started a sixth lens's first partition beside five lenses' fifteen and recorded its own wave-cap error,
-and a later one started eighteen. The rosters are therefore written before any dispatch: STEP 1 writes one line per
+orchestrator started the next lens's first partition beside a full wave of fifteen and recorded its own wave-cap error, and a later
+one started more than the cap allows. The rosters are therefore written before any dispatch: STEP 1 writes one line per
 wave into `scan-plan.md`, `wave roster <k>: <lens>/p<n>, <lens>/p<n>, ...`, each roster the next fifteen pairs of the
 ordered list and the last one the remainder, and STEP 2 dispatches each wave from its roster line and nothing else — a re-run belongs to the wave of the worker it replaces and is not a roster entry.
 The batch is built from `python3 <this skill's directory>/recheck.py --roster <k>`: one subagent start per pair it prints
 and no other, the calls counted against its count before any is sent. The base lenses are not a wave: a lens
-whose partitions the roster puts in the next wave waits for it, and one run sent the six base lenses' eighteen
-partitions as its first batch. Once a batch has started, the same command's `recorded first attempts` line names no
+whose partitions the roster puts in the next wave waits for it, and one run sent every partition of the six
+base lenses as its first batch. Once a batch has started, the same command's `recorded first attempts` line names no
 pair `not on this roster`. At N partitions the command also reads the rosters' pairs against the cut — every lens on
 p1 to p<N> (browser on none of them when it has partitions of its own), and on each partition after p<N> its readers
 alone — hardening-platform and access-auth on a lock-file partition, access-auth on a test one, access-auth and
@@ -477,12 +477,12 @@ Before any worker prompt is sent — first dispatch or re-run — it is written 
 prompt names, and the one that cannot exist yet — the worker's output file — by equality instead, against exactly
 `<target>/.llm-sast-scanner-cache/deep-<lens>-p<n>-results.md` for the prompt's own lens and partition. It also requires
 the WORKER DISPATCH text itself, every sentence of it with its slots filled — a prompt built by joining a string's
-characters, or one that summarizes the template, is flagged with the first sentence it lacks, as all twenty-seven
-prompts of one run were before a re-run rebuilt them — the prompt's first line to name that lens and partition, no other pair's `partition-p<n>-manifest.txt` or
+characters, or one that summarizes the template, is flagged with the first sentence it lacks, as every prompt
+of one run was before a re-run rebuilt them — the prompt's first line to name that lens and partition, no other pair's `partition-p<n>-manifest.txt` or
 `<lens>-agent-procedure.md` in it, the first-line form at its end with its placeholders intact, and a file written by this run, never one older than
 `started:` — and no line of it longer than 2000 bytes (UTF-8, an em dash three): a file reader keeps a longer line's first
 2,000 bytes and the worker reads only its start, so the prompt keeps the template's line breaks (one fresh run wrote every
-prompt as a single line of 6,800 characters and re-ran thirteen workers). The file is
+prompt as a single line far over the limit and had to re-run workers). The file is
 corrected until the command exits 0, and the worker is then started with the text after `send: ` on the one line the
 command prints on a pass — `You are the <lens> worker for partition p<n>. Your prompt is
 <target>/.llm-sast-scanner-cache/prompts/<lens>-p<n>.md. Read it in full before anything else; if that path cannot be
@@ -490,20 +490,20 @@ read, read prompts/<lens>-p<n>.md in the directory of <target> whose name begins
 it, check its first line: it must name the <lens> worker and partition p<n>. If neither path can be read, or the first
 line names another lens or partition, stop: write nothing and reply "prompt file not found". Otherwise follow the file;
 it is your whole task.` — copied as printed and nothing added, never the prompt re-typed into the start call: a re-typed prompt is
-a second copy the path test never read, and one run's four misspelled cache directories were all typed there, in the
-call, and in no file — four of 183 mentions of the cache directory in that run's start calls were misspelled, none of
-62 in its commands, so the one line keeps a single mention and its fallback finds the file without spelling it. A worker that replies `prompt file not found` read nothing and wrote nothing; it is re-run, within
+a second copy the path test never read, and one run's misspelled cache directories were all typed there, in the call, and in no
+file — a few of the many mentions of the cache directory in that run's start calls were misspelled and none of the mentions
+in its commands was, so the one line keeps a single mention and its fallback finds the file without spelling it. A worker that replies `prompt file not found` read nothing and wrote nothing; it is re-run, within
 the three-attempt cap below, as `(re-run: prompt file not found)`, its file tested again and its send line copied
 again from that output. A prompt naming a path
 that does not exist is never sent, and a re-run prompt is written and tested again rather than inherited, because a repair prompt copies its parent's
-paths along with its parent's mistake. The dispatch line's `paths <k>/<k>` field is copied from the command: a line
-reading `paths 9/10` records a prompt sent despite a failing test, and four such prompts, each naming a misspelled cache directory,
-once cost four worker attempts and took one pair to its last permitted one. The prompt file's last sentence
+paths along with its parent's mistake. The dispatch line's `paths <k>/<k>` field is copied from the command: a
+line reading `paths <k>/<m>` with `k` below `m` records a prompt sent despite a failing test, and such prompts, each naming a misspelled cache directory,
+once cost a worker attempt each and took one pair to its last permitted one. The prompt file's last sentence
 is the contract's first-line form, verbatim, placeholders intact — Its first line is `procedure: <convergence-loop
 skill name> v<its version> / <base skill name> v<its version> | target: <pwd output> | base-sha: <git output>` — so
-the form stands at the point of action and not only inside a contract paragraph: eleven of twenty-seven workers whose
-contract carried the form after the sentence telling them to run `pwd` and `git rev-parse HEAD` wrote those two
-outputs as their first line. While a wave runs, this session checks worker files at most once every two minutes.
+the form stands at the point of action and not only inside a contract paragraph: many workers whose contract carried
+the form after the sentence telling them to run `pwd` and `git rev-parse HEAD` wrote those two outputs
+as their first line. While a wave runs, this session checks worker files at most once every two minutes.
 Worker result files are written only by
 the worker that owns them: this session never writes, edits or completes a `deep-*-results.md`, and neither does any
 subagent other than that worker — a "repair" of a worker file by anyone else is a STEP 2 error: the file is deleted
@@ -530,8 +530,8 @@ record names no reference file, never a class composed from its title — and it
 section, never body, as a `File:` without a line number already is: a class composed from a title is a key no later run matches, and a
 severity-less record cannot fill the table — and the report's Worker dispatch
 appendix carries one line `uncovered: <lens>/p<n> — <f>/<mf> files, <l>/<ml> lines read after 3 attempts` per such
-pair, the Executive Summary naming each as uncovered. Twelve workers that each stopped at a fifth of their partition
-were once re-run in rounds for an hour under a rule with no cap, and the run never reached its second wave. Recheck
+pair, the Executive Summary naming each as uncovered. Workers that each stopped early in their partition were once
+re-run in rounds under a rule with no cap, and the run never reached its second wave. Recheck
 item (29) reads the `worker not run:` lines against the worker files and the dispatch-line counts. `workers dispatched: <n>` counts the workers that were started
 and is never rewritten downward; the
 user is told that a single-context audit is a separate `llm-sast-scanner-convergence-loop mode=single`
@@ -572,20 +572,20 @@ target; a file with records and not one `File:` line is counted by its record he
 `paths 0/<n>`, the `fail` it is. `s` is the number of headings that open, after any
 leading Markdown markers, with a severity token — `[CRITICAL]`, `[HIGH]`, `[MEDIUM]`, `[LOW]` or `[INFO...]` — before
 `VULN-`; a record headed by its confidence tag or by anything else has no severity to enter the table with, so `s`
-below `m` fails the gate and the worker is re-run: two records headed `[LIKELY]` once passed a gate, entered the table
-without a severity, and were dropped by a repair to balance an equation; a gate that then counted records by their
-severity headings wrote `headings 10/10` over a file with eleven `File:` lines, the eleventh headed `[LIKELY]`. `a` is
+below `m` fails the gate and the worker is re-run: records headed `[LIKELY]` once passed a gate, entered the table without
+a severity, and were dropped by a repair to balance an equation; a gate that then counted records by
+their severity headings wrote `headings <n>/<n>` over a file with one `File:` line more, its record headed `[LIKELY]`. `a` is
 the number of those `File:` paths written absolute under the target — they resolve, so they are not a `fail`, but the
 writer rewrites each one target-relative when the table is built, and the count stands in the gate line so a run whose
-keys matched nothing can be traced to the worker that wrote them: fifteen absolute paths from one worker once made
-fifteen keys no ledger row met. `r` is the number of records carrying a `Reference:` line that names a file of the base
+keys matched nothing can be traced to the worker that wrote them: absolute paths from one worker once made
+keys no ledger row met. `r` is the number of records carrying a `Reference:` line that names a file of the base
 skill's `references/` directory — the record's class, in the only form the ledger key accepts — and `r` below `m` fails
-the gate and re-runs the worker: a record without one leaves the writer to compose a class from the title, and five
-such records from one worker once put five keys into the ledger that no later run will match. `e` is the number of
+the gate and re-runs the worker: a record without one leaves the writer to compose a class from the title, and such
+records from one worker once put keys into the ledger that no later run will match. `e` is the number of
 `Entry point:` lines that hold a `|` — the `## Entry points` list writes ` | ` between its fields, and a
 worker naming an entry point as the list does carries them. They are not a `fail`, but a `|` splits a table cell, so
 the writer builds the entry point cell without them, and the count stands in the gate line so a draft whose rows came
-out nine cells wide, as thirty-two rows of one first draft did, can be traced to the workers whose lines it copied.
+out nine cells wide, as rows of one first draft did, can be traced to the workers whose lines it copied.
 `c` is the share, in whole percent rounded down, of the file's eight-word phrases of composed prose that the file of
 the same name under a `previous-run-*` directory also holds, the highest over those directories, named after `from`
 when above 0; a file long enough to judge with no such file for its pair reads `copied 0%`. Composed prose is what a
@@ -597,14 +597,14 @@ that are not list items, its first line, headings, comments, label-only lines, t
 partition`, `no in-repository production caller` and `ledger empty`. Phrases are read in any
 order and across line breaks, so a moved section or a re-wrapped line is still the phrase it was; a file holding fewer
 than 100 of them reads `copied n/a` — too little prose to tell a copy from a re-verification — and passes that field.
-`c` at 80 or above fails the gate and re-runs the worker: its file is an earlier run's, not this run's — seven of one
-run's twenty-seven workers once handed back their predecessors' files with a line or a record changed, in five to
-seven minutes, their sentinels' coverage and pass counts copied with them, while no file of a run whose workers did the work
-held more than three fifths of its predecessor's phrases. `d` is the first twelve hex digits of the file's SHA-256 as
+`c` at 80 or above fails the gate and re-runs the worker: its file is an earlier run's, not this run's — some workers
+of one run once handed back their predecessors' files with a line or a record changed, in minutes,
+their sentinels' coverage and pass counts copied with them, while no file of a run whose workers did the work held
+a share of its predecessor's phrases near that threshold. `d` is the first twelve hex digits of the file's SHA-256 as
 the gate reads it (`unreadable` for a file the gate cannot read): a write to the file after its gate changes it. `n` is
 the number of the file's lines longer than 2000 bytes (UTF-8) outside a fenced code block: a file reader keeps a longer
 line's first 2,000 bytes, so the writer reads only its start, and `n` above 0 fails the gate and re-runs the worker —
-worker files of 116 of 173 earlier runs held such lines, most of them entry-point coverage lists written as one
+worker files of many earlier runs held such lines, most of them entry-point coverage lists written as one
 paragraph; `--gate <lens>/p<n>` names each such line on its error output, never in the gate line. `g` is the number
 of the file's records whose `Also at:` line names a sink, a `path:line`, and `q` how many of them name on it no sink
 that another record of the same file holds as its own `File:` sink at their class — the first base-skill reference
@@ -784,8 +784,8 @@ running, it runs, from the target directory,
 `python3 .llm-sast-scanner-cache/recheck.py --record`, with nothing after it — the script appends the set to the scan
 plan itself and prints one `recorded: set <n> … lines <a>-<b> — mismatches <k>` line, the set being those lines of the
 plan, while a run without `--record` whose output is redirected into the plan writes nothing there: a report is written in passes,
-skeleton first and blocks after, and a recheck taken between passes measures a draft — one set recorded seven
-mismatches over a thirteen-block skeleton that the writer was still filling. A report that lacks its sentinel when its
+skeleton first and blocks after, and a recheck taken between passes measures a draft — one set recorded
+mismatches over a skeleton that the writer was still filling. A report that lacks its sentinel when its
 subagent has returned is the writer's failure, not a draft: item (23) records it and the report goes to repair. The `recheck:` lines of the scan
 plan are that command's output and nothing else: one line per item below in the form
 `recheck: <item> <recomputed> vs reported <value> — python3 .llm-sast-scanner-cache/recheck.py`, then
@@ -794,8 +794,8 @@ plan are that command's output and nothing else: one line per item below in the 
 last line and never with a traceback. Its first line, `recheck: script sha256 <a> = shipped <b> | match`, compares the
 copy with the shipped file; `MISMATCH`, or a shipped file the script cannot find, ends the run with that line in the
 final message, because a recheck that was edited measures whatever its editor wanted. Nothing in the run creates,
-edits or replaces a file under that name, and the writer never writes a recheck of its own: a writer that also grades itself printed
-constants for twelve of eighteen items under a rule that asked for one script. A `recheck:` line the script did not
+edits or replaces a file under that name, and the writer never writes a recheck of its own: a writer that also grades itself
+printed constants for most items under a rule that asked for one script. A `recheck:` line the script did not
 print is an assertion and counts as nothing. The items below are the specification the script implements; where a
 rule here and the script disagree, the script is what ran, and the rule is corrected: (1) `body blocks` and `linked blocks` — one block per `body`, `promoted` or `carried` row, no VULN id heading two blocks, each
 block's `Adversarial:` line opening with that row's `verdict` cell verbatim; (2) `invalid cells` — every body line
@@ -804,7 +804,8 @@ opening `Adversarial: DOWNGRADED` or `Adversarial: DISPUTED` that does not match
 `file:line` — is an invalid cell, so a bare verdict word or a clause naming nothing counts; the recheck command
 contains that expression verbatim; (3) `first-line tags` — every body block's first line
 ending `[CONFIRMED]` or `[LIKELY]`; (4) `merges with a different entry point` — the number of `merged` rows whose entry point, sink `file:line` or class differs from their target body row's, required to be 0,
-a duplicate the writer judged under the **Duplicates** rule aside — its `duplicate candidate:` line `merged into` the kept row,
+a duplicate the writer judged under the **Duplicates** rule aside — its `duplicate candidate:` line `merged into` the kept row, a
+hop merge's (one entry point, one record's sink a hop on the other's `Flow:` line) among them,
 the lower worker severity merged and, across keys, the kept block's `Also:` line and the merged key no ledger row of the copy —
 and a group overlap aside — one class and entry point, as each record's own `Entry point:` names it too, the merged
 record's sink on the kept block's group line (the kept record's `Also at:` line and those of the records of its class
@@ -891,8 +892,8 @@ carried, voided and bare, with `n` equal to the ids listed and `listed rows bare
 a run whose `earlier-reports:` row reads `0` has nothing to join, so its absent join line reads as `0`; (23) `sentinel` — the report's last non-empty line is `<!-- LLM-SAST-COMPLETE -->`; (24) `not re-found` — every key of
 the pre-write copy — read after STEP X's class correction — that holds neither a body record — at its `File:` sink, or, at its class, a line its record's `Also at:` line names — a carried row (or a line a carried block's `Also at:` line names) nor a `refuted` row this run still has its ledger row and its brief carries
 `not re-found <this run's date>`, counted `<marked>/<such keys>` with `rows gone <g>`, required equal and `0`: the
-same-commit rule's mark is how a later reader tells a miss from a fix, and one write left one hundred and
-twenty-eight missed sinks unmarked while the run ended clean; (25) `wave rosters` — the scan-plan's `wave roster <k>:`
+same-commit rule's mark is how a later reader tells a miss from a fix, and one write left missed
+sinks unmarked while the run ended clean; (25) `wave rosters` — the scan-plan's `wave roster <k>:`
 lines hold every lens/partition pair once — at N partitions exactly every lens on p1 to p<N> (browser on none of them
 when it has partitions of its own) and each later partition's readers alone — none above fifteen, and the first-attempt dispatch lines of each wave — those at or after its `started` time and before the next wave's,
 so a start retried after a rate-limit interval stays in its wave — are exactly that wave's roster, counted `<waves matching>/<rosters>` with `over cap <c>`,
@@ -1010,7 +1011,8 @@ answer the table bears out — `merged into` the kept block's VULN id with each 
 `distinct: <clause>` with neither merged into the other nor both held by kept blocks whose own pair reads `linked`, `linked` for two `body` rows at two keys whose record to merge
 away holds a ledger key of the copy and whose blocks name each other on `Also:` lines, a row merged into such a block
 read as that block and the kept blocks' own pair, when listed, answered `linked` too — a line on a pair the table
-answers agreeing with it, and `duplicate candidates: <n>` counting the lines, `pairs <p> (entry <e> | same <s> | near
+answers agreeing with it, a line on a hop merge the table makes no stray (the **Duplicates** rule), and `duplicate
+candidates: <n>` counting the lines, `pairs <p> (entry <e> | same <s> | near
 <x>) | answered merged <m> | distinct <d> | linked <l> | unanswered <u> | lines at no pair <z> | pairs the table answers
 <t> | repeated clauses <r>`, `u`, `z` and `r` required `0` — `r` counting the `distinct` clauses that each answer three or
 more pairs of two or more class pairs over two or more groups of the records those pairs join; nothing is merged by the
@@ -1069,7 +1071,7 @@ prompt re-typed into the start call, as for the workers above; a repair's
 prompt goes through `.llm-sast-scanner-cache/repair-prompt.md` the same way. A writer or repair that replies `prompt file
 not found` has read and written nothing: it is started again, its file checked again and its send line copied again from
 that output, and that start is not a repair. One run's writer prompt condensed the
-paragraph below away, and its first recorded set read four items short; the repair's paraphrased it.
+paragraph below away, and its first recorded set fell short on several items; the repair's paraphrased it.
 
 **Writer self-check.** The writer's prompt, and a repair's, carries this paragraph verbatim, its skills-root
 placeholders replaced by the path of the directory that holds this skill's directory, as the worker contracts carry it. Before it
@@ -1095,9 +1097,9 @@ them — the `script sha256` line, item (9)'s `wrapper:` row, item (16)'s plan r
 writer, because editing a STEP 1 row is what item (20) exists to catch; a `recheck: script error` line names no artifact, so nothing is changed for it — one that reads `skills directory not found` is run again with `--skills <skills root>` — it runs the script again after the
 corrections, five runs at most in all, and returns with the last run's `recheck: mismatches` line quoted in its final
 message. The session's recheck after the writer returns is the record, and a first recorded set that reads
-`mismatches 0` sends nothing to repair. A first write once reached the session's recheck nine items short — the memory
-not yet written, two cross-entry merges, a count never searched, two required lines missing, a worker-record count
-taken from the body, one finding outside `adv=` tabled `STANDING` — each a rule the writer had and a line the script
+`mismatches 0` sends nothing to repair. A first write once reached the session's recheck several items short — the
+memory not yet written, cross-entry merges, a count never searched, required lines missing, a worker-record count
+taken from the body, a finding outside `adv=` tabled `STANDING` — each a rule the writer had and a line the script
 would have shown it.
 
 A recorded set whose script error reads `skills directory not found` is recorded again with `--record --skills <skills
@@ -1225,14 +1227,24 @@ pair is `linked`: two findings in the counts, the price of keeping the ledger ro
 `Reference:` naming the other on an `Also:` line. A pair one or both of whose records are merged into blocks `linked`
 to each other — three or four records of one defect over two keys — reads `linked` too: the link its two kept blocks
 hold, read between those kept records — the lower worker severity, the ledger key, the `Also:` lines naming each other —
-with the kept records' own pair, when listed, answered `linked` as well; `merged into` and `distinct` are wrong there. The appendix answers every listed pair on one line,
+with the kept records' own pair, when listed, answered `linked` as well; `merged into` and `distinct` are wrong there.
+A **hop merge** is the one merge of a pair `--duplicates` does not list: two found worker records whose `Entry point:`
+lines name one list entry — by its `file:line` with its route or operation name, or by routes only that entry holds,
+never two list entries and never only the same words — at two sinks, one record's `File:` sink a step on the other's `Flow:` line other than the entry's own
+line, both naming one absent check at two points of one data path (the check a route lacks, the helper that passes
+the unchecked value on, the call that trusts it). The writer merges such a pair only on its records' own evidence and
+as any merge — the lower worker severity merged, the kept block's `Also:` line naming the merged record, never a
+record whose key is a ledger row of the pre-write copy, which stays its own finding (a hop pair is never `linked`) —
+and, `--duplicates` listing no such pair, writes the pair's
+`duplicate candidate:` line itself, `merged into` the kept block's VULN id, which recheck item (4) reads; records of one path
+that name two checks stay two findings and need no line. The appendix answers every listed pair, and every hop merge, on one line,
 `duplicate candidate: <worker record> / <worker record> — merged into <the kept block's VULN id>`,
 `— distinct: <what differs>` or `— linked`, then `duplicate candidates: <n>`, the number of those lines; a pair the table already
 answers — one key whose two rows name one entry point, one merged into the other, or two rows merged into one body row —
 is not listed, and a line on it that agrees is no stray; a merge whose two records name two list entries is two findings
 whatever their cells read. A wrong `merged into` folds a distinct finding into the kept one — its record and row stay,
 its block and count do not — so a pair is merged only on the records' own evidence. A merge is made before the body, the histogram and the counts are taken, like every
-merge. One run carried twenty-nine `entry` pairs as separate findings, the same defect at two severities.
+merge. One run carried many `entry` pairs as separate findings, the same defect at two severities.
 `--duplicates` also prints a `merge severity:` line for every `merged` row whose worker record outranks its kept row's
 — a same-key merge the table answers included, a group overlap not — and the writer turns each round before the body
 is rendered: the higher record becomes the `body` row and the other is `merged` into it.
@@ -1249,9 +1261,9 @@ the report holds. The writer reads each line where it stands and answers it on o
 Unverifiable section, after the section's entries and any prose, writing the section when the report has none:
 `needs context: <lens>/p<n>:<line> — <path:line> — <what is missing>`, the cite first — the sink of the candidate the
 line leaves undecided, as a record's `File:` would name it, its path from the target directory; a path the line omits,
-as in `:217`, is read from the worker file's nearest full cite above it; a line that cites no sink is answered at the
-sink the worker file or the code shows it judging, never the cite nearest its words, which was the sink in ten of
-nineteen; a judgement about something the repository lacks cites the file and line whose content it judges — then two
+as in `:12`, is read from the worker file's nearest full cite above it; a line that cites no sink is answered at the
+sink the worker file or the code shows it judging, never the cite nearest its words, which was often not
+the sink; a judgement about something the repository lacks cites the file and line whose content it judges — then two
 words or more naming the fact outside the repository that would decide it; `— carried by <id>` in place of the missing
 fact, the sink's cite before it or none, the id after `carried by` or a word or three later, when the report already
 reports that candidate, the id the report gives it — the `body record` cell of its row, or the `UNV-<nnn>` that heads its
@@ -1302,12 +1314,12 @@ that verdict and its identifier already in its cell; the join is written into
 before Step 6 starts, `n` equal to the ids listed, and it is what the appendix's
 `verdicts carried <c> | voided <v>` must sum to; once written, the join line is never rewritten — a repair that finds
 it wrong appends ` → corrected <n> — <ids> at <time>` to the same line, so the join the writer walked and the join the
-repair settled on are both on record, because one repair cut a join line from sixty-six rows to fifty-nine in place
-and the second recheck set agreed with a list nobody had seen; a join that names its rows is one the writer has walked, and a row it
-names whose cell is later found bare is the writer's, not a joiner's, omission — one join line claimed fifty-four rows
-while twenty-three of them were rendered bare. A carried verdict is copied, not re-run: it applies whatever the row's
+repair settled on are both on record, because one repair cut rows from a join line in place and the
+second recheck set agreed with a list nobody had seen; a join that names its rows is one the writer has walked, and a row it
+names whose cell is later found bare is the writer's, not a joiner's, omission — one join line claimed rows of
+which the body then rendered many bare. A carried verdict is copied, not re-run: it applies whatever the row's
 severity and whatever `adv=` covers, so a row at a previously downgraded sink never reads `not run` — a class that came
-in at its downgraded severity is exactly the row the previous verdict was about, and twenty-seven such rows once read
+in at its downgraded severity is exactly the row the previous verdict was about, and such rows once read
 `not run (severity outside adv=)` under a join line that listed them as carrying. A copied downgrade still meets the
 base skill's Downgrade validity check: Step 6 tests a carried `DOWNGRADED` cell's named thing against this run's
 record, whatever `adv=` covers, and voids one that is a hop of the Flow, never a trigger, or one this run's record
@@ -1328,10 +1340,10 @@ instead, its block's rationale naming the voided ground, one level below and cou
 identifier rule as a downgrade cell — `STANDING — previous downgrade voided: <clause>` names, in backticks or as
 `file:line`, the thing from the row's own record that changed the judgement — and identical clause text across rows is
 valid only when each row's record holds the identifier; recheck item (2) counts a voided cell without one as invalid,
-because a repair once voided twenty-seven carried verdicts with one sentence that named nothing. Sinks are compared target-relative:
+because a repair once voided many carried verdicts with one sentence that named nothing. Sinks are compared target-relative:
 a `File:` line or sink cell written as an absolute path under the target is rewritten relative to it by the writer when
-the table is built, because the ledger, the earlier reports and the join all speak in relative paths and fifteen
-absolute ones once made fifteen keys that matched nothing. Step 6 may then replace such a cell only with
+the table is built, because the ledger, the earlier reports and the join all speak in relative paths and
+absolute ones once made keys that matched nothing. Step 6 may then replace such a cell only with
 `STANDING — previous downgrade voided: <one clause naming what changed>`, or with a `DOWNGRADED` or `DISPUTED` cell as
 the base skill's Downgrade validity check gives, its block's rationale naming the voided ground and, for `DISPUTED`,
 its doubt besides, counted under `verdicts carried`, or with a cell the two rules below give; and where reading the
@@ -1339,8 +1351,8 @@ code or a shipped config settles a carried `DISPUTED` cell's question against th
 `file:line` stopping it on every path and target of the attack — Step 6 withdraws the record in place of the void
 above, as it withdraws any record: the row `withdrawn`, its verdict cell `n/a`, the guard's `file:line` on its
 appendix line, and the join line corrected in its ` → corrected <n> — <ids>` form with that row's id dropped; a bare `STANDING` on such a row is an invalid
-cell, and a run whose join line is missing rendered its verdicts without looking: one writer rendered thirty previously
-downgraded sinks as bare `STANDING` and restored them only when the recheck named them. A carried `DOWNGRADED` or
+cell, and a run whose join line is missing rendered its verdicts without looking: one writer rendered previously downgraded
+sinks as bare `STANDING` and restored them only when the recheck named them. A carried `DOWNGRADED` or
 `DISPUTED` cell that neither the Downgrade validity check nor the barred-ground test above voids, both tested first,
 but whose clause fails the identifier rule — no backticked identifier or `file:line` this row's record holds ahead of
 any em dash, an earlier report's clause written without one or citing a line the code has since moved — is restated,
@@ -1410,8 +1422,8 @@ verbatim, its `Worker record:` line dropped and its second line written as
 name>` — a `Carried:` line the source block already holds is replaced by this one, not kept, so a block carried across
 several runs names only its latest source — and every other line of the block as the source has it: copy the block's
 lines byte for byte (the check forgives whitespace, nothing else); do not re-describe, re-evidence, re-word or re-title
-it, do not change its severity, and do not rebuild it from the worker record — two runs rewrote every carried block in the
-writer's own words and spent the one repair putting them back. So
+it, do not change its severity, and do not rebuild it from the worker record — a writer that rewrites carried blocks in
+its own words spends the run's one repair putting them back. So
 the reader sees on every carried block what was checked today and what was not. A carried block keeps its
 source's severity and verdict, counts in the histogram, and leaves its ledger row as it stands: `last-verified` keeps
 the date of the judgement it carries. A row whose key no earlier report holds as a block — or holds only in blocks that are no source — cannot be carried: such
@@ -1577,7 +1589,7 @@ Then every line of the scan-plan's `## Entry points` list is looked up by name o
 point named in no finding's `Entry point:` line, as no stored-content finding's read trigger (a finding whose Flow
 reads the attacker's content back from a store — on its `Flow:` line or named in its `Description:`), and in no
 Clearance Record was read but never analyzed — a worker
-that cites lines 587 and 599 of a file has not examined the method at line 386 — and is a STEP Y hand-off to its
+that cites lines 40 and 52 of a file has not examined the method at line 10 — and is a STEP Y hand-off to its
 partition's owning lens; one still unresolved when the report closes is listed by name with the disposition
 `unanalyzed`. A finding is never written for an entry point nobody traced.
 
@@ -1586,8 +1598,8 @@ skill's template writes it — `scanner-version: <version>`, `last-scanned-sha: 
 YYYY-MM-DD>` and the `> Hints, never authority.` notice — because the next run's same-commit carry reads `last-scanned-sha`:
 one write that dropped the header made the run after it read an unchanged commit as changed. It gives each distinct `class | file:line` key among the table's
 `body` rows one ledger row, whatever the row's verdict — `STANDING`, `DOWNGRADED`, `DISPUTED` and `not run` alike — and
-writes none for a row whose class is `unclassified`, which has no key: a first write over an empty ledger once kept 37
-rows for 83 body keys, every low-severity finding Step 6 had not validated among the missing. A ledger row is never `fixed` when this run's `base-sha` equals the
+writes none for a row whose class is `unclassified`, which has no key: a first write over an empty ledger once kept rows for
+only some of its body keys, every low-severity finding Step 6 had not validated among the missing. A ledger row is never `fixed` when this run's `base-sha` equals the
 row's `last-verified` sha: at an unchanged commit nothing was fixed, and a row whose sink no worker re-confirmed is
 carried into the body under the same-commit carry of STEP 3, or withdrawn there on a worker's `ledger refuted:` line; only a row that could not be carried — no earlier report holds its block, or holds it only in blocks that are no source —
 is a miss of this run: it stays `open`, its brief gains `not re-found <date>`, and its sink, when that line exists, is a
@@ -1665,7 +1677,8 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   Then `new entry points: <count>`. State `ledger empty` if there was no ledger to trace against. At an unchanged
   commit whose workers wrote `ledger refuted:` lines at open keys no row of another disposition holds, the Same-commit carry's
   `refuted:` lines and `refutations: <count>` follow.
-- Duplicate candidates (the **Duplicates** rule): one `duplicate candidate:` line per pair recheck item (48) lists, then
+- Duplicate candidates (the **Duplicates** rule): one `duplicate candidate:` line per pair recheck item (48) lists and per
+  hop merge, then
   `duplicate candidates: <count>`.
 - Worker dispatch: the `workers dispatched: <n>` line, the `waves:` line, each `wave <k>:` line and the per-worker
   lines copied from `scan-plan.md` — the per-worker lines with their start times are the evidence, and a wave line
@@ -1673,7 +1686,7 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   `dispatch lines late: <n>` — the first-attempt dispatch lines beneath each `wave <k>:` line whose time equals or follows that wave's completion — then
   `procedure lines: <k>/<n>` — the count of worker files whose first line is the `procedure:` line with the
   frontmatter versions; `k` equals `n` — then `contracts checked: <n>/<n>` and `stale worker files moved: <n>`, both
-  copied from `scan-plan.md` (two runs' reports lacked them, and recheck item (13) counts them) — then, when the plan
+  copied from `scan-plan.md` (reports have lacked them, and recheck item (13) counts them) — then, when the plan
   holds `worker not run:` lines, one line `uncovered: <lens>/p<n> — <f>/<mf> files, <l>/<ml> lines read after 3 attempts`
   per such pair, its numbers from the file's `coverage:` line — `0` when it has none — over the partition manifest's
   counts (recheck item (29) counts these lines against the worker files; a list marker before `uncovered:` is tolerated).
@@ -1732,139 +1745,139 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
 ## Notes
 
 - **Do not modify the inner skill to "integrate" this configuration.** That was tried and measured: editing the
-  convergence loop to make partitioning its default produced 39, 43 and 40 findings with **zero** Criticals
-  across four runs, against 53 and 41 findings **with** a Critical when the inner skill was left untouched and
-  the configuration supplied from outside. The separation is the thing that works; keep the audit mechanics and
-  the run configuration in different files.
+  convergence loop to make partitioning its default produced fewer findings on the whole and **no** Critical over
+  repeated runs, while the inner skill, left untouched with the configuration supplied from outside, found **a**
+  Critical in its runs. The separation is the thing that works; keep the audit mechanics and the run configuration in
+  different files.
 - **STEP X and STEP Y exist because consolidation was measured to be the largest single source of variance.**
-  Three consolidations of one identical set of 18 lens files produced 55, 95 and 96 findings. The 55-finding
-  run dropped exactly three Mediums (a hardcoded AES key + static IV, and two S3 object-key sinks); every one
-  of them was present in the lens artifacts, demoted with a partition-boundary rationale, and recovered by a
-  consolidation that actually ran the buried-sink audit. Adding STEP X/Y on top raised buried-sink promotions
-  from 2 to 7 and routed 25 hand-offs that otherwise evaporate. Note the ceiling: the same three consolidations
-  all missed a client-supplied boolean used as an authorization gate, because no lens file recorded it —
-  consolidation cannot recover what detection never wrote down.
-- **STEP 2a exists because `new-scan` was measured not to recover known misses.** A re-scan with a populated
-  ledger (11 confirmed findings, 7 hotspots) advanced the ratchet and added findings, but missed a verified
-  authorization defect: a client-supplied boolean in an OR with a server-derived admin check, opening a second
-  route to a sink already in the ledger. The re-scan re-confirmed that sink through its recorded entry point
-  and never enumerated the others. Memory's priority set is file-scoped — hotspots, churn, prior-finding files
-  — so no term in it says "find this sink's other callers." The enumeration is cheap because the ledger is
-  small; keep it keyed to the ledger rather than to all sinks.
-- **STEP 2a traces from the SINK's owner outward, not from each partition inward — this direction was
-  measured.** The first version made every subagent enumerate call sites *within its own partition*, which
-  requires a caller-side agent to infer that a local chain eventually lands on a sink it cannot see. It
-  produced 7 new entry points, all of them shallow two-hop resolver→datasource→sink routes, and still missed a
-  four-hop route that left the caller's partition mid-chain. The one agent that ever found that route was
-  assigned the sink's partition and traced backward out of it. Sink-owner tracing works because the owning
-  agent has already read and understood the sink; caller-side enumeration asks for a forward inference across
-  a boundary. Do not flip this back.
+  Consolidations of one identical set of lens files produced widely different finding counts. The consolidation with
+  the lowest count dropped Medium findings, every one of them present in the lens artifacts, demoted with a
+  partition-boundary rationale, and recovered by a consolidation that actually ran the buried-sink audit. Adding STEP
+  X/Y on top raised buried-sink promotions and routed hand-offs that otherwise evaporate. Note the ceiling: the same
+  consolidations all missed a client-supplied boolean used as an authorization gate, because no lens file recorded it
+  — consolidation cannot recover what detection never wrote down.
+- **STEP 2a exists because `new-scan` was measured not to recover known misses.** A re-scan with a populated ledger of
+  confirmed findings and hotspots advanced the ratchet and added findings, but missed a verified authorization defect:
+  a client-supplied boolean in an OR with a server-derived admin check, opening a second route to a sink already in
+  the ledger. The re-scan re-confirmed that sink through its recorded entry point and never enumerated the others.
+  Memory's priority set is file-scoped — hotspots, churn, prior-finding files — so no term in it says "find this
+  sink's other callers." The enumeration is cheap because the ledger is small; keep it keyed to the ledger rather than
+  to all sinks.
+- **STEP 2a traces from the SINK's owner outward, not from each partition inward — this direction was measured.** The
+  first version made every subagent enumerate call sites *within its own partition*, which requires a caller-side
+  agent to infer that a local chain eventually lands on a sink it cannot see. It produced new entry points, all of
+  them shallow two-hop resolver→datasource→sink routes, and still missed a four-hop route that left the caller's
+  partition mid-chain. The one agent that ever found that route was assigned the sink's partition and traced backward
+  out of it. Sink-owner tracing works because the owning agent has already read and understood the sink; caller-side
+  enumeration asks for a forward inference across a boundary. Do not flip this back.
 - Subagents dispatched by STEP 2 run the Convergence Loop Procedure directly. They must not invoke this wrapper
   or the inner skill by name, or the fan-out repeats.
 - For a single-context audit with no partitioning, invoke `llm-sast-scanner-convergence-loop` directly with
   `mode=single`.
 - **Added lenses are selected by dependency signal because registration counts were measured not to converge.**
-  Seven runs of one repository at one SHA produced seven derivation tables — the leading family's entry-point count
-  ran 42, 83, 41, 49, 49, 458 and 395, a second family's 20, 55, 24, 24, 24, 38 and 123 — and four different lens
-  sets, while the packages the manifests name were the same in every run but one. Two wording rounds that told the
-  orchestrator what a registration is and whose it is did not narrow the spread. The counts stay in the table as
-  information; nothing reads them to choose.
+  Repeated runs of one repository at one SHA produced derivation tables whose entry-point counts for the leading
+  families varied widely, and lens sets that differed, while the packages the manifests name were the same in nearly
+  every run. Wording rounds that told the orchestrator what a registration is and whose it is did not narrow the
+  spread. The counts stay in the table as information; nothing reads them to choose.
 - **Workers start in waves of at most 15 because concurrency was measured against the runtime's account-wide message
-  limit.** 21 concurrent workers completed twice; 27 tripped the limit mid-run and the run died with partial files; 33
-  tripped it nineteen seconds after the consolidator finished, losing the final verification and the transcript. Fifteen
-  leaves room for the orchestrator's own polling. A wave waits for the whole previous wave rather than sliding one slot
-  at a time so the dispatch record stays a short list a reader can check.
-- **Verdicts live in the disposition table because a re-render lost them.** One consolidation first rendered 11 of
-  201 body records; the orchestrator caught it and dispatched a completion pass, which re-rendered every block from the
-  table — a table that held no verdicts — and stamped one STANDING sentence on all 201, dropping two correct downgrades
-  and one dispute the first pass had made. The same pass paraphrased the close-out into prose and pasted worker-file
-  sections between body blocks. The `verdict` column, the verbatim close-out requirement and the body-purity sentence
-  each name one of those three losses.
-- **The worker's first line is built from the frontmatters, not copied from the prompt,** because in two consecutive
-  runs one of 33 compiled prompts carried a typo in a skill name, the worker copied it, and the header check forced a
-  serialized re-run before the next wave.
+  limit.** Runs of somewhat more concurrent workers than a wave holds completed; with more still, the limit tripped
+  mid-run and the run died with partial files, and a larger run tripped it just after the consolidator finished,
+  losing the final verification and the transcript. Fifteen leaves room for the orchestrator's own polling. A wave
+  waits for the whole previous wave rather than sliding one slot at a time so the dispatch record stays a short list a
+  reader can check.
+- **Verdicts live in the disposition table because a re-render lost them.** One consolidation first rendered only a
+  few of its body records; the orchestrator caught it and dispatched a completion pass, which re-rendered every block
+  from the table — a table that held no verdicts — and stamped one STANDING sentence on all of them, dropping correct
+  downgrades and a dispute the first pass had made. The same pass paraphrased the close-out into prose and pasted
+  worker-file sections between body blocks. The `verdict` column, the verbatim close-out requirement and the
+  body-purity sentence each name one of those three losses.
+- **The worker's first line is built from the frontmatters, not copied from the prompt,** because in consecutive runs
+  one compiled prompt carried a typo in a skill name, the worker copied it, and the header check forced a serialized
+  re-run before the next wave.
 - **The disposition table has an identity check because a consolidator re-used the previous run's table.** With a
-  prior report and table left in the cache, one `new-scan` consolidation added the new column to last night's 323 rows —
-  73 of them for records no current worker had written, 97 current records missing — and wrote a report whose severity
-  sections pointed at the previous report instead of holding blocks. The check compares id sets in both directions and
-  rebuilds; a pointer section counts as zero blocks.
-- **Waves are defined by dispatch timestamps because a wave line was re-labelled.** An orchestrator started 18 workers
-  together, then rewrote the summary as waves of 15 and 3 sharing one start time. The dispatch lines could not be
-  re-labelled; the check reads them.
+  prior report and table left in the cache, one `new-scan` consolidation added the new column to the previous run's
+  rows — many of them for records no current worker had written, many current records missing — and wrote a report
+  whose severity sections pointed at the previous report instead of holding blocks. The check compares id sets in both
+  directions and rebuilds; a pointer section counts as zero blocks.
+- **Waves are defined by dispatch timestamps because a wave line was re-labelled.** An orchestrator started more
+  workers together than a wave holds, then rewrote the summary as two waves sharing one start time. The dispatch lines
+  could not be re-labelled; the check reads them.
 - **The command forms the units, whole directories at the shallowest depth the caps allow, because a session's
   directory under both limits was split anyway,** moving most of its units
   between partitions at an unchanged SHA and ending the worker-by-worker comparability the deterministic cut exists for.
-- **STEP 2a is in the worker template because workers never read this file;** a run whose contracts omitted it produced no
-  enumeration and no `new entry points` lines, after a run whose contracts included it had produced 183.
+- **STEP 2a is in the worker template because workers never read this file;** a run whose contracts omitted it
+  produced no enumeration and no `new entry points` lines, after a run whose contracts included it had produced many.
 - **STEP 3 runs one subagent at a time because the account message limit tripped after the workers had finished,** in
-  the consolidation-and-repair phase, on two runs whose worker waves had stayed under the cap.
-- **Records are enumerated case-insensitively because a case-sensitive count dropped 43 and then 42 records** — every
-  one written `[Medium]` instead of `[MEDIUM]` — while the self-check, counted the same way, reported the table complete.
-- **Workers pin the target path and commit by running the commands** because seven of fifteen workers in one wave audited
-  a sibling copy of the repository and were caught only after finishing; one sibling sits at the same commit, so the
+  the consolidation-and-repair phase, on runs whose worker waves had stayed under the cap.
+- **Records are enumerated case-insensitively because a case-sensitive count dropped records in consecutive runs** —
+  every one written `[Medium]` instead of `[MEDIUM]` — while the self-check, counted the same way, reported the table
+  complete.
+- **Workers pin the target path and commit by running the commands** because several workers in one wave audited a
+  sibling copy of the repository and were caught only after finishing; one sibling sits at the same commit, so the
   path line is the primary check and the SHA the secondary.
-- **Block layout and appendix sectioning are fixed because three consecutive reports laid them out three ways** — the
-  `Worker record:` line second, last, or third; an `Entry point:` line in one; Evidence fenced in a third of blocks;
-  one appendix section or nine — each consolidator choosing where the unspecified pieces went.
-- **The pinning values live in the first line because a separate line was skipped by half the workers on first
-  attempt** — one run re-ran seventeen of thirty-three workers for it — while the first line has been written correctly
-  in every file of four consecutive runs.
-- **Verdict cells must be specific because one consolidation wrote a single sentence for all seventeen downgrades and
-  another for all fifty-two disputes**, meeting the form of the rule while naming nothing the Flow check could test.
+- **Block layout and appendix sectioning are fixed because consecutive reports each laid them out their own way** —
+  the `Worker record:` line second, last, or third; an `Entry point:` line in one; Evidence fenced in some blocks
+  only; one appendix section or many — each consolidator choosing where the unspecified pieces went.
+- **The pinning values live in the first line because a separate line was skipped by many workers on first attempt** —
+  one run re-ran a large share of its workers for it — while the first line has been written correctly in every file
+  of consecutive runs.
+- **Verdict cells must be specific because one consolidation wrote a single sentence for all its downgrades and
+  another for all its disputes**, meeting the form of the rule while naming nothing the Flow check could test.
 - **Runtime logs and transcripts are excluded because a previous run's exported transcript was partitioned as source
-  with fifty entry points**, all of them route strings quoted inside the JSON.
+  with entry points of its own**, all of them route strings quoted inside the JSON.
 - **Earlier runs' reports are named, counted and protected because a consolidation writer deleted them.** The rule
   said a second report "newer than the run's start" is deleted "so exactly one report is newer than the run's log";
   with no recorded start and no named report file, one `new-scan` writer read it as one report in the directory and
-  deleted the two earlier runs' reports, and the run before it had "rewritten in place" the previous run's report
-  instead of its own. The `started:`, `earlier-reports:` and `report:` rows make both comparisons mechanical, and
-  the `earlier reports:` close-out line makes a loss visible instead of silent.
-- **The ledger-phrase gate is case-insensitive because five of six re-runs in one run were for `New entry points: 0`
-  written at the start of a sentence** — the phrase was present; only its capitalization differed.
+  deleted the earlier runs' reports, and the run before it had "rewritten in place" the previous run's report instead
+  of its own. The `started:`, `earlier-reports:` and `report:` rows make both comparisons mechanical, and the
+  `earlier reports:` close-out line makes a loss visible instead of silent.
+- **The ledger-phrase gate is case-insensitive because most re-runs in one run were for `New entry points: 0` written
+  at the start of a sentence** — the phrase was present; only its capitalization differed.
 - **Worker files must end in `coverage:` and `passes:` lines because a template sentence read as "omit them".** One
-  run's 27 workers took "without the Adversarial field, the Clearance Records, the coverage checklist, the pass log and
-  the convergence status" literally: 22 files had no coverage line, 26 no pass log or clearance records, and three held
-  only the header, `ledger empty` and the sentinel — 300 bytes of evidence for the partition with the most entry
-  points. The sections are now required with two checkable lines, and the gate checks them.
-- **The gate writes a `gate:` line per worker file because a gate that ran three of its six checks passed a file citing
-  a path that did not exist.** The consolidator's citation verification passed it too; the orchestrator found it after
-  the report was written, re-ran the worker, and string-patched the report, table and gates file itself — a third
-  writer after the single permitted repair. A gate line with a `paths <k>/<m>` count cannot be skipped silently.
+  run's workers took "without the Adversarial field, the Clearance Records, the coverage checklist, the pass log and
+  the convergence status" literally: most files had no coverage line, nearly all no pass log or clearance records, and
+  some held only the header, `ledger empty` and the sentinel — almost no evidence for the partition with the most
+  entry points. The sections are now required with two checkable lines, and the gate checks them.
+- **The gate writes a `gate:` line per worker file because a gate that ran only some of its checks passed a file
+  citing a path that did not exist.** The consolidator's citation verification passed it too; the orchestrator found
+  it after the report was written, re-ran the worker, and string-patched the report, table and gates file itself — a
+  third writer after the single permitted repair. A gate line with a `paths <k>/<m>` count cannot be skipped silently.
 - **A recorded gate line is compared with its file — its digest and its counts — because one worker rewrote its file
-  after its sentinel and its gate.** Its 47 records became 40 while the next wave ran; the plan kept the line for 47, the report
-  was built from the 40, and the only check that compared the two read their verdicts, both a pass. The line now carries
-  the file's digest, so a change that keeps every count — a severity rewritten, a path swapped — reads as one too.
+  after its sentinel and its gate.** Its records fell in number while the next wave ran; the plan kept the line for
+  the old file, the report was built from the new one, and the only check that compared the two read their verdicts,
+  both a pass. The line now carries the file's digest, so a change that keeps every count — a severity rewritten, a
+  path swapped — reads as one too.
 - **Item (37) reads the entry point cell because one repaired run read `mismatches 0` with none left.** Its writer
-  wrote `worker entry point` into all 328 rows it built and into their blocks, and the repair kept it: item (37) read
-  the sink and class cells only, block layout read the block against the row, and the two agreed. The cell is met by
-  what names it — the list's form and the record's words differ — never by equality.
+  wrote `worker entry point` into every row it built and into their blocks, and the repair kept it: item (37) read the
+  sink and class cells only, block layout read the block against the row, and the two agreed. The cell is met by what
+  names it — the list's form and the record's words differ — never by equality.
 - **The gate compares each worker file with its pair's earlier files because a clean run's coverage was partly
-  copied.** Two new-scans at one commit each read `mismatches 0` on their first recorded set, and in each about a
-  quarter of the workers had returned the previous run's file for their pair, pass log included, with a line or a
-  record edited; nothing read it, because every count in those files was right. The `copied` field reads it, over
-  the prose a worker writes rather than the code it quotes, so a worker that re-verifies passes and one that copies
-  is re-run.
-- **The ledger line exists because one memory write kept 19 rows for 88 body keys.** None of the run's 31 DOWNGRADED
-  or DISPUTED findings got a row, so the next `new-scan`'s STEP 2a would have re-traced 19 sinks instead of 88. Memory
-  is regenerable from the table, so a shortfall is rewritten, not reported.
+  copied.** New-scans at one commit each read `mismatches 0` on their first recorded set, and in each a share of the
+  workers had returned the previous run's file for their pair, pass log included, with a line or a record edited;
+  nothing read it, because every count in those files was right. The `copied` field reads it, over the prose a worker
+  writes rather than the code it quotes, so a worker that re-verifies passes and one that copies is re-run.
+- **The ledger line exists because one memory write kept rows for only a fraction of its body keys.** None of the
+  run's DOWNGRADED or DISPUTED findings got a row, so the next `new-scan`'s STEP 2a would have re-traced only the few
+  sinks it kept. Memory is regenerable from the table, so a shortfall is rewritten, not reported.
 - **Identical verdict text across sinks is allowed only for one verbatim identifier because the flat ban flagged real
-  cells and missed bad ones.** Seven shared verdicts named one permission gating adjacent resolvers or one
-  configuration key across four overlay files, each present in its rows; two other cells named a phrase that appeared
-  in neither of their records and were counted valid.
-- **Coverage and pass counts live in the sentinel because two separate lines reached 12 of 27 files.** The orchestrator
-  compiles a per-lens contract and copied two specs verbatim — the first line and the sentinel — which reached 27 of 27
-  in two runs; the `coverage:` and `passes:` lines it paraphrased into "include the coverage checklist and pass log", and
-  its gate had a slot for one and none for the other, so twelve files without a pass count passed.
+  cells and missed bad ones.** Shared verdicts named one permission gating adjacent resolvers or one configuration key
+  across overlay files, each present in its rows; other cells named a phrase that appeared in none of their records
+  and were counted valid.
+- **Coverage and pass counts live in the sentinel because two separate lines reached only some of the files.** The
+  orchestrator compiles a per-lens contract and copied two specs verbatim — the first line and the sentinel — which
+  reached every file in consecutive runs; the `coverage:` and `passes:` lines it paraphrased into "include the
+  coverage checklist and pass log", and its gate had a slot for one and none for the other, so files without a pass
+  count passed.
 - **The gate's path count is the record count, read with backticks stripped, because `paths 0/0 resolve` passed a file
-  with six records** — every `File:` value in it sat in backticks and the check saw no paths at all.
-- **Verdict cells need a backticked identifier or `file:line` from their own record because four consolidations judged
-  their own prose valid.** Thirty-seven of thirty-eight cells in one run reused seven sentences, none containing an
-  identifier, and the close-out still read `invalid cells 0`; a regex is the first form of this rule that anyone but
-  the writer can recount.
+  holding records** — every `File:` value in it sat in backticks and the check saw no paths at all.
+- **Verdict cells need a backticked identifier or `file:line` from their own record because consolidations judged
+  their own prose valid.** Nearly every cell in one run reused a handful of sentences, none containing an identifier,
+  and the close-out still read `invalid cells 0`; a regex is the first form of this rule that anyone but the writer
+  can recount.
 - **The worker file is named by absolute path because one worker wrote it into the repository root**, where the
   orchestrator found and removed it before re-running the worker.
 - **The appendix states maturity from counted values because one consolidation declared a repository mature on a run
-  with 118 newly confirmed findings.** The streak had been asserted by the writer into a memory line no reader opens;
+  that confirmed many new findings.** The streak had been asserted by the writer into a memory line no reader opens;
   it is now derived from the new-key and found-late counts and shown beside the record counts, which are evidence for
   the reader and not inputs.
 - **Class clearances are partition-scoped and checked against the body because one worker cleared a whole attack
@@ -1874,191 +1887,191 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   resting on absent callers now also says "in-repository", because what an external consumer does with an upload
   bucket is unverifiable from the code, not safe.
 - **A configuration default is never a clearance because one worker cleared a whole anti-automation middleware as
-  "disabled by default" and "environment-gated".** Eleven findings of an earlier scan at that sink vanished behind
-  that sentence; under the base skill the same sentence is a downgrade trigger, so they are body records carrying a
+  "disabled by default" and "environment-gated".** The findings an earlier scan held at that sink vanished behind that
+  sentence; under the base skill the same sentence is a downgrade trigger, so they are body records carrying a
   DOWNGRADED verdict, not silence.
-- **Entry points are accounted for by name because two live resolver methods in a fully "covered" file were never
-  analyzed.** The workers cited two lines of the file and nothing in the ninety lines holding the other two
-  methods; a third mutation in another file was never mentioned by anyone. Coverage counts lines read, not entry
-  points traced, and the list STEP 1 already builds for the cut is the denominator that shows the difference.
-- **The memory write is commit-aware because one consolidation marked 54 ledger rows `fixed` at an unchanged commit.**
+- **Entry points are accounted for by name because live resolver methods in a fully "covered" file were never
+  analyzed.** The workers cited other lines of the file and nothing in the lines holding those methods; a mutation in
+  another file was never mentioned by anyone. Coverage counts lines read, not entry points traced, and the list STEP 1
+  already builds for the cut is the denominator that shows the difference.
+- **The memory write is commit-aware because one consolidation marked ledger rows `fixed` at an unchanged commit.**
   The workers had not re-confirmed them, the writer read "mark now-fixed ones fixed" without a guard, archived them,
-  and deleted a run line from the history; the next `new-scan` would have re-traced 154 sinks instead of 218 and
-  called the loss maturity. At the same commit a finding not re-found is a miss, and a miss stays open.
-- **Compiled contracts are checked for the two spec sentences because one omitted the first-line spec and all fifteen
-  workers of a wave came back with the wrong header.** The sentinel sentence in the same contract was verbatim and
-  reached 25 of 25.
-- **The configuration rule names its trigger phrases because three consolidations reported `rewritten: 0`** while the
+  and deleted a run line from the history; the next `new-scan` would have re-traced too few sinks and called the loss
+  maturity. At the same commit a finding not re-found is a miss, and a miss stays open.
+- **Compiled contracts are checked for the two spec sentences because one omitted the first-line spec and every worker
+  of a wave came back with the wrong header.** The sentinel sentence in the same contract was verbatim and reached
+  every worker.
+- **The configuration rule names its trigger phrases because consolidations reported `rewritten: 0`** while the
   clearance it was written for — "disabled by default and environment-gated" — stood in every one of them.
-- **Verdicts carry across runs because three consecutive re-scans downgraded nothing** at a commit where the run before
-  them had downgraded thirteen findings with proper identifiers.
+- **Verdicts carry across runs because consecutive re-scans downgraded nothing** at a commit where the run before them
+  had downgraded findings with proper identifiers.
 - **Previous counts come from the earlier report because the memory run line never held them**, so the first
-  `vs <previous>` pairs read `n/a` under two preserved reports.
+  `vs <previous>` pairs read `n/a` under preserved reports.
 - **This session recomputes the writer's counts because every count the writer reported about itself was asserted.**
-  One report carried `invalid cells 0` computed on a table with two verdict cells while its body held thirty-three,
-  thirty of them without clause or identifier; the orchestrator then spent an hour of in-place repairs converging the
+  One report carried `invalid cells 0` computed on a table with almost no verdict cells while its body held many, most
+  of them without clause or identifier; the orchestrator then spent a long stretch of in-place repairs converging the
   body toward the table. The `recheck:` lines make the recomputation a recorded step instead of an instinct.
 - **The cut keeps moving, exchanging and splitting units after packing because a cut that failed its own check was
   dispatched.** One partition held entry points well over the 40 percent cap; the remedy stopped when its
   largest unit was a single file, the plan recorded `check failed` and no verdict, and that partition produced records
   at a fraction of the rate of the lightest one.
-- **Merges are constrained to identical entry point, sink and class because one writer merged 31 of 132 records,**
-  three of them across different entry points, where the run before merged 8 of 176. The **Duplicates** rule's merges
-  across classes or sink lines keep that constraint's point — one entry point, the merged class named on the kept
-  block — and each is judged on a line of its own.
+- **Merges are constrained to identical entry point, sink and class because one writer merged far more of its records
+  than the run before,** some of them across different entry points. The **Duplicates** rule's merges across classes
+  or sink lines keep that constraint's point — one entry point, the merged class named on the kept block — and each is
+  judged on a line of its own.
 - **The contract check asks for the two forms, not the template's sentences, because a paraphrased contract reached
-  27 of 27** while an earlier contract that omitted the first-line form reached 0 of 15.
+  every worker** while an earlier contract that omitted the first-line form reached none.
 - **The configuration phrases are narrowed because a flag named beside real code guards is not a clearance by
-  configuration**; the broad list matched nine such guard lists and no configuration-only clearance.
+  configuration**; the broad list matched such guard lists and no configuration-only clearance.
 - **Record enumeration strips line prefixes because one worker wrote its records as headings and every count missed
   them.** The gate read the file as holding no paths, the writer read it as holding no records, and the close-out
   agreed with itself because both counts shared the blind spot. A count is only a check when its reading of a line is
   the same everywhere.
-- **Worker prompts are path-tested before dispatch because ten of thirteen re-runs in one run were the orchestrator's
-  own path error, repeated once** by the repair prompt that inherited it. The contract check cannot see the prompt.
-- **The writer's failing recheck lines print their fix, the writer starts only on recorded gate lines, and the report name
-  is checked, because one first run went to repair**: its writer returned after three self-check runs with four items
-  open — a merge across entry points, a config-clearance count, a duplicate ledger key, a run line counting body blocks
-  — that the repair closed in five minutes; its session had run the gate but recorded no `gate:` line; and its report
-  was named for a time twenty minutes after the file was written. One of the four was the recheck's: its phrase search
-  read a finding's own `Judge:` line (`no safe default`) as a configuration clearance, so the writer's correct `0` was
-  flagged and the repair changed it to `1`; the search now reads disposition lines only.
-- **A withdrawn row says why, and a promoted row is never a worker record's own finding, because one fresh run's writer
-  withdrew all 146 worker records and rendered 50 findings as promoted rows, which a repair cut to 36**: the recheck read
-  `mismatches 0` twice while 66 worker records' findings were in no row of the report. The id check exempts promoted
-  rows and nothing read the withdrawn lines the rules require, nor the sink and class cells the writer had replaced on
-every withdrawn row; all three are items now, and the table rules say plainly that
-  a record's own finding is its `body` row, the wording "a finding at another of its entry points is a `promoted` row"
-  having been read as the form for every kept finding.
+- **Worker prompts are path-tested before dispatch because most re-runs in one run were the orchestrator's own path
+  error, repeated once** by the repair prompt that inherited it. The contract check cannot see the prompt.
+- **The writer's failing recheck lines print their fix, the writer starts only on recorded gate lines, and the report
+  name is checked, because one first run went to repair**: its writer returned after its self-check runs with items
+  open — a merge across entry points, a config-clearance count, a duplicate ledger key, a run line counting body
+  blocks — that the repair closed in minutes; its session had run the gate but recorded no `gate:` line; and its
+  report was named for a time well after the file was written. One of those open items was the recheck's: its phrase
+  search read a finding's own `Judge:` line (`no safe default`) as a configuration clearance, so the writer's correct
+  `0` was flagged and the repair changed it to `1`; the search now reads disposition lines only.
+- **A withdrawn row says why, and a promoted row is never a worker record's own finding, because one fresh run's
+  writer withdrew every worker record and rendered its findings as promoted rows, which a repair cut further**: the
+  recheck read `mismatches 0` twice while many worker records' findings were in no row of the report. The id check
+  exempts promoted rows and nothing read the withdrawn lines the rules require, nor the sink and class cells the
+  writer had replaced on every withdrawn row; all three are items now, and the table rules say plainly that a record's
+  own finding is its `body` row, the wording "a finding at another of its entry points is a `promoted` row" having
+  been read as the form for every kept finding.
 - **The ledger at start is read against the report that left it, and a kept cache against its previous plan, because
-  one STEP 1 re-created the memory**: a `new-scan` over a kept cache initialised `project-memory.md` from the template,
-  copied the empty file as its pre-write copy, overwrote the previous plan without copying it and left twenty-seven
-  earlier worker files in place — `ledger rows at start: 0`, `previous run residual: none` and `stale worker files
-  moved: 0` all read true against what the run itself had made, and ninety-eight ledger rows were gone. The earlier
-  run's own copies in the cache and its report's `after` count are what the run could not rewrite.
+  one STEP 1 re-created the memory**: a `new-scan` over a kept cache initialised `project-memory.md` from the
+  template, copied the empty file as its pre-write copy, overwrote the previous plan without copying it and left the
+  earlier worker files in place — `ledger rows at start: 0`, `previous run residual: none` and
+  `stale worker files moved: 0` all read true against what the run itself had made, and every ledger row was gone. The
+  earlier run's own copies in the cache and its report's `after` count are what the run could not rewrite.
 - **Eight appendix and block rules are items because a clean-reading write broke them all**: a first write whose set
-  read `mismatches 0` held two Medium records under Low, forty-six Low records with Step 6 verdicts, sixty-four
-  `Adversarial:` lines ending at their cell, and a sentence where the disposition table, the exclusions, the clearance
-  count and the pass log belong; an audit of STEP 3 rule by rule found each of them read by no item, and the repair that
-  fixed them, reading `adv=` on the block's severity, erased forty-six verdicts Step 6 had written. The verdict rule now
-  names the record's severity.
+  read `mismatches 0` held Medium records under Low, Low records with Step 6 verdicts, `Adversarial:` lines ending at
+  their cell, and a sentence where the disposition table, the exclusions, the clearance count and the pass log belong;
+  an audit of STEP 3 rule by rule found each of them read by no item, and the repair that fixed them, reading `adv=`
+  on the block's severity, erased the verdicts Step 6 had written. The verdict rule now names the record's severity.
 - **A row's sink and class are read against its worker record, and a body block's too, because one writer collapsed a
-  scan into one finding**: it rewrote 213 of 214 rows onto one sink and class, merged them into one body row, and every
-  item read the table it had made agree with itself — only the carry, at an unchanged commit, saw the report had lost
-  its findings; at a changed commit the set would have read `0`. Earlier clean-reading runs had changed a few classes
-  and sinks the same way, unseen.
+  scan into one finding**: it rewrote nearly every row onto one sink and class, merged them into one body row, and
+  every item read the table it had made agree with itself — only the carry, at an unchanged commit, saw the report had
+  lost its findings; at a changed commit the set would have read `0`. Earlier clean-reading runs had changed a few
+  classes and sinks the same way, unseen.
 - **The memory's header is an item, and a copy without one reads its newest run line's commit, because one write
-  dropped it**: a clean-reading run rewrote `project-memory.md` from its ledger heading down, losing `last-scanned-sha`
-  with the rest of the header, and its recheck read `mismatches 0`; the next run at the same commit found no sha in its
-  pre-write copy, carried nothing, and its report lost three findings its predecessor held — one Medium — while that
+  dropped it**: a clean-reading run rewrote `project-memory.md` from its ledger heading down, losing
+  `last-scanned-sha` with the rest of the header, and its recheck read `mismatches 0`; the next run at the same commit
+  found no sha in its pre-write copy, carried nothing, and its report lost findings its predecessor held while that
   run's recheck also read `0`. The header is now checked where it is written, and a copy that lost it is read at the
-  commit of its newest run line, which the same write kept — the newest by date, not by place, since one write put
-  its line first.
-- **A dispatch line's time is read after its prompt is tested because one run's first-wave lines were timed before
-  any prompt existed**: all fifteen carried the wave's `started` time, read five seconds before the first prompt file
-  was written, its completion stood on a line of its own that the recheck did not read, and the appendix's `dispatch
-  lines late` was stated and never counted. All three are read now; a prompt written after one of its wave's workers
-  ended is not, since one run rebuilt all twenty-seven for a re-run while its first wave was still running.
+  commit of its newest run line, which the same write kept — the newest by date, not by place, since one write put its
+  line first.
+- **A dispatch line's time is read after its prompt is tested because one run's first-wave lines were timed before any
+  prompt existed**: every one carried the wave's `started` time, read before the first prompt file was written, its
+  completion stood on a line of its own that the recheck did not read, and the appendix's `dispatch lines late` was
+  stated and never counted. All three are read now; a prompt written after one of its wave's workers ended is not,
+  since one run rebuilt all its prompts for a re-run while its first wave was still running.
 - **The recheck reads what the skill writes, because a whole-script review found lines a correct run could fail**: a
   `## ` line in a quoted Makefile read as a stray heading, a `wrapper:` row corrected by its append still read wrong, a
   wave written on two lines split its roster, an archived `fixed` row at a changed commit read as lost, a report whose
   name held no timestamp passed unread, and a worker file for a pair on no roster left `--prompt` asking for a gate line
   the gate never printed. A failure that no writer or repair can change now says so (`recheck: repair none`), so the
   one repair is not spent on a STEP 1 or STEP 2 line.
-- **A VULN id heading two blocks is named, the writer has five self-check runs, and a wave's completion is a time read,
-  never composed, because one fresh run's writer rendered two findings twice — once Medium, once Info — and returned
-  after its third run with three items open, each described by its hint**, and its session wrote both waves' `complete`
-  times minutes before their last files were sealed. The block count's hint had said to restate the count, which
-  would have hidden the duplicates; it now names them. The waves had started in order, so only the stamps were wrong,
-  and the recheck reads them against the files only where the files' times are the run's own.
+- **A VULN id heading two blocks is named, the writer has five self-check runs, and a wave's completion is a time
+  read, never composed, because one fresh run's writer rendered findings twice — once Medium, once Info — and returned
+  after its third self-check run, then the last permitted, with items open, each described by its hint**, and its
+  session wrote both waves' `complete` times minutes before their last files were sealed. The block count's hint had
+  said to restate the count, which would have hidden the duplicates; it now names them. The waves had started in
+  order, so only the stamps were wrong, and the recheck reads them against the files only where the files' times are
+  the run's own.
 - **The writer reads this skill's STEP 3 before it writes, and the recheck repeats the table's identity check, because
-  one fresh run's writer, sent only to the base and loop skills, drafted a table in ids of its own (`INJ-P1-001`,
-  disposition `retained`) and an appendix with none of its required lines, and its repaired table, read
-  `mismatches 0`, joined 15 of 114 worker records by id**: `VULN-001` had become `VULN-AA-P2-001`, and one record sat on
-  six rows. The skill defined the check and no script ran it; the recheck now does, its hint naming the heading's id, and
-  the Writer self-check paragraph, which every writer's prompt carries verbatim, names the file and the span that define
-  the table.
+  one fresh run's writer, sent only to the base and loop skills, drafted a table in ids of its own (lens-and-partition
+  ids, disposition `retained`) and an appendix with none of its required lines, and its repaired table, read
+  `mismatches 0`, joined only a few of its worker records by id**: a worker's `VULN-<n>` had become an id prefixed
+  with its lens and partition, and one record sat on several rows. The skill defined the check and no script ran it;
+  the recheck now does, its hint naming the heading's id, and the Writer self-check paragraph, which every writer's
+  prompt carries verbatim, names the file and the span that define the table.
 - **The session records a set with `--record`, and a run without it writes nothing into the plan, because one
-  rehearsal's writer appended its three self-check runs to the plan under a prompt that said to read them without
-  appending them, and its session ran its last recheck without recording it.** A rule about where output goes held for
-  neither agent, so the script decides what a redirect records: only `--record` appends, what it prints is one
-  `recorded:` line that is never a set, and a plain run redirected into the plan is dropped with a note. A `checks: failed` line whose failures each name
-  one file over the cap — or carry `(no move: …)` (2.26.16) or `(the command's cut: …)` (2.27.0 on) — is accepted by item
-  (19) because the same rehearsal's plan was flagged for a cut no move could fix.
+  rehearsal's writer appended its self-check runs to the plan under a prompt that said to read them without appending
+  them, and its session ran its last recheck without recording it.** A rule about where output goes held for neither
+  agent, so the script decides what a redirect records: only `--record` appends, what it prints is one `recorded:`
+  line that is never a set, and a plain run redirected into the plan is dropped with a note. A `checks: failed` line
+  whose failures each name one file over the cap — or carry `(no move: …)` (2.26.16) or `(the command's cut: …)`
+  (2.27.0 on) — is accepted by item (19) because the same rehearsal's plan was flagged for a cut no move could fix.
 - **A worker is started with one line naming its tested prompt file, never with the prompt re-typed, because the
-  four misspelled cache directories of one run were all typed into the start calls,** which no test reads. A test of
-  the file says nothing about a second copy made after it; the one line leaves a single path to type, and a worker
-  that cannot open it says so before it reads anything. The line reads, checks, then follows: worded "read it and follow
-  it" with the partition check after, four of five test workers followed a file that named another partition; in this
-  order five of five stopped, five of five recovered a misspelled path through the fallback, and five of five read a
-  correct one.
+  misspelled cache directories of one run were all typed into the start calls,** which no test reads. A test of the
+  file says nothing about a second copy made after it; the one line leaves a single path to type, and a worker that
+  cannot open it says so before it reads anything. The line reads, checks, then follows: worded "read it and follow
+  it" with the partition check after, most test workers followed a file that named another partition; in this order
+  every test worker stopped at a file naming another partition, every one recovered a misspelled path through the
+  fallback, and every one read a correct one.
 - **Header versions are on the recheck list because a scan plan named another skill's version as the wrapper's** and
   the report header copied it.
-- **Entry points are defined as invocable registrations because two sessions counted the same commit as 250 and 205**,
+- **Entry points are defined as invocable registrations because two sessions counted the same commit differently**,
   one counting the containers that group operations and one not. An accounting denominator that moves between runs
   measures the counter, not the code.
-- **The recheck follows the report's last write because one report was written eleven minutes after its recheck**;
-  lines that certify an earlier version certify nothing.
+- **The recheck follows the report's last write because one report was written minutes after its recheck**; lines that
+  certify an earlier version certify nothing.
 - **The preamble states that subagents are required, and the no-subagent fallback needs an actual refused attempt,
   because one session read "executed directly" as a ban on delegation** and ended after STEP 1 with `workers
   dispatched: 0 — prohibited by session policy` without ever calling the subagent tool, which the runtime offered.
 - **The contract check demands the forms with placeholders because one contract passed it with a filled-in header as
-  its own first line** and told workers in prose that two command outputs "must become the first-line fields";
-  twelve of fourteen workers then built their own line, fields reordered and versions split. A form with real values
-  in it is a record of one run, not an instruction for the next.
-- **The gate reads the first line as named fields because two gates read the same twelve reordered headers two ways**:
-  a gate that tests the form fails a line whose fields are merely reordered and re-runs a wave for nothing, a gate that
-  tests for words passes a line whose fields carry other names. Splitting on the separator and requiring three named
-  fields accepts the first and rejects the second, and the `gate:` line then says what was tested.
-- **Recheck lines carry their command because two of ten were asserted.** One session wrote `invalid cells 0` over
-  eight cells with no identifier and a tag count one higher than the body held, then a repair happened to make both
-  true. A number with its command beside it can be re-run by anyone; a number alone is the writer's word again.
-- **Headings and the maturity record count are recheck items because a writer inserted a thousand-line working-notes
-  section between the body and the fixed sections**, duplicating the close-out inside the report, and quoted body
-  rows as worker records; neither had an item, and the orchestrator found the first by luck.
-- **Stale worker files are moved aside at STEP 1 because a run over an uncleared cache held twenty-nine files from an
-  earlier run at the same commit**, each with a header and pinning the gate accepts; only their older sentinel form
-  would have failed them, and the next sentinel change removes that accident.
+  its own first line** and told workers in prose that two command outputs "must become the first-line fields"; most
+  workers then built their own line, fields reordered and versions split. A form with real values in it is a record of
+  one run, not an instruction for the next.
+- **The gate reads the first line as named fields because two gates read the same reordered headers two ways**: a gate
+  that tests the form fails a line whose fields are merely reordered and re-runs a wave for nothing, a gate that tests
+  for words passes a line whose fields carry other names. Splitting on the separator and requiring three named fields
+  accepts the first and rejects the second, and the `gate:` line then says what was tested.
+- **Recheck lines carry their command because some were asserted.** One session wrote `invalid cells 0` over cells
+  with no identifier and a tag count higher than the body held, then a repair happened to make both true. A number
+  with its command beside it can be re-run by anyone; a number alone is the writer's word again.
+- **Headings and the maturity record count are recheck items because a writer inserted a long working-notes section
+  between the body and the fixed sections**, duplicating the close-out inside the report, and quoted body rows as
+  worker records; neither had an item, and the orchestrator found the first by luck.
+- **Stale worker files are moved aside at STEP 1 because a run over an uncleared cache held the files of an earlier
+  run at the same commit**, each with a header and pinning the gate accepts; only their older sentinel form would have
+  failed them, and the next sentinel change removes that accident.
 - **Stray worker files are swept at the gate because one worker wrote its first attempt under a misspelled cache
-  directory**, eight records in a file no count could see, left behind after the run ended.
+  directory**, records in a file no count could see, left behind after the run ended.
 - **A single worker's refusal is a re-run and then a recorded gap, never a stop, because one session read "one attempt
-  whose result is a refusal" as proof the runtime could not start subagents** after fourteen workers had finished,
-  overwrote `workers dispatched: 27` with `0`, and abandoned the run with the same content-filter refusal that earlier
-  runs had re-run successfully.
-- **A recheck command must read the artifact it measures because ten lines in one run carried `print(0)` as their
+  whose result is a refusal" as proof the runtime could not start subagents** after workers it had started had
+  finished, overwrote its `workers dispatched:` count with `0`, and abandoned the run with the same content-filter
+  refusal that earlier runs had re-run successfully.
+- **A recheck command must read the artifact it measures because lines in one run carried `print(0)` as their
   command**: present, as the rule asked, and recomputing nothing. A command whose output cannot change when the file
   changes is the writer's number with a shell prompt in front of it.
 - **The output path is tested by equality because an existence test cannot see it**: the file does not exist until the
-  worker writes it, and two output-path typos in one evening — a misspelled cache directory, an inherited prompt typo —
-  passed `paths 8/8` and left records where no count could find them.
+  worker writes it, and output-path typos — a misspelled cache directory, an inherited prompt typo — passed a full
+  `paths <k>/<k>` and left records where no count could find them.
 - **Dispatch lines late are counted because one session wrote all of a wave's lines at the wave's close**, every
   timestamp the completion time, so the record of when each worker started was the record of when the orchestrator
   got round to writing it.
-- **`class clearances` is one search because four writers returned 0, 94, 183 and 515 for runs of the same shape**;
-  a count whose definition changes with the counter measures the counter.
-- **`new keys` is reconciled against the ledger statements because one report carried 94 beside 92**, two lines apart,
-  and no item compared them.
-- **The phrase test reads the ledger state because the same two workers wrote `ledger empty` against a populated
-  ledger in two consecutive re-scans and passed the gate both times**; two partitions' recorded sinks went
-  un-retraced twice while the gate reported `phrase ok`.
+- **`class clearances` is one search because writers returned wildly different counts for runs of the same shape**; a
+  count whose definition changes with the counter measures the counter.
+- **`new keys` is reconciled against the ledger statements because one report carried two different counts for it**,
+  lines apart, and no item compared them.
+- **The phrase test reads the ledger state because the same workers wrote `ledger empty` against a populated ledger in
+  consecutive re-scans and passed the gate each time**; their partitions' recorded sinks went un-retraced each time
+  while the gate reported `phrase ok`.
 - **The invalid-cell test is a regular expression in the rule because a recheck command that read the table still
-  passed ten cells that were the bare word `DISPUTED`**; a command can read the right file and test the wrong thing,
-  so the rule now says what to test.
-- **Ledger counts are named patterns because a recheck read the memory file and reported 137 rows where it held
-  111**, and the `present` count was claimed complete while 31 body sinks were absent.
-- **Required lines are a recheck item because four appendix lines were missing under twelve correct headings**; the
-  heading check cannot see what is under a heading.
-- **Verdict continuity is a join on `File:` because a run reported `carried 0 | voided 0` while six of the previous
-  report's ten disputed sinks sat in its body as bare `STANDING`**.
-- **`entry points dispositioned` takes its denominator from a command because one report read `0/0` against a
-  208-line list.**
-- **The maturity streak follows the body count, not the key count, because three re-scans at one commit held the
-  findings at 162, 162 while the ledger grew 111, 178, 211**: the keys grow from re-keyed sinks and newly traced routes
-  long after the findings have stopped moving, so a key-based streak never leaves zero on a converged repository.
-  Superseded: once open ledger rows are carried into the body at an unchanged commit, the body can no longer
-  swing with the workers' re-confirmation, and the key count — bounded at three — is the measure again.
+  passed cells that were the bare word `DISPUTED`**; a command can read the right file and test the wrong thing, so
+  the rule now says what to test.
+- **Ledger counts are named patterns because a recheck read the memory file and reported more rows than it held**, and
+  the `present` count was claimed complete while body sinks were absent.
+- **Required lines are a recheck item because appendix lines were missing under correct headings**; the heading check
+  cannot see what is under a heading.
+- **Verdict continuity is a join on `File:` because a run reported `carried 0 | voided 0` while most of the previous
+  report's disputed sinks sat in its body as bare `STANDING`**.
+- **`entry points dispositioned` takes its denominator from a command because one report read `0/0` against a long
+  list.**
+- **The maturity streak follows the body count, not the key count, because re-scans at one commit held the findings
+  level while the ledger kept growing**: the keys grow from re-keyed sinks and newly traced routes long after the
+  findings have stopped moving, so a key-based streak never leaves zero on a converged repository. Superseded: once
+  open ledger rows are carried into the body at an unchanged commit, the body can no longer swing with the workers'
+  re-confirmation, and the key count — bounded at three — is the measure again.
 - **The pre-write copy is per run and the row pattern admits a line range because one redo used the previous run's
-  copy and one count read 168 where 178 rows stood**, ten of them citing a range.
+  copy and one count missed the rows that cite a range**.
 - **The contract check asks for the two forms and nothing else because its third element, the partition manifest's
   path, was never in a contract yet always reported present**: a contract is compiled per lens and serves three
   partitions, so the path lives in the dispatch prompt, which the path test already verifies. A check with an element
@@ -2067,285 +2080,282 @@ every withdrawn row; all three are items now, and the table rules say plainly th
   literal**: the script that wrote the row had a counting function and did not call it, the row was rewritten after
   the report, and the state it described no longer existed. A copy made before anything runs is a number anyone can
   recount later.
-- **Duplicate keys are merged with their briefs joined, and counted, because one write collapsed 37 rows in silence**:
-  six callers of one sink had six rows and one survived, and the row equation held because 37 deletions and 74
-  additions net to the 34 it reported.
-- **`new keys` is a key difference between two files because three numbers stood for it in one run** — 34 by row
-  arithmetic in the report, 74 in the memory run line, 74 in the files — and the two recheck commands for it print a
-  fourth when run.
-- **The row pattern admits digits because three rows whose class carried one were outside every count**: the file
-  held 248 rows and every statement about it said 245.
-- **Classes are checked against the reference directory because nearly half of a ledger's rows carried a finding
-  title as their class**: 117 of 248 rows, 86 of 255 table rows, each a key nothing in a later run will match, so the
-  ledger grew from 92 to 248 rows at one commit while the findings converged. The key exists so the next run
-  recognises a sink; a title as class defeats it.
-- **Recheck lines are printed by one script because two lines carried numbers their commands do not produce**, and
-  two more returned to `print(0)` after the rule forbidding it; a line printed from the command's output cannot
-  disagree with it.
+- **Duplicate keys are merged with their briefs joined, and counted, because one write collapsed rows in silence**:
+  each caller of one sink had a row and one survived, and the row equation held because the deletions and additions
+  netted to the number it reported.
+- **`new keys` is a key difference between two files because different numbers stood for it in one run** — one by row
+  arithmetic in the report, another in the memory run line and the files — and the recheck commands for it print yet
+  another when run.
+- **The row pattern admits digits because rows whose class carried one were outside every count**: every statement
+  about the file counted fewer rows than it held.
+- **Classes are checked against the reference directory because many of a ledger's rows carried a finding title as
+  their class**, each a key nothing in a later run will match, so the ledger kept growing at one commit while the
+  findings converged. The key exists so the next run recognises a sink; a title as class defeats it.
+- **Recheck lines are printed by one script because lines carried numbers their commands do not produce**, and others
+  returned to `print(0)` after the rule forbidding it; a line printed from the command's output cannot disagree with
+  it.
 - **Rows above `workers dispatched:` are corrected by appending because one was overwritten after the report**; the
   correction made a recheck pass against an input changed to match it.
-- **Maturity compares body blocks because two writers rendered findings of the same shape as 162 rows plus 52 promoted
-  and as 245 rows plus 0**: rows follow the writer's splitting, blocks follow the findings.
+- **Maturity compares body blocks because two writers rendered findings of the same shape, one as body rows plus
+  promoted rows and one as body rows alone**: rows follow the writer's splitting, blocks follow the findings.
 - **The recheck script is an artifact that must hold the rules' expressions because the first one-script set read
-  `invalid cells 0` over ten identical verdict cells that named nothing**: the script tested the table's cell structure
+  `invalid cells 0` over identical verdict cells that named nothing**: the script tested the table's cell structure
   where the rule states a regular expression over the body, and it lived under a temporary directory. One script made
   the numbers reproducible; only the expressions in it make them the right numbers.
-- **`rekeyed to stem` is recomputed from the briefs because a write reported 117 rekeys and left the old class in 35
+- **`rekeyed to stem` is recomputed from the briefs because a write reported rekeys and left the old class in many
   briefs**: a count nothing in the file can reproduce is an assertion, and a rekey without its trail cannot be audited
   back to the row it replaced.
-- **The recheck is shipped code because seven versions of recheck prose were each defeated by a new form of
-  assertion**: typed numbers, then `print(0)`, then the right file with the wrong predicate, then one script that
-  held the rules' expressions beside constants for twelve of eighteen items and was also the writer's own build
-  script. Prose cannot pin eighteen predicates; a file with a checksum can. The session copies it, runs it and pastes
-  its output, and every number on a `recheck:` line is one anyone can reproduce by running the same file.
+- **The recheck is shipped code because each version of recheck prose was defeated by a new form of assertion**: typed
+  numbers, then `print(0)`, then the right file with the wrong predicate, then one script that held the rules'
+  expressions beside constants for most items and was also the writer's own build script. Prose cannot pin a predicate
+  per item; a file with a checksum can. The session copies it, runs it and pastes its output, and every number on a
+  `recheck:` line is one anyone can reproduce by running the same file.
 - **The scan plan is copied at dispatch because STEP 1 rows were rewritten after the report**: a `checks:` line and an
   entry-point row were replaced with values that matched the writer's tables, so a recheck that read the plan read
   the result it was meant to test. A copy taken when `workers dispatched:` is written is the STEP 1 the workers ran on.
-- **The dispatch prompt ends with the first-line form because eleven of twenty-seven workers wrote the outputs of two
-  commands as their first line**: the contract held the form, one paragraph deep, after the sentence that named the
-  commands; the gate re-ran all eleven at a cost of eight minutes.
-- **The gate counts severity-headed records because two records headed `[LIKELY]` reached the table and were dropped
-  by a repair**: a heading without a severity cannot fill the table's severity, the equation `file records = table rows`
+- **The dispatch prompt ends with the first-line form because many workers wrote the outputs of two commands as their
+  first line**: the contract held the form, one paragraph deep, after the sentence that named the commands; the gate
+  re-ran every one of them.
+- **The gate counts severity-headed records because records headed `[LIKELY]` reached the table and were dropped by a
+  repair**: a heading without a severity cannot fill the table's severity, the equation `file records = table rows`
   then fails for a reason no repair can fix without touching a worker file, and the repair balanced it by deleting
   findings. The worker is re-run instead, before anything downstream depends on the file.
-- **Continuity is the verdict column's first write, recorded as a join line, because a writer rendered thirty previously
+- **Continuity is the verdict column's first write, recorded as a join line, because a writer rendered previously
   downgraded sinks as bare `STANDING`** and restored them only after the recheck named them; a rule that is applied
   when a check fails is a repair, and a join whose size is written down before Step 6 is a step.
 - **Open ledger rows are carried into the body at an unchanged commit, labelled, and the streak follows new keys,
-  because ten re-scans of one commit produced bodies of 245, 280, 268, 261, 283, 280, 248, 172, 233 and 199 blocks
-  while the ledger only grew**: a finding that passed the Judge and the adversarial step at this commit is as valid
-  today as then, re-judging it measures the workers' consistency and nothing else, and a body that follows that
-  consistency can never hold still. Every source block of the newest report holding the key is carried, one per entry point, so a
-sink several routes reach keeps every route; each carried block says on its second line that it was not re-judged, its source
-  is named and checked, the ledger stays the record, and maturity now asks the one question the streak was for:
+  because re-scans of one commit produced bodies whose block counts rose and fell from run to run while the ledger
+  only grew**: a finding that passed the Judge and the adversarial step at this commit is as valid today as then,
+  re-judging it measures the workers' consistency and nothing else, and a body that follows that consistency can never
+  hold still. Every source block of the newest report holding the key is carried, one per entry point, so a sink
+  several routes reach keeps every route; each carried block says on its second line that it was not re-judged, its
+  source is named and checked, the ledger stays the record, and maturity now asks the one question the streak was for:
   has the union of findings stopped growing.
 - **The start count names the section and the waves are rostered before dispatch because the same two slips recurred
-  under rules that already forbade them**: six runs counted the whole memory file where the rule said the ledger, and
-  two runs started sixteen and eighteen workers under a cap of fifteen. A count that names its boundaries and a list
-  written before the pressure of dispatch leave less to decide at the moment the slip happens.
-- **The contract check demands the caller-enumeration paragraph verbatim, and the recheck counts `not re-found`
-  marks, because a contract that summarised the procedure produced a report missing ninety-three of the previous
-  run's sinks and a memory write that marked none of them**: the two forms the check asked for were present, the
-  procedure between them was a clause, and the misses left no trace in the ledger.
-- **The gate counts `Reference:` lines because five records without one became five composed classes**: the writer
-  takes the class from the record's reference file, so a record that names none gives it nothing to take, and the
-  class rule that held for five runs was broken by one worker's omission rather than by a writer's choice.
-- **The join line is append-corrected and the gate counts absolute paths because a repair rewrote a join from
-  sixty-six to fifty-nine in place and fifteen absolute sinks passed a path test that only asked whether they exist**:
-  a line that can be replaced records whatever its last editor needed, and a path that exists is not yet a key.
-- **Voided cells need an identifier because a repair voided twenty-seven carried verdicts with one sentence**: the
+  under rules that already forbade them**: runs counted the whole memory file where the rule said the ledger, and runs
+  started more workers than a cap of fifteen allows. A count that names its boundaries and a list written before the
+  pressure of dispatch leave less to decide at the moment the slip happens.
+- **The contract check demands the caller-enumeration paragraph verbatim, and the recheck counts `not re-found` marks,
+  because a contract that summarised the procedure produced a report missing many of the previous run's sinks and a
+  memory write that marked none of them**: the two forms the check asked for were present, the procedure between them
+  was a clause, and the misses left no trace in the ledger.
+- **The gate counts `Reference:` lines because records without one became composed classes**: the writer takes the
+  class from the record's reference file, so a record that names none gives it nothing to take, and the class rule
+  that had held run after run was broken by one worker's omission rather than by a writer's choice.
+- **The join line is append-corrected and the gate counts absolute paths because a repair rewrote a join in place and
+  absolute sinks passed a path test that only asked whether they exist**: a line that can be replaced records whatever
+  its last editor needed, and a path that exists is not yet a key.
+- **Voided cells need an identifier because a repair voided many carried verdicts with one sentence**: the
   verdict-specificity rule covered downgrades and disputes, so the one cell form it did not cover became the way out,
-  and a run at an unchanged commit reported twenty-seven judgements that changed for a reason no record holds.
-- **A carried verdict ignores `adv=` and sinks compare target-relative because a join listed sixty-six rows of which
-  twenty-seven read `not run` and fifteen cited absolute paths**: a copied verdict is not a Step 6 run, so scope cannot
-  skip it, and a key written absolute is a key no ledger row and no earlier report can meet.
+  and a run at an unchanged commit reported judgements that changed for a reason no record holds.
+- **A carried verdict ignores `adv=` and sinks compare target-relative because a join listed rows of which many read
+  `not run` and others cited absolute paths**: a copied verdict is not a Step 6 run, so scope cannot skip it, and a
+  key written absolute is a key no ledger row and no earlier report can meet.
 - **A copied downgrade still meets the validity check because one run's Step 6 kept a downgrade that read the attacker's
   own provider account as a privileged position**: copied verbatim, that verdict would outlive every later worker that
   rates the finding at its class default; a copy keeps a judgement, not its errors.
-- **The continuity join names its rows because a writer wrote `continuity join: 54` and filled twenty-nine cells**:
-  a count is a promise; a list of ids is a worklist the recheck can walk row by row, and a named row found bare has one
-  owner.
+- **The continuity join names its rows because a writer wrote a `continuity join:` count and filled far fewer cells**:
+  a count is a promise; a list of ids is a worklist the recheck can walk row by row, and a named row found bare has
+  one owner.
 - **A wave is the first fifteen undispatched pairs across lens boundaries because an orchestrator kept a lens whole**
-  and started sixteen: the cap is a concurrency limit on the account, not a grouping of lenses, and a lens split
-  between two waves costs nothing.
+  and started one pair past the cap: the cap is a concurrency limit on the account, not a grouping of lenses, and a
+  lens split between two waves costs nothing.
 - **The worker-record id form is stated and the shipped recheck reads a table row by its shape, because one writer
   numbered rows `<lens>-p<n>/<n>`** and a reader that knew rows by the earlier `<lens>/p<n>/VULN-<id>` form saw an
-  empty table: six items then disagreed with a report that was right. A row is seven cells whose fifth is a
-  disposition word; the id form matters for cross-reference, not for recognition.
+  empty table: items then disagreed with a report that was right. A row is seven cells whose fifth is a disposition
+  word; the id form matters for cross-reference, not for recognition.
 - **The recheck runs when the writing subagent has returned, never between its passes, because one set measured a
-  thirteen-block skeleton** the writer was still filling and recorded seven mismatches that described nothing but the
-  moment; a set taken on a draft is noise that a repair could be dispatched on.
+  skeleton** the writer was still filling and recorded mismatches that described nothing but the moment; a set taken
+  on a draft is noise that a repair could be dispatched on.
 - **The recheck derives the maturity streak, checks the join line and the sentinel, because one report declared
-  `streak 1` over a body that had moved from 268 to 261 blocks, wrote `continuity join: 0` against 35 previously
-  downgraded sinks, and ended without its sentinel while every counted item passed.** A maturity line that is
-  asserted is the one line the reader acts on; a join line that is asserted makes continuity a repair again; a report
-  without its last line is unfinished by the skill's own definition. All three are now numbers the script computes.
+  `streak 1` over a body whose block count had moved, wrote `continuity join: 0` against previously downgraded sinks,
+  and ended without its sentinel while every counted item passed.** A maturity line that is asserted is the one line
+  the reader acts on; a join line that is asserted makes continuity a repair again; a report without its last line is
+  unfinished by the skill's own definition. All three are now numbers the script computes.
 - **The shipped recheck reads a corrected row's corrected value, matches a correction-appended line to its original,
-  and counts a record whose heading opens with a confidence tag**, because its first run flagged three things the
-  rules had already accepted: a start count corrected by the append rule, the same append read as a removed STEP 1
-  row, and two worker records headed `[LIKELY]` instead of a severity that the table had counted. A recheck that
-  disputes its own rules sends a correct report to a repair that cannot fix a worker file; the headings without a
-  severity are now reported beside the file-record count instead.
+  and counts a record whose heading opens with a confidence tag**, because its first run flagged things the rules had
+  already accepted: a start count corrected by the append rule, the same append read as a removed STEP 1 row, and
+  worker records headed `[LIKELY]` instead of a severity that the table had counted. A recheck that disputes its own
+  rules sends a correct report to a repair that cannot fix a worker file; the headings without a severity are now
+  reported beside the file-record count instead.
 - **A carried block citing a line past the end of its file is no source, and every citation is read against its file,
-  because one carried finding cited line 533 of a 496-line file across six reports**: the sink was in a file of the same
-  name one directory up, and at an unchanged commit the copy-byte-for-byte rule carried the error forward each run. The
-  first run to notice rewrote the blocks and re-keyed the ledger row, which the carry rule forbids, and then patched and
-  rechecked eight times with no rule that let it finish. A line that does not exist at the commit was never verified
-  there, so the block is passed over like one that fails a standing downgrade, and item (46) finds such a citation in
-  any block. A carried block citing a line that exists in the wrong file is beyond any count of lines: it is carried as
-  it stands, labelled not re-judged, and never re-cited — Citation & Evidence Verification does not re-open a carried
-  block, which is what let the writer and the carry rule disagree. A source is also a report of this commit: a
-  changed-commit run leaves `open` a row whose sink's file did not change, and the next run at the new commit would
-  otherwise carry it from a report of the old one, whose hops into files that did change were never checked at this one.
+  because one carried finding cited a line past the end of its file across reports**: the sink was in a file of the
+  same name one directory up, and at an unchanged commit the copy-byte-for-byte rule carried the error forward each
+  run. The first run to notice rewrote the blocks and re-keyed the ledger row, which the carry rule forbids, and then
+  patched and rechecked again and again with no rule that let it finish. A line that does not exist at the commit was
+  never verified there, so the block is passed over like one that fails a standing downgrade, and item (46) finds such
+  a citation in any block. A carried block citing a line that exists in the wrong file is beyond any count of lines:
+  it is carried as it stands, labelled not re-judged, and never re-cited — Citation & Evidence Verification does not
+  re-open a carried block, which is what let the writer and the carry rule disagree. A source is also a report of this
+  commit: a changed-commit run leaves `open` a row whose sink's file did not change, and the next run at the new
+  commit would otherwise carry it from a report of the old one, whose hops into files that did change were never
+  checked at this one.
 - **A worker's refutation of a ledger finding is a fixed `ledger refuted:` line that STEP 3 tests, because one run
-  carried two findings labelled not re-judged while its worker had written that they no longer stood**: the note sat in
-  a free-text caller-enumeration row, which nothing read. A confirmed finding outranks one worker's reading, as it
-  outranks a clearance, so the line is a claim, and Step 6 — the step that already returns WITHDRAWN — decides it against
-  the guard it names, block by block since each block is its own entry point's finding: a withdrawn block is a
+  carried findings labelled not re-judged while its worker had written that they no longer stood**: the note sat in a
+  free-text caller-enumeration row, which nothing read. A confirmed finding outranks one worker's reading, as it
+  outranks a clearance, so the line is a claim, and Step 6 — the step that already returns WITHDRAWN — decides it
+  against the guard it names, block by block since each block is its own entry point's finding: a withdrawn block is a
   `refuted` row instead of a carried one, a key withdrawn in every block has its ledger row superseded, the rest are
-  carried as before; the appendix says which, and item (47) holds every such key to one outcome. A line the checker cannot read is shown
-  on item (47)'s line and its key carried as before: failing the worker's gate on it would cost a re-run and, past
-  three attempts, an uncovered partition — more than the carry costs.
-- **A block never reads below a record merged into it because 126 of 1,978 same-key merges in past reports kept the
-  lower record**: a pair the table answers is listed to no one, so the record kept was whichever the writer took first —
-  a HIGH injection record folded into a MEDIUM block read `STANDING`, others into LOW blocks outside `adv=` — and the
-  report carried a severity no verdict had lowered while Step 6 never saw the higher one. Kept, the higher record meets
-  Step 6, which may still lower it one level by a named trigger — a group overlap's block meets it at its highest line; item (51) reads every merge, and `--duplicates` names
-  one before the body exists.
+  carried as before; the appendix says which, and item (47) holds every such key to one outcome. A line the checker
+  cannot read is shown on item (47)'s line and its key carried as before: failing the worker's gate on it would cost a
+  re-run and, past three attempts, an uncovered partition — more than the carry costs.
+- **A block never reads below a record merged into it because same-key merges in past reports sometimes kept the lower
+  record**: a pair the table answers is listed to no one, so the record kept was whichever the writer took first — a
+  HIGH injection record folded into a MEDIUM block read `STANDING`, others into LOW blocks outside `adv=` — and the
+  report carried a severity no verdict had lowered while Step 6 never saw the higher one. Kept, the higher record
+  meets Step 6, which may still lower it one level by a named trigger — a group overlap's block meets it at its
+  highest line; item (51) reads every merge, and `--duplicates` names one before the body exists.
 - **Duplicates are listed by the entry point a cell names, not its wording, and every pair is judged, because one run
-  carried twenty-nine pairs of one finding as two**: an added lens re-applies a base lens's classes, so the same defect
-  at one sink and entry point came from two workers worded `POST /items (items.ts:20)` and
-  `items.ts:20 — HTTP route — POST /items`, and the writer compared the words. Nothing is merged by rule: a test by
-  `file:line` merged `POST /import/commit (routes.ts:369)` into `preview` at `:353`, a nearby handler line, a GraphQL
-  operation or a cell naming two routes each named the wrong registration, and three of one report's near-line pairs
-  across classes were distinct defects. The writer reads the two records, keeps the higher severity, names the other
-  class on the kept block, and never merges away a key the ledger holds — a group overlap, whose key the kept block's
-  `Also at:` line holds, aside. A pair is read from each worker record's own
-  `Entry point:` line, never a merged row's cell, which no item reads and a writer could make agree. A record with no
-  `Entry point:` line is `unavailable` beside a record of its class and sink unless its own lines name the cell the
-  writer filled: one first run's checker listed none of four such pairs — an unpinned base image and three supply-chain
-  sinks, each reported by a base lens naming no entry point and an added lens naming one — two because one side was
-  `unavailable` and two because the writer had filled the entry-less record's cell from the list with a command the
-  record never named; the writer merged three of the pairs on its own reading and left the base image at two findings. A
-  cited `file:line` is the list entry on that line before any within three lines of it: the same run's `manage.py:344`
-  read as the registration at `:346`, two commands down. Listing every pair of one class and sink the list does not
-  place apart was tried and withdrawn: over one target's six runs it multiplied the writers' pairs by as much as twelve
-  and a half — 98 to 1,235 on one — and of a judged sample of the pairs it added about two in five were one finding, the
-  rest two routes, operations or handlers reaching one shared sink; a `same` pair needs its entry points shown one, or
-  one of them `unavailable`. The wider pairing stands at configuration and infrastructure lines alone: a config line is
-  one statement and its entry point a deployment surface in prose, and there it listed, on one target's latest run,
-  forty-three pairs of two lenses at one Dockerfile, CI job, manifest or server-config line and no pair at a code sink;
-  on another it paired the unpinned test image two lenses reported at one Helm template line, which the rule above left
-  two findings. Of sixty-four of its pairs judged from their records, over four targets, sixty-two were one finding and
-  two were two checks at one Dockerfile `FROM` line, an unpinned tag and no `USER`, so each pair is still judged. Every
-  page pair it listed on the runs judged was at a site's `index.html` shell, and no other page counts; an `index.html`
-  under a template directory stays out: one run held one disclosure at such a served template twice, once for each of
-  two servers' `GET /` routes that render it — one route to the list, so the routes rule could not keep them apart — and
-  the pairing would have listed the two as one pair. A route a cell names ends at the sentence around it: on one run a
-  cell ending `… that calls POST /x.` read as the route `/x.`, the two lenses' cells for one mutable job image named two
-  routes with none in common, and the pair was never listed; a trailing `.`, `:`, `!` or quote is the sentence's,
-  while a `?` stands as written — a route's own optional marker (`GET /:id?`) looks the same as a question's — and so
-  does an ellipsis. Two lenses file one configuration defect under two classes as well: an unpinned base image reported
-  as a container finding and as a supply-chain one at one `FROM` line was never listed, `near` needing one entry point.
-  Listing another class at one configuration line unless the list places the entry points apart added ninety pairs over
-  the saved runs of every target, and judged from their records, eighty-two were one defect under two names, five two
-  checks at one line — a consent gate and a missing integrity check on one `<script>`, a missing policy and a missing
-  frame guard — and three could not be read, so each such pair is still judged.
-  A `distinct` clause is judged in its own pair: one writer answered all hundred and sixteen pairs the checker listed
-  with one clause, `separate entry points, sink operations, classes, or guards`, merged none — a build secret two lenses
-  reported at one Dockerfile line among them — and the recheck read 0; over the earlier runs' answers a clause repeated
-  at most five times, always over one class pair, and one fresh run's clause answered eleven of its thirteen pairs over
-  eight.
+  carried many pairs of one finding as two**: an added lens re-applies a base lens's classes, so the same defect at
+  one sink and entry point came from two workers worded `POST /a (app.ts:10)` and `app.ts:10 — HTTP route — POST /a`,
+  and the writer compared the words. Nothing is merged by rule: a test by `file:line` merged one route into a
+  neighbouring handler's finding; a nearby handler line, a GraphQL operation or a cell naming two routes each named
+  the wrong registration; and some of one report's near-line pairs across classes were distinct defects. The writer
+  reads the two records, keeps the higher severity, names the other class on the kept block, and never merges away a
+  key the ledger holds — a group overlap, whose key the kept block's `Also at:` line holds, aside. A pair is read from
+  each worker record's own `Entry point:` line, never a merged row's cell, which no item reads and a writer could make
+  agree. A record with no `Entry point:` line is `unavailable` beside a record of its class and sink unless its own
+  lines name the cell the writer filled: one first run's checker listed none of the pairs of this kind it met — an
+  unpinned base image and supply-chain sinks, each reported by a base lens naming no entry point and an added lens
+  naming one — some because one side was `unavailable` and others because the writer had filled the entry-less
+  record's cell from the list with a command the record never named; the writer merged most of the pairs on its own
+  reading and left the base image at two findings. A cited `file:line` is the list entry on that line before any
+  within three lines of it: the same run read a command's own line as the registration two commands down. Listing
+  every pair of one class and sink the list does not place apart was tried and withdrawn: over one target's runs it
+  multiplied the writers' pairs many times over, and of a judged sample of the pairs it added only a minority were one
+  finding, the rest two routes, operations or handlers reaching one shared sink; a `same` pair needs its entry points
+  shown one, or one of them `unavailable`. The wider pairing stands at configuration and infrastructure lines alone: a
+  config line is one statement and its entry point a deployment surface in prose, and there it listed, on one target's
+  latest run, pairs of two lenses at one Dockerfile, CI job, manifest or server-config line and no pair at a code
+  sink; on another it paired the unpinned test image two lenses reported at one Helm template line, which the rule
+  above left two findings. Of its pairs judged from their records, over several targets, nearly all were one finding
+  and the rest two checks at one Dockerfile `FROM` line, an unpinned tag and no `USER`, so each pair is still judged.
+  Every page pair it listed on the runs judged was at a site's `index.html` shell, and no other page counts; an
+  `index.html` under a template directory stays out: one run held one disclosure at such a served template twice, once
+  for each of two servers' `GET /` routes that render it — one route to the list, so the routes rule could not keep
+  them apart — and the pairing would have listed the two as one pair. A route a cell names ends at the sentence around
+  it: on one run a cell ending `… that calls POST /x.` read as the route `/x.`, the two lenses' cells for one mutable
+  job image named two routes with none in common, and the pair was never listed; a trailing `.`, `:`, `!` or quote is
+  the sentence's, while a `?` stands as written — a route's own optional marker (`GET /:id?`) looks the same as a
+  question's — and so does an ellipsis. Two lenses file one configuration defect under two classes as well: an
+  unpinned base image reported as a container finding and as a supply-chain one at one `FROM` line was never listed,
+  `near` needing one entry point. Listing another class at one configuration line unless the list places the entry
+  points apart added pairs over the saved runs of every target, and judged from their records, most were one defect
+  under two names, a few two checks at one line — a consent gate and a missing integrity check on one `<script>`, a
+  missing policy and a missing frame guard — and some could not be read, so each such pair is still judged. A
+  `distinct` clause is judged in its own pair: one writer answered every pair the checker listed with one clause,
+  `separate entry points, sink operations, classes, or guards`, merged none — a build secret two lenses reported at
+  one Dockerfile line among them — and the recheck read 0; over the earlier runs' answers a clause sometimes answered
+  more than three pairs, but always over one class pair, while one fresh run's clause answered most of its pairs over
+  many class pairs.
 - **A NEEDS CONTEXT judgement in a worker's clearances is listed by the checker and answered by the writer, because
-  one run's report left two such candidates out**: a worker that cannot decide a candidate without a fact outside the
-  repository writes NEEDS CONTEXT in prose, and the writer's hand-off harvest brought five bullets of such judgements into
-  the Unverifiable section and left out a message-chosen sender address one worker called an `Unverifiable candidate` and
-  a secret carried in a URL query another judged NEEDS CONTEXT. Reading the sink out of the prose was measured and
-  rejected: over sixty-four such passages of the earlier runs, thirty cite no `path:line`, and of nineteen whose cited
-  line no report section held, the `path:line` nearest the words was the judgement's sink in ten, so the checker lists
-  the lines — telling a line that names such a judgement is reliable where finding its sink is not — and the writer, who
-  reads them, names the sink. The `mention:` answer is the escape, and is guarded like a `distinct` clause: one text
-  naming no line or id over three or more lines of two or more workers. An observation names its sink, so it stands even
-  when one missing fact — an edge's header policy, a sending identity's policy — decides several. Three simulated writers
-  answering sixty-one such lines on three runs wrote no answer the checker refused, and each wrote `carried by` after the
-  sink's cite, which 2.25.9 read as an observation and never tested: 2.25.10 reads the cite and then the id, any id the
-  report gives a candidate — a body record, a heading's, an Unverifiable entry's — as older reports number them too. A
-  fourth review found what 2.25.10 still let pass or lose: a colon or a bracket between the cite and `carried by` read
-  as an observation, so a made-up id passed; a line of several answers was read only to its first; a worker record whose
-  heading ended with its `[UNVERIFIABLE]` tag, or a clearance calling a candidate UNVERIFIABLE, was not listed — one
-  run held such a record — and a missing fact opening with the words "carried by" was refused. 2.25.11 reads past the
-  separator, every answer of a line, every id after a `carried by` that bears a prefix the report's ids use — so a
-  weakness number or a hash name beside it is text, as a fifth review asked — and lists those lines; the eight
-  simulated writers' answers read as before. Two simulated repairs, given only the checker's `fix:` text, cleared six
-  kinds of wrong answer in one round each; 2.25.12 tells a line with no answer from one answered twice and says what to
-  do with an answer at no listed line, and the paragraph says an earlier report's answers are not copied — a run whose
-  worker lines moved by two read thirteen of fourteen copied answers as at no listed line, the fourteenth on a line it
-  did not judge. Ten simulated writers and repairs on the scan's own model answered 143 lines with one refusal the
-  rules did not make: a `mention:` that listed, after a `; `, the line keys it restates, each read as a file's cite —
-  2.25.13 reads a line key as the line it names.
-- **The Executive Summary counts the Unverifiable entries and names them, because one run's report held ten of them
-  two thousand lines down while its summary table showed only the five severities**: a reader of the start of the
-  report saw what was found and not what could not be decided — a sender identity's policy, a template's HTML context,
-  a deployment's approvals — though each entry names the fact that would decide it. The row stands after Total, which
-  counts findings and not these, and the sentences name each entry by its id; its Confirmed and Likely cells read
-  `n/a`, as an entry has neither tag. An UNV id on a line no entry opens fails the item when the row is absent or counts
-  more than the entries read, as a review's entry headings `UNV-001. <title>` were read as no entry and the hint asked
-  for `| Unverifiable | 0 |` over nine of them.
-- **A phrase inside an absence claim does not make a configuration clearance, and a dotfile's cite after `; ` keeps its
-  dot, because one run's writer was told to rewrite as a finding the clearance `no … or vendor non-production endpoint
-  surface in this partition` — a class found absent, with no sink to rewrite — and to re-form five honest answers citing
-  `.gitlab-ci.yml:37` after a `; `, read as `gitlab-ci.yml:37`**: across 1587 worker files three lines are such absence
-  claims, all of that class, and every clearance resting on `disabled by default` or a test-only `non-production` caller
-  still counts. A report written before reads either count.
+  one run's report left such candidates out**: a worker that cannot decide a candidate without a fact outside the
+  repository writes NEEDS CONTEXT in prose, and the writer's hand-off harvest brought some such judgements into the
+  Unverifiable section and left out a candidate one worker called an `Unverifiable candidate` and another that a
+  second worker judged NEEDS CONTEXT. Reading the sink out of the prose was measured and rejected: over such passages
+  of the earlier runs, many cite no `path:line`, and of those whose cited line no report section held, the `path:line`
+  nearest the words was often not the judgement's sink, so the checker lists the lines — telling a line that names
+  such a judgement is reliable where finding its sink is not — and the writer, who reads them, names the sink. The
+  `mention:` answer is the escape, and is guarded like a `distinct` clause: one text naming no line or id over three
+  or more lines of two or more workers. An observation names its sink, so it stands even when one missing fact — a
+  proxy's header policy, a provider's policy — decides several. Simulated writers answering such lines on several runs
+  wrote no answer the checker refused, and each wrote `carried by` after the sink's cite, which 2.25.9 read as an
+  observation and never tested: 2.25.10 reads the cite and then the id, any id the report gives a candidate — a body
+  record, a heading's, an Unverifiable entry's — as older reports number them too. A later review found what 2.25.10
+  still let pass or lose: a colon or a bracket between the cite and `carried by` read as an observation, so a made-up
+  id passed; a line of several answers was read only to its first; a worker record whose heading ended with its
+  `[UNVERIFIABLE]` tag, or a clearance calling a candidate UNVERIFIABLE, was not listed — one run held such a record —
+  and a missing fact opening with the words "carried by" was refused. 2.25.11 reads past the separator, every answer
+  of a line, every id after a `carried by` that bears a prefix the report's ids use — so a weakness number or a hash
+  name beside it is text, as a further review asked — and lists those lines; the simulated writers' answers read as
+  before. Simulated repairs, given only the checker's `fix:` text, cleared each kind of wrong answer in one round;
+  2.25.12 tells a line with no answer from one answered twice and says what to do with an answer at no listed line,
+  and the paragraph says an earlier report's answers are not copied — a run whose worker lines moved read nearly every
+  copied answer as at no listed line, the rest on a line it did not judge. Simulated writers and repairs on the scan's
+  own model answered such lines with one refusal the rules did not make: a `mention:` that listed, after a `; `, the
+  line keys it restates, each read as a file's cite — 2.25.13 reads a line key as the line it names.
+- **The Executive Summary counts the Unverifiable entries and names them, because one run's report held them far down
+  the report while its summary table showed only the five severities**: a reader of the start of the report saw what
+  was found and not what could not be decided — a provider's policy, a template's HTML context, a deployment's
+  settings — though each entry names the fact that would decide it. The row stands after Total, which counts findings
+  and not these, and the sentences name each entry by its id; its Confirmed and Likely cells read `n/a`, as an entry
+  has neither tag. An UNV id on a line no entry opens fails the item when the row is absent or counts more than the
+  entries read, as a review's entry headings `UNV-001. <title>` were read as no entry and the hint asked for
+  `| Unverifiable | 0 |` over the entries the report held.
+- **A phrase inside an absence claim does not make a configuration clearance, and a dotfile's cite after `; ` keeps
+  its dot, because one run's writer was told to rewrite as a finding the clearance
+  `no … or vendor non-production endpoint surface in this partition` — a class found absent, with no sink to rewrite —
+  and to re-form honest answers citing `.env:3` after a `; `, read as `env:3`**: across the earlier runs' worker files
+  only a few lines are such absence claims, all of that class, and every clearance resting on `disabled by default` or
+  a test-only `non-production` caller still counts. A report written before reads either count.
 - **A pair one of whose records is merged into the block linked to the other reads `linked`, because one run held three
   records of one defect over two keys** — a webhook record holding the ledger key, linked to a HIGH IaC record, and a
   second IaC record merged into that one — and its third pair had no answer the table bore out: not `merged into` (the
   webhook record stays `body`), not `linked` (one row merged), and `distinct` untrue. The writer and the repair left the
   mismatch standing rather than answer falsely; the link is now read between the two kept blocks. A review then found the
   link passing while the kept records' own pair read `distinct`: the kept pair's own answer is read now.
-- **One missing check of one entry point is one finding, its other sink lines on an `Also at:` line, because one handler
-  was filed as thirty-one findings, one per field it read, then sixty-seven across its two consumers** — every one closed
-  by one shape check at its top — and the ledger kept each line as a key the next run had to re-find or carry, so the
-  split held and spread. The base skill's identity rule now collapses one missing check (a catch-all — per-record error
-  isolation — groups nothing, as a test worker that folded a wrong-value bug under it showed); at its class each
-  `Also at:` line is a key its record holds — re-found, never a row of its own — a grouped block in a newer report keeps
-  the older per-line blocks from being carried back, and items (12), (40) and (46) read the line as (24) and (26) do.
-- **A direct call of a triggered function is no entry point of its own because one run filed sixty-eight findings that
-  way**: its writer gave every finding at a queue handler a second, promoted row at the handler's direct invocation —
-  four handlers, three of which read only the queue's records — and each promoted row stood at a body row's sink, class
-  and severity, so the report held a copy of each such finding with nothing added. The invoke API's caller holds only
-  the permission to invoke, as the queue's producer holds the permission to send, so it is named on the queue's
-  finding; a handler's own branch for an event without the queue's records stays an entry point, which STEP 1
-  lists, and item (33) reads each promoted row's entry point as
-  the list entry it names, so a promoted row at a body row's entry, sink and class reads as one finding counted twice.
-  Compared as written, the cells caught only the copy whose wording matched; the list is the authority.
-- **A group's `Also at:` line is read against the other records before STEP 3, because workers put a line that needs
-  a fix of its own on a schema group's line** — a decoder's depth limit, a helper passed a string where it reads a
-  mapping — nine such lines in five worker files of earlier runs and test runs, under two models, each the error of
-  the one worker whose file held both records. The writer, told to merge a group overlap and by the base skill to keep
-  such a line off a group's, could do neither: two runs stopped on item (48), one re-running the grouping workers in a
-  repair and the other refused its re-run, and a third run merged the decoder-depth finding into the group and read
-  clean. Within one file the gate's `groups` field re-runs the worker. Across files the same reading found thirty-nine
-  overlap lines — some thirty pairs, nine read from both sides — and none a false match: twenty-eight lines two lenses
-  grouping one check, which the writer merges, and eleven a line with a fix of its own, five of them close calls — so
-  `--overlaps` lists them and the session judges each, re-running the grouping worker only where the other record
-  needs a fix of its own; simulated sessions judging twenty-seven of those lines three times agreed with that
-  reading on seventy-five of eighty-one judgements, twenty-four of twenty-seven under this text, each miss a re-run
-  more.
+- **One missing check of one entry point is one finding, its other sink lines on an `Also at:` line, because one
+  handler was filed as one finding per field it read, then as more across its two consumers** — every one closed by
+  one shape check at its top — and the ledger kept each line as a key the next run had to re-find or carry, so the
+  split held and spread. The base skill's identity rule now collapses one missing check (a catch-all — per-record
+  error isolation — groups nothing, as a test worker that folded a wrong-value bug under it showed); at its class each
+  `Also at:` line is a key its record holds — re-found, never a row of its own — a grouped block in a newer report
+  keeps the older per-line blocks from being carried back, and items (12), (40) and (46) read the line as (24) and
+  (26) do.
+- **A direct call of a triggered function is no entry point of its own because one run filed many findings that way**:
+  its writer gave every finding at a queue handler a second, promoted row at the handler's direct invocation — most
+  such handlers read only the queue's records — and each promoted row stood at a body row's sink, class and severity,
+  so the report held a copy of each such finding with nothing added. The invoke API's caller holds only the permission
+  to invoke, as the queue's producer holds the permission to send, so it is named on the queue's finding; a handler's
+  own branch for an event without the queue's records stays an entry point, which STEP 1 lists, and item (33) reads
+  each promoted row's entry point as the list entry it names, so a promoted row at a body row's entry, sink and class
+  reads as one finding counted twice. Compared as written, the cells caught only the copy whose wording matched; the
+  list is the authority.
+- **A group's `Also at:` line is read against the other records before STEP 3, because workers put a line that needs a
+  fix of its own on a schema group's line** — a decoder's depth limit, a helper passed a string where it reads a
+  mapping — such lines turned up in worker files of earlier runs and test runs, under more than one model, each the
+  error of the one worker whose file held both records. The writer, told to merge a group overlap and by the base
+  skill to keep such a line off a group's, could do neither: runs stopped on item (48), one re-running the grouping
+  workers in a repair and another refused its re-run, and a further run merged the decoder-depth finding into the
+  group and read clean. Within one file the gate's `groups` field re-runs the worker. Across files the same reading
+  found overlap lines, some read from both sides, and none a false match: most two lenses grouping one check, which
+  the writer merges, and the rest a line with a fix of its own, some of them close calls — so `--overlaps` lists them
+  and the session judges each, re-running the grouping worker only where the other record needs a fix of its own;
+  simulated sessions judging those lines agreed with that reading on nearly every judgement, each miss a re-run more.
 - **A repository is cut into one partition per 12,000 lines, and its lock files into partitions of their own that
   hardening-platform and access-auth read, because workers stop at what they cannot read.** Workers' first attempts
-  sealed nearly every partition under 15,000 lines, far fewer between 15,000 and 25,000 and none above — they stopped at a
-  large lock file, or deep in an oversized partition, and every stop was re-run at a high cost. A second model sealed the
-  same partitions and claimed more lines read than it could have, a large lock file twice. Every finding sited in a lock
-  file was supply chain or dependency confusion, and those citing a lock-file line elsewhere were nearly all supply
-  chain, so the lock files go to the lens holding those classes, and to access-auth for a registry credential in a
-  resolved URL, cut at the same cap, and the others look a version up as their references already do. The files over the
-  cap outside lock files — fixtures, data, diagrams, snapshots, specifications, an agent script — held no finding; they
-  are read as ranges, not dropped, because no size tells such a file from code. A digest of the lock files was built and
-  dropped: no extractor could be shown complete over their formats. Three partitions stay the floor, so a repository
-  under 36,000 lines outside lock files is cut into three as before, its lock files apart. The command cuts p1 to p<N>
+  sealed nearly every partition under 15,000 lines and far fewer above it — they stopped at a large lock file, or deep
+  in an oversized partition, and every stop was re-run at a high cost. A second model sealed the same partitions and
+  claimed more lines read than it could have, a large lock file twice. Every finding sited in a lock file was supply
+  chain or dependency confusion, and those citing a lock-file line elsewhere were nearly all supply chain, so the lock
+  files go to the lens holding those classes, and to access-auth for a registry credential in a resolved URL, cut at
+  the same cap, and the others look a version up as their references already do. The files over the cap outside lock
+  files — fixtures, data, diagrams, snapshots, specifications, an agent script — held no finding; they are read as
+  ranges, not dropped, because no size tells such a file from code. A digest of the lock files was built and dropped:
+  no extractor could be shown complete over their formats. Three partitions stay the floor, so a repository under
+  36,000 lines outside lock files is cut into three as before, its lock files apart. The command cuts p1 to p<N>
   because STEP 1 sessions cutting by hand under the earlier text, each from its own entry list, failed their checks in
   different ways: a partition over the ceiling with no row any other partition could take, then one over with a row
   that could move, then one just over the entry cap with no file over it by itself. One exchange — a large fixture for
-  a few entry-free rows of another partition — would have balanced the first two, a step the hand procedure lacked, and
-  a cut a session makes by hand is one no checker can replay, so a cut shaped to pass, or to earn a tag, is not seen.
-  The command's cut of each of those entry lists held every partition under the ceiling, its entry cap passed only by
-  one file over it by itself, and split far fewer directories across partitions than the sessions did; on other
-  repositories it needed no exchange and few moves. N rises past the line floor when the command's cut would leave a
-  partition over 15,000 lines — four 8,000-line files at three partitions take four, eleven 7,600-line files take
-  eleven, from a floor of seven or nine — because whole rows over half the ceiling can outnumber the partitions, and a
-  partition that size is one workers often stop in; on every real scope N stayed at its floor.
-  Fullest fit joined the search in 2.27.1: on synthetic scopes of big generated files beside directories of small ones,
-  the fewest-lines cut failed some beyond one-file tags that a randomized search lowered, and fullest fit reaches the
-  randomized search's excess on all of them and raises none elsewhere; a cut the fewest-lines search leaves at no excess
-  is unchanged, and so is every real scope's cut. The four cuts are compared as `--checks` reads them because the
-  search's own count let a partition holding a row that must end alone take another entry-bearing row for that row's
-  entry points alone, and so kept a cut one entry point further over in rare entry-tight scopes; compared so, no scope
-  of big rows and tight entry lists ends further over than at 2.27.0. Fit runs at the N the fewest-lines cut ends at:
-  left to set N, a fit cut just under 15,000 lines stopped the rise one partition early in some scopes of big rows,
-  some of them over the ceiling where the next N passed. The rise starts at a lower bound the rows' sizes give — j + 1
-  rows over 15,000 / (j + 1) lines never share a partition under 15,000 — which ends where counting up from the floor
-  does, in seconds where counting up took minutes on hundreds of big rows.
+  a few entry-free rows of another partition — would have balanced the first two, a step the hand procedure lacked,
+  and a cut a session makes by hand is one no checker can replay, so a cut shaped to pass, or to earn a tag, is not
+  seen. The command's cut of each of those entry lists held every partition under the ceiling, its entry cap passed
+  only by one file over it by itself, and split far fewer directories across partitions than the sessions did; on
+  other repositories it needed no exchange and few moves. N rises past the line floor when the command's cut would
+  leave a partition over 15,000 lines — four 8,000-line files at three partitions take four, eleven 7,600-line files
+  take eleven, from a floor of seven or nine — because whole rows over half the ceiling can outnumber the partitions,
+  and a partition that size is one workers often stop in; on every real scope N stayed at its floor. Fullest fit
+  joined the search in 2.27.1: on synthetic scopes of big generated files beside directories of small ones, the
+  fewest-lines cut failed some beyond one-file tags that a randomized search lowered, and fullest fit reaches the
+  randomized search's excess on all of them and raises none elsewhere; a cut the fewest-lines search leaves at no
+  excess is unchanged, and so is every real scope's cut. The four cuts are compared as `--checks` reads them because
+  the search's own count let a partition holding a row that must end alone take another entry-bearing row for that
+  row's entry points alone, and so kept a cut one entry point further over in rare entry-tight scopes; compared so, no
+  scope of big rows and tight entry lists ends further over than at 2.27.0. Fit runs at the N the fewest-lines cut
+  ends at: left to set N, a fit cut just under 15,000 lines stopped the rise one partition early in some scopes of big
+  rows, some of them over the ceiling where the next N passed. The rise starts at a lower bound the rows' sizes give —
+  j + 1 rows over 15,000 / (j + 1) lines never share a partition under 15,000 — which ends where counting up from the
+  floor does, in seconds where counting up took minutes on hundreds of big rows.
 - **Test code and prose docs have partitions of their own, and the browser lens reads its own family's files, because
   the base lenses found nothing there.** In earlier runs no worker record stood in a file the test-name rule names and
   few in docs files, nearly all from the two lenses that still read them; of the browser lens's records that no base
@@ -2354,17 +2364,17 @@ sink several routes reach keeps every route; each carried block says on its seco
   monorepo's plan named only one of its React packages, and a family taken from it would have left most browser
   registrations to no browser worker, while a rule for markup alone would have left many more outside. Every narrower
   reading tried in review missed a package that ships to a browser: the cell alone missed a React package; a list of
-  the packages that ship missed CRA and Angular SSR behind express and let a test runner's bundler take the lens off the
-  source partitions; and a rule leaving out a server's own package missed one pairing a server framework and an email or
-  PDF renderer with a browser client, an Nx root, a Bun build and a bundler hoisted to the workspace root — while on the
-  real scopes that rule left out an API package. A missed package is a lost file where an extra one is a worker, and a
-  family that would pack into as many partitions as the source cut or more — a PHP or JSP application's, whose pages
-  are its code — gets none, so browser never takes more workers than the source partitions, which are never more than
-  the partitions 2.26.13 gave it unless N rises past the line floor, which it did on no real scope. The rules stay
-  narrow on purpose: a `tests/` or `e2e/` directory moves nothing by itself — many findings stood in CI files under
-  such trees — names a production module can carry (`test_*.py`, `*Test.java`) move only under a test directory
-  (`*_test.dart`, from 2.27.1 on, under a `test`, `tests`, `integration_test` or `test_…` directory outside a package's
-  `lib/`: in public Flutter repositories nearly all sat under a test directory or under `test_driver/`,
+  the packages that ship missed CRA and Angular SSR behind express and let a test runner's bundler take the lens off
+  the source partitions; and a rule leaving out a server's own package missed one pairing a server framework and an
+  email or PDF renderer with a browser client, an Nx root, a Bun build and a bundler hoisted to the workspace root —
+  while on the real scopes that rule left out an API package. A missed package is a lost file where an extra one is a
+  worker, and a family that would pack into as many partitions as the source cut or more — a PHP or JSP application's,
+  whose pages are its code — gets none, so browser never takes more workers than the source partitions, which are
+  never more than the partitions 2.26.13 gave it unless N rises past the line floor, which it did on no real scope.
+  The rules stay narrow on purpose: a `tests/` or `e2e/` directory moves nothing by itself — many findings stood in CI
+  files under such trees — names a production module can carry (`test_*.py`, `*Test.java`) move only under a test
+  directory (`*_test.dart`, from 2.27.1 on, under a `test`, `tests`, `integration_test` or `test_…` directory outside
+  a package's `lib/`: in public Flutter repositories nearly all sat under a test directory or under `test_driver/`,
   `test_goldens/`, `test_benchmarks/` or `test_app/`; the few under an agent directory stay source by the
   agent-configuration rule, and the few under a package's `lib/` — an environment module reading cloud keys and a
   test-utility package's library, under no test directory, and, by the `lib/` rule, a card test filed in a `tests/`
@@ -2373,5 +2383,14 @@ sink several routes reach keeps every route; each carried block says on its seco
   would read that library as test), `.mdx` and the trees an application serves are never prose, agent skills
   (`.agents/skills/*/SKILL.md`) and prompts are never prose, and cloud-infra was measured and kept on every source
   partition, many of its records outside CI, IaC and configuration files being found by no base lens. On the largest
-  scopes this cuts a full scan's workers by a third or more; a repository with docs and no lock files, test code or
-  browser family gains two workers, the docs partition's readers.
+  scopes this cuts a full scan's workers substantially; a repository with docs and no lock files, test code or browser
+  family gains two workers, the docs partition's readers.
+- **A hop merge needs no listed pair because two lenses often report one missing check at two points of one request
+  path,** where the route lacks the check and where the downstream call trusts what it let through, and the pair list
+  keys on one sink: such records stayed apart, and a writer that merged them had no line the recheck would accept.
+  Listing every pair of records on one data path would make every run judge pairs that are mostly two findings, so the
+  merge is the writer's to declare, read against the records' own `Flow:` lines, and nothing more is listed.
+- **Two list entries registered on one line stay two entry points,** because one handler serving two methods is
+  listed once per method: a recheck that resolved a cited line to its first entry read the second method's finding
+  as the first's duplicate. A cell is read as the entry whose routes or whole name it names, and as written when it
+  names neither.
