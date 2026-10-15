@@ -1,7 +1,7 @@
 ---
 name: idor
-version: "0.3"
-description: IDOR/BOLA testing for object-level authorization failures and cross-account data access
+version: "0.4"
+description: IDOR/BOLA testing for object-level authorization failures and cross-account data access, including an identifier checked from one request source but loaded from another, and field or relation selection taken from the request
 ---
 
 # IDOR
@@ -48,6 +48,7 @@ IDOR occurs when an authenticated user changes a user-supplied identifier (path 
 **Expansion/Projection Knobs**
 - `fields`, `include`, `expand`, `projection`, `with`, `select`, `populate`
 - These parameters frequently bypass authorization inside resolvers or serializers
+- Code shapes: see "Field and relation selection taken from the request" below
 
 ## High-Value Targets
 
@@ -160,6 +161,43 @@ def download_bill(request, bill_id):
 ### Cosmetic ownership check (validated scope ≠ sink argument)
 
 An ownership/tenant check on parameter `S` does **not** clear IDOR when the lookup/outbound call uses a **different** argument — especially a hardcoded wildcard (`"~"`, `"*"`, `-1`, `"all"`) that selects broader objects than `S` authorized. Trace the **same variable** from the check into the query/RPC arguments. Cross-ref `privilege_escalation.md` (cosmetic validation).
+
+### Identifier checked from one request source, loaded from another
+
+The same name can arrive in the path, the query string, the body and headers, and the check and the load may read different ones. Middleware authorizes `req.params.id` while the handler loads `req.body.projectId`; or one side reads a merged accessor whose precedence picks the other source: Flask `request.values` returns the query-string value over the form value, Rails `params` lets path parameters override the query string, which overrides the body, and PHP `$_REQUEST` follows `request_order`, later sources overriding earlier ones. The attacker passes the check with an object they may access and names the victim's object in the other source.
+
+```js
+// VULN — membership is checked on the path id; the export loads the body id
+app.post('/projects/:id/export', requireMember('id'), async (req, res) => {
+  res.json(await Project.findByPk(req.body.projectId ?? req.params.id));
+});
+
+// SAFE — one source for the identifier, the one the check used
+app.post('/projects/:id/export', requireMember('id'), async (req, res) => {
+  res.json(await Project.findByPk(req.params.id));
+});
+```
+
+**SAST signal**: a guard and the lookup it protects reading the identifier through different accessors (`params` vs `body`/`query`, `form` vs `values`, a route value vs a bound model property). **SAFE**: read the identifier once from one named source, pass that value to both the check and the load, and reject a request whose other sources carry a different value.
+
+### Field and relation selection taken from the request
+
+`fields`, `select`, `include`, `expand` and `populate` values passed straight to the ORM let the caller choose columns and related records the endpoint's checks never considered. Mongoose `.select(req.query.fields)` accepts a `+password` entry, which forces in a path the schema marks `select: false`; `.populate(req.query.include)` loads whichever referenced document the caller names; Sequelize `attributes: req.query.fields.split(',')` returns any column, including password hashes and tokens. Ownership of the top-level record does not cover the extra fields or the related records.
+
+```js
+// VULN — the caller picks fields and relations; "+passwordHash" and "owner" come back
+const doc = await Doc.findOne({ _id: req.params.id, team: req.user.team })
+  .select(req.query.fields)
+  .populate(req.query.include);
+
+// SAFE — map the request onto an allowlist per role
+const FIELDS = { member: ['title', 'body', 'updatedAt'], admin: ['title', 'body', 'updatedAt', 'createdBy'] };
+const asked = String(req.query.fields || '').split(',').filter(f => FIELDS[req.user.role].includes(f));
+const doc = await Doc.findOne({ _id: req.params.id, team: req.user.team })
+  .select(asked.length ? asked : FIELDS[req.user.role]);
+```
+
+**SAST signal**: a request value reaching `.select(`, `.populate(`, `attributes:`, `include:`, a projection, or a serializer's field list without an allowlist. Recon: `rg -n "\.(select|populate)\(\s*req\.|attributes:\s*req\.|include:\s*req\.|fields\s*=\s*req\." --glob '*.{js,ts}'`.
 
 ### File/Object Storage
 

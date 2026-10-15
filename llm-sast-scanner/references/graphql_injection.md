@@ -1,7 +1,7 @@
 ---
 name: graphql_injection
-version: "0.2"
-description: Detect GraphQL security issues including document injection, resolver-layer taint to SQL/NoSQL/RCE/SSRF/XSS sinks, schema-level input validation (weak/over-permissive argument typing, custom-scalar coercion, missing semantic validation), introspection and information disclosure, authorization gaps, CSRF/request forgery, WebSocket transport parity, and operation-name injection — structural DoS covered in graphql_dos.md.
+version: "0.3"
+description: Detect GraphQL security issues including document injection, resolver-layer taint to SQL/NoSQL/RCE/SSRF/XSS sinks, default/fallback field resolution reaching reflective method dispatch (undeclared-field-name execution via validate-vs-execute document divergence), per-operation shared-state bleed across batched operations (one operation running or returning another's document), schema-level input validation (weak/over-permissive argument typing, custom-scalar coercion, missing semantic validation), introspection and information disclosure, authorization gaps, CSRF/request forgery, WebSocket transport parity, and operation-name injection — structural DoS covered in graphql_dos.md.
 ---
 
 # GraphQL Security Issues
@@ -20,6 +20,8 @@ GraphQL APIs present a distinct attack surface that differs significantly from R
 10. **Custom scalar / directive handler gaps & weak input typing** — pass-through scalar coercion; directive handlers executing string templates with user-controlled args; over-permissive argument typing (`String`/`ID`/`JSON` where enum/validated-scalar/input-type fits) and missing semantic validation that push input validation downstream.
 11. **ReDoS in resolvers** — GraphQL arguments passed into server-side regex without bounds (cross-ref `graphql_dos.md` for search-arg amplification).
 12. **Structural DoS** — depth/complexity/alias/batch/pagination/timeouts — see `graphql_dos.md`.
+13. **Default/fallback field resolution reaching reflective method dispatch** — a client-influenceable field *name* (not declared in the schema) reaches a default/fallback resolver that dispatches it as a method/attribute on the resolved object, usually enabled by a document transform that validates a stripped document but executes the original (undeclared-field-name execution → arbitrary zero-arg method invocation outside the schema's exposed-field allowlist).
+14. **Per-operation state stored in shared/long-lived fields (batched-request cross-operation bleed)** — per-operation state (document, `operationName`, variables, trace/span) held on a shared tracer/plugin/singleton or class/global and reused across a batched/multiplexed request (or across requests), so one operation runs or returns another operation's document, variables, or result.
 
 ## GraphQL Document Injection (Operation String Injection)
 
@@ -276,6 +278,101 @@ ComputedDirective: {
 ```
 
 **SAFE**: treat directive handlers like resolvers — parameterized sinks, role allowlists, no eval; static directive args only in SDL.
+
+## Default / Fallback Field Resolution Reaching Reflective Method Dispatch
+
+Most GraphQL server libraries resolve a field that has **no explicit resolver** by looking up a member of the same name on the resolved object. In graphql-ruby a field without a resolver is resolved by calling that method on the object via `public_send` — and a `fallback_value:` is only consulted when the object does **not** respond to the method, so it is *not* a safety net. The same shape exists anywhere a default resolver reflectively dispatches a field name and **invokes** it on the parent object: graphql-ruby `public_send` (a bare zero-arg method) and graphql-java `PropertyDataFetcher` (a public zero-arg method named like the field) are the clearest cases, and graphql-js reads `source[fieldName]` and invokes it if it is a function. Several default resolvers are **not** exposed to a bare zero-arg method and are false positives: Python graphql-core calls a callable attribute as `value(info, **args)`, so only a method that **accepts `info`** is reachable this way, not a plain zero-arg method; graphene and strawberry return the attribute **without calling it**; and gqlgen (Go) / typed Hot Chocolate bind every field to a generated or explicitly declared resolver, so there is no reflective default. Look for the enabler (below) only where a reflective default resolver actually invokes the client-supplied name.
+
+This is safe for the fields the schema actually declares. It becomes **arbitrary zero-argument method invocation on live objects** when an attacker can get a field **name that is not declared in the schema** to reach execution: the client-chosen name is dispatched as a method on whatever object is currently resolved (a model/record, a service object, the context), turning a read surface into a call surface and bypassing the schema's implicit allowlist of exposed fields. Impact scales with what those zero-arg methods do — state-changing, persistence, or lifecycle methods on a domain object are the high-severity case.
+
+### How an undeclared field name reaches execution
+
+The enabler is almost always a **document transform that diverges validation from execution**: a custom directive handler, AST visitor, query rewriter, tracer, or forward/backward-compatibility filter that **removes or rewrites selections before static validation** but then **executes the original, un-rewritten document**. Static validation passes against the stripped document; the removed (unknown) field is still present at execution, where it falls through to the default/fallback resolver and the reflective dispatch runs.
+
+Signals of the divergence:
+- A directive (often version-, feature-, or capability-gated) whose handler **deletes field nodes** so the query validates, paired with execution of the un-filtered document.
+- A custom "fallback field" / "unknown field" factory that builds a field object **without an explicit resolver** (relying on the default method dispatch) for any name the client supplies.
+- Validation and execution run on **different** document/AST objects.
+- The dispatched name is used **verbatim**: the client-supplied field name is passed to `GraphQL::Schema::Field.new(name:)` and becomes the method symbol unchanged (no case conversion), then invoked via `public_send` on the resolved object — so it fires only when the name **exactly matches a real Ruby method** the object responds to.
+
+**Grep seeds**:
+```bash
+# fallback / unknown-field resolution built without an explicit resolver
+rg -n "fallback_field|fallback_value|unknown_field|future_field|method_missing" --glob '*.{rb,py,js,ts}'
+rg -n "Schema::Field\.new" --glob '*.rb'
+# reflective dispatch in field/resolver plumbing
+rg -n "public_send|\.send\(|__send__|respond_to\?|getattr\(" --glob '*.{rb,py}' -C2
+# graphql-ruby AST transform that DELETES field nodes before validation, then executes the original
+rg -n "DELETE_NODE|Language::Visitor|selections\.(reject|select|delete)|delete_node|remove_node" --glob '*.rb'
+# (language-agnostic tell, not greppable as one token: the document/AST that is validated is a different object than the one executed)
+rg -n "@\w+\(version:|introduced|since:|minVersion|feature_flag" --glob '*.{rb,graphql,graphqls}'
+```
+
+**VULN** (a field is built for a client-supplied name with no resolver, so the default method dispatch runs):
+```ruby
+def resolver_for_unknown_field(name:)
+  # no resolver block / resolver method -> graphql-ruby dispatches `name` as a
+  # method on the resolved object via public_send; fallback_value is skipped
+  # whenever the object happens to respond to `name`.
+  GraphQL::Schema::Field.new(owner: self, name: name, type: some_type)
+end
+```
+
+**SAFE**:
+- Resolve unknown/undeclared fields through an **explicit resolver that returns a constant** (e.g. a resolver that always returns `nil`) and never dispatches the name to the object — do not rely on `fallback_value:`, which the default dispatch bypasses.
+- **Allowlist** any dynamically-named field against the fields actually declared on the current type, and reject names outside it instead of resolving them.
+- **Validate the exact document you execute** — never strip or rewrite selections for validation and then execute the original. If a transform must drop fields, execute the transformed document, not the original.
+
+### TRUE POSITIVE
+- A client-influenceable field name unknown to the schema reaches a default/fallback resolver that reflectively dispatches it to a method on the resolved object, **and** a path exists for an undeclared name to survive validation (validate-stripped/execute-original divergence, `method_missing`-style resolution, or an explicit unknown-field factory with no resolver). Rate severity by what the reachable objects' zero-arg methods do.
+
+### FALSE POSITIVE
+- Default method resolution for fields that **are** declared in the schema — the normal, intended field→method mapping; no undeclared name can reach it.
+- A fallback/unknown-field path that resolves through an explicit constant resolver, or rejects names not declared on the type (no reflective dispatch of the client-supplied name).
+- Validation and execution run on the **same** document and the schema rejects unknown fields before execution.
+
+**Cross-refs**: `rce.md` (arbitrary method invocation as a code-execution sink), `business_logic.md` (a state-changing method reached outside its intended operation), `privilege_escalation.md` (invoking a method the schema never exposed).
+
+## Per-Operation State Stored in Shared / Long-Lived Fields (Batched-Request Cross-Operation Bleed)
+
+A single HTTP request can carry **multiple operations** (a batched / multiplexed request — an array of operation payloads, or `multiplex`-style execution). When a resolver, plugin, tracer, instrumentation hook, or middleware stores **per-operation state** (the current document/query, operation name, variables, or a trace/span object) in a field whose owner **outlives the operation** — an instance variable on a shared tracer/instrumentation instance, a class/module variable, a memoized singleton, or any object reused across operations — then operation *N* reads state left by operation *N-1*. This produces the **same validate-one-document / execute-another divergence** as the reflective-dispatch section above, reached through stale shared state instead of an AST transform: one operation **runs or returns another operation's document**, variables, or result.
+
+**Two scopes (rate severity accordingly):**
+- **Intra-batch (same client):** operations in one batched request share the stale field. A check keyed on that state — a persisted-query / allowlist match, a complexity or depth budget, or an authorization decision computed from "the current document/operation" — is evaluated against the **wrong** operation, so one operation's clearance is applied to a sibling operation in the same batch (integrity / control bypass).
+- **Cross-request (process-global owner):** when the owner is a long-lived singleton shared across requests (a boot-time tracer, a class variable, a pooled object), the stale state is **another user's** document, variables, or response — cross-user disclosure or operation confusion.
+
+**Vulnerable conditions:**
+- A tracer / instrumentation / plugin instance is created **once** (at schema or boot time) and stores the running operation's document / query / operation name / variables on `self`, then is reused for every operation in a batch or across requests.
+- Batched / multiplexed execution is enabled while per-operation context is held in a shared mutable field instead of being passed per operation.
+- Auth, allowlist, or cost decisions read "the current operation" back from a field that a sibling operation can overwrite before the decision is used.
+
+**Grep seeds:**
+```bash
+# batching / multiplex entry points
+rg -n "multiplex|allowBatchedHttpRequests|execute_batch|Array\.isArray\(\s*req\.body" --glob '*.{rb,js,ts,py,go}'
+# per-operation state written onto a shared tracer/instrumentation/plugin instance (reflective primitive varies by language)
+rg -n "@(document|query|operation|operation_name|variables|span)\s*=" --glob '*.rb'                        # Ruby instance var
+rg -n "(this|self)\.(document|query|operation|operationName|variables|span)\s*=" --glob '*.{js,ts,py}'      # JS/TS/Python
+rg -n "class \w*(Tracer|Instrumentation|Plugin|Extension|Trace)\b" --glob '*.{rb,js,ts,py}' -A3
+```
+
+**VULN** (one shared trace object records the running document; a sibling operation in the batch reads it back):
+```ruby
+class RequestTracer                      # built once, reused for every operation
+  def execute_query(query:)
+    @current_document = query.document    # per-operation state on a shared instance
+    yield
+  end
+  def current_document; @current_document; end   # stale across operations in the same batch
+end
+```
+
+**SAFE:**
+- Keep per-operation state in the **per-operation context** (the query/operation object the engine already passes), never on a shared tracer / plugin / global.
+- Make shared instrumentation **stateless**, or key its state by operation and clear it when the operation ends.
+- Compute auth / allowlist / cost decisions from the document actually being executed, passed explicitly — never read back from a mutable shared field.
+
+**Cross-refs**: `business_logic.md` (operation isolation / state bleed), `information_disclosure.md` (cross-user document/response leakage), `race_conditions.md` (shared mutable state across concurrent operations).
 
 ## Operation-Name as Injection Sink
 

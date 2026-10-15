@@ -1,7 +1,7 @@
 ---
 name: http_method_tamper
-version: "0.1"
-description: Detect HTTP method tampering vulnerabilities where GET requests trigger state-changing operations or method override headers/fields are accepted without restriction.
+version: "0.2"
+description: Detect HTTP method tampering vulnerabilities where GET requests trigger state-changing operations, method override headers/fields are accepted without restriction, or authorization covers only some verbs or content types (web.xml constraints and request matchers that list methods, HEAD running doGet, checks that depend on the request Content-Type).
 ---
 
 # HTTP Method Tampering
@@ -25,6 +25,64 @@ HTTP method tampering arises in three distinct scenarios:
 
 - REST APIs correctly using DELETE, PUT, PATCH via proper HTTP methods with CSRF protection.
 - Method override only enabled in a controlled, authenticated context with CSRF token validation.
+
+---
+
+## Authorization Scoped to Listed Verbs or Content Types (scenario 3)
+
+### Java EE / Jakarta `web.xml` constraints that name methods
+
+A `<web-resource-collection>` that lists `<http-method>` elements protects only the listed methods; every other method at that URL pattern is unconstrained by it. A collection with no `<http-method>` or `<http-method-omission>` covers all methods, and one with `<http-method-omission>` covers every method except the omitted ones.
+
+- **HEAD runs the GET code**: `HttpServlet.doHead` calls `doGet` by default (the body is discarded), and Spring MVC `@GetMapping` serves HEAD too. A constraint listing `GET` and `POST` leaves HEAD open, so a `doGet` that changes state, or response headers that carry data, are reachable without the role.
+- **Other verbs reach handlers mapped without a method**: Spring's `FrameworkServlet` sends any method outside `DELETE, HEAD, GET, OPTIONS, PATCH, POST, PUT, TRACE` straight to the dispatcher, and a `@RequestMapping` with no `method` matches every method, so `PUT`, `DELETE` or an arbitrary verb reaches it past a constraint that names `GET` and `POST`. A plain `HttpServlet` answers an unknown method with `501`, so for it only the standard verbs matter.
+- **Same shape in Spring Security**: `requestMatchers(HttpMethod.GET, "/admin/**").hasRole("ADMIN")` does not match HEAD or any other verb, so with `anyRequest().permitAll()` (or `authenticated()`) after it, those verbs skip the role check.
+
+```xml
+<!-- VULN — only GET and POST are constrained; HEAD, PUT, DELETE and other verbs are not -->
+<security-constraint>
+  <web-resource-collection>
+    <web-resource-name>admin</web-resource-name>
+    <url-pattern>/admin/*</url-pattern>
+    <http-method>GET</http-method>
+    <http-method>POST</http-method>
+  </web-resource-collection>
+  <auth-constraint><role-name>admin</role-name></auth-constraint>
+</security-constraint>
+
+<!-- SAFE — no method list, so every method needs the role; methods left uncovered anywhere are denied -->
+<deny-uncovered-http-methods/>
+<security-constraint>
+  <web-resource-collection>
+    <web-resource-name>admin</web-resource-name>
+    <url-pattern>/admin/*</url-pattern>
+  </web-resource-collection>
+  <auth-constraint><role-name>admin</role-name></auth-constraint>
+</security-constraint>
+```
+
+**Recon**: `rg -n '<http-method>|<http-method-omission>|deny-uncovered-http-methods' --glob '*.xml'`; `rg -n '(request|ant|mvc)Matchers\(\s*HttpMethod\.' --glob '*.{java,kt}'`; then check what HEAD and the unlisted verbs reach (`doGet` side effects, `@RequestMapping` without `method`). **Not this bug**: a collection with no method list, `<deny-uncovered-http-methods/>` in the descriptor, or a verb-scoped matcher followed by `anyRequest().denyAll()`.
+
+### Authorization that depends on the request's Content-Type
+
+The same action reachable under two content types can carry two policies. Spring `consumes` narrows a mapping by `Content-Type`, so `@PostMapping(path = "/settings", consumes = "application/json")` with `@PreAuthorize` and a sibling `@PostMapping(path = "/settings", consumes = "application/x-www-form-urlencoded")` without it serve the same action to anyone who sends a form body. In handler code, a check inside `if request.is_json:` (Flask; also true for `+json` types) or `if (req.is('application/json'))` (Express) is skipped when the client sends the same fields form-encoded.
+
+```js
+// VULN — the role check runs only for JSON bodies; a form-encoded POST updates the setting
+app.post('/settings', (req, res) => {
+  if (req.is('application/json') && !req.user.isAdmin) return res.sendStatus(403);
+  saveSettings(req.body);
+  res.sendStatus(204);
+});
+
+// SAFE — authorize before looking at the body format
+app.post('/settings', requireAdmin, (req, res) => {
+  saveSettings(req.body);
+  res.sendStatus(204);
+});
+```
+
+**Recon**: `rg -n 'consumes\s*=|is_json|req\.is\(|content_type|getContentType\(' --glob '*.{java,kt,py,js,ts}'` then compare the guards on each branch or sibling mapping of the same path.
 
 ---
 

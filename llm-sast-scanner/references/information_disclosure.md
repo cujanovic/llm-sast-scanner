@@ -1,7 +1,7 @@
 ---
 name: information_disclosure
-version: "0.5"
-description: Information disclosure testing covering error messages, debug endpoints, metadata leakage, source exposure, and serialization-redaction bypass / excessive data exposure (denylist as_json/toJSON failing open, Go pointer-receiver MarshalJSON skipped on by-value encode, malformed Go JSON omission tags)
+version: "0.6"
+description: Information disclosure testing covering error messages, debug endpoints, request-supplied debug switches, metadata leakage, source exposure, and serialization-redaction bypass / excessive data exposure (denylist as_json/toJSON failing open, Go pointer-receiver MarshalJSON skipped on by-value encode, malformed Go JSON omission tags)
 ---
 
 # Information Disclosure
@@ -36,6 +36,7 @@ Leaked information acts as a force multiplier for attackers — it maps the code
 - Debug pages: Django DEBUG, Laravel Telescope, Rails error pages, Flask/Werkzeug debugger, ASP.NET customErrors Off
 - Profiler endpoints: `/debug/pprof`, `/actuator`, `/_profiler`, custom `/debug` APIs
 - Feature/config toggles exposed in JS or headers
+- **Request-supplied debug switch honored in production**: a query, body, header or cookie flag (`?debug=1`, `?test_mode=true`, `X-Debug: 1`, a `debug` cookie) read by a handler or the error middleware that then returns stack traces, SQL, internal fields or config, or relaxes a check (skips validation, redaction or rate limits). The flag is client-controlled, so whatever it unlocks is available to every caller; report what it unlocks, and a flag that only changes formatting is not a finding. **SAST signal**: `req.query.debug`, `request.args.get('debug')`, `params[:debug]`, `$_GET['debug']`, `getParameter("debug")` (or `test`, `verbose`, `trace`, `dev`) feeding an error response, a serializer option or the condition around a check. **SAFE**: derive debug behavior from server configuration only, never from the request. **Not this bug**: a switch read only from server configuration (an environment variable or config file); whether production turns it on falls under the development/debug-mode rule in FALSE POSITIVE Rules below. Request headers that skip authentication are covered in `privilege_escalation.md`.
 
 #### Diagnostic-endpoint catalog (framework-specific, high-value)
 

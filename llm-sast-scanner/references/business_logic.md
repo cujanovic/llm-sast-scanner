@@ -1,7 +1,7 @@
 ---
 name: business_logic
-version: "0.6"
-description: Business logic testing for workflow bypass, state manipulation, and domain invariant violations
+version: "0.7"
+description: Business logic testing for workflow bypass, state manipulation, and domain invariant violations, including soft-deleted records still readable through a path that skips the deleted filter
 ---
 
 # Business Logic Flaws
@@ -169,6 +169,19 @@ This is distinct from two patterns covered elsewhere: it is **not** forward stat
 - **SAST signal**: an undelete/restore/revert/undo handler that writes authority/visibility fields from a stored snapshot, revision, or tombstone with no re-check that those values are still valid under current policy. Recon: `rg -ni "restore|undelete|undo|revert|recover|rollback|reinstate|unarchive" --glob '*.{js,ts,py,go,rb,java,cs}'` then check whether the write copies `role`/`acl`/`visibility`/`status`/`owner`/`tenant` from the historical record.
 - **Safe**: on restore, re-derive privileged and ACL/visibility fields from *current* policy (never trust the snapshot's copy); re-run the same authorization and validation the create/forward path enforces; restore only non-authority content fields and recompute role/visibility/membership from current state; refuse to restore a resource into a state that would violate current rules.
 - Bulk **import / restore-from-backup** planting cross-tenant or foreign-owner records is the data-injection sibling — see `idor.md` (Bulk & Batch: imports referencing foreign `ownerId`/`tenantId` bypass creation-time checks).
+
+### Soft-Deleted Records Still Readable
+
+Soft delete keeps the row and hides it with a filter (`deleted_at IS NULL`, `is_active = true`). The record stays reachable wherever a read path skips that filter, so a deleted document, revoked share, removed member or closed project still answers requests. Read paths that skip it:
+
+- **Explicit opt-outs**: Laravel `withTrashed()`, including on a route (`Route::get(...)->withTrashed()` makes implicit model binding return soft-deleted models), Sequelize `paranoid: false`, Rails `unscoped`.
+- **Queries the model's filter never sees**: raw SQL and the plain query builder (`DB::table(...)`, `sequelize.query(...)`), because the filter belongs to the model; Sequelize's paranoid filtering does not apply to raw queries.
+- **Filters the code must add itself**: the Rails `discard` gem adds no default scope (`Post.all` includes discarded rows; only `Post.kept` excludes them); a Django custom default manager is not used for related-object access (`choice.question` goes through `_base_manager`) or for lookups across a relation (`Choice.objects.filter(question__...)`).
+- **Lookups by a secondary key**: share links, export or download tokens, invite codes, cached copies and search indexes that resolve to the record without checking its `deleted_at`/`is_active`.
+
+- **SAST signal**: a model with soft delete (`SoftDeletes`, `paranoid: true`, `acts_as_paranoid`, `Discard::Model`, a `deleted_at`/`is_deleted` column filtered in a manager or scope) and a request-reachable read that takes one of the paths above with no deleted check of its own. Recon: `rg -n "withTrashed|onlyTrashed|paranoid:\s*false|\.unscoped|with_deleted|_base_manager|DB::table\(|sequelize\.query\(" --glob '*.{php,js,ts,rb,py}'`.
+- **Safe**: apply the deleted check on every request-reachable read (route binding, relations, raw SQL, token lookups); revoke share and export tokens and evict cached copies in the delete path; keep `withTrashed`/`paranoid: false` to admin or restore handlers behind their own authorization.
+- **Not this bug**: an admin or restore endpoint that reads deleted rows on purpose behind its own authorization check, or a soft delete kept for audit where no request path returns the row. Deactivated accounts whose tokens still work are covered in `authentication_jwt.md`.
 
 ### Concurrency and Idempotency
 

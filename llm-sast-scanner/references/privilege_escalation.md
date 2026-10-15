@@ -1,7 +1,7 @@
 ---
 name: privilege_escalation
-version: "0.8"
-description: Detect broken access control issues including vertical privilege escalation, role bypass, client-controlled flags participating in authorization predicates, missing authorization checks on privileged endpoints.
+version: "0.9"
+description: Detect broken access control issues including vertical privilege escalation, role bypass, client-controlled flags participating in authorization predicates, missing authorization checks on privileged endpoints, and cached permission lookups that revoke never evicts.
 ---
 
 # Privilege Escalation / Broken Access Control
@@ -577,6 +577,23 @@ public Invoice get(@PathVariable UUID invoiceId) { ... }
 // VULN: one-time gate — subsequent admin routes trust session bit
 if (req.session.adminVerified) return next();
 // SAFE: requireRole('admin') runs on every privileged route
+```
+
+- **VULN — cached permission lookup that revoke never evicts**: a permission, role or membership lookup memoized with `@Cacheable`, `functools.lru_cache`, a module-level map or a Redis key, while the revoke, demote and remove-member paths write the database but never evict the cached entry, so the revoked user keeps access until the entry expires. A TTL bounds that window but does not close it; with no TTL (`lru_cache`, a plain map) it lasts until the entry is pushed out or the process restarts. **SAST signal**: a cached permission/role/ACL getter with no `@CacheEvict`, `cache.delete`, `cache_clear()` or key-version bump in the code paths that change the same data. **SAFE**: in every write path that changes roles, memberships or grants, evict after the write commits, or bump a per-user permission version that is part of the cache key. A lookup already in flight can re-cache the old answer just after an eviction, so pair eviction with a short TTL, or use the version key, which leaves such a late write under a key nobody reads.
+
+```python
+# VULN — revoke writes the DB; the cached answer stays "admin" for this process's lifetime
+@functools.lru_cache(maxsize=4096)
+def role_of(user_id):
+    return db.fetch_role(user_id)
+
+def revoke_admin(user_id):
+    db.set_role(user_id, "viewer")
+
+# SAFE — the write path evicts what it changed
+def revoke_admin(user_id):
+    db.set_role(user_id, "viewer")
+    role_of.cache_clear()
 ```
 
 ### Client-Side Enforcement (UX Only)

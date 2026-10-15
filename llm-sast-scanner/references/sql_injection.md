@@ -1,7 +1,7 @@
 ---
 name: sql_injection
-version: "0.2"
-description: SQL injection testing covering union, blind, error-based, ORM bypass, ORM filter-operator injection (Prisma/Mongoose object-value operators — auth bypass / ATO on SQL-backed ORMs), and database-side dynamic SQL (PostgreSQL PL/pgSQL EXECUTE/format unquoted-identifier injection, dollar-quote denylist bypass, SECURITY DEFINER search_path) techniques
+version: "0.3"
+description: SQL injection testing covering union, blind, error-based, ORM bypass, ORM filter-operator injection (Prisma/Mongoose object-value operators — auth bypass / ATO on SQL-backed ORMs), and database-side dynamic SQL (PostgreSQL PL/pgSQL EXECUTE/format unquoted-identifier injection, dollar-quote denylist bypass, SECURITY DEFINER search_path) techniques, plus LIKE wildcards in a parameterized exact-match lookup (CWE-155)
 ---
 
 # SQL Injection
@@ -245,6 +245,25 @@ if (!user?.resetToken || !crypto.timingSafeEqual(Buffer.from(token), Buffer.from
 ```
 
 **Grep seeds**: `rg -n "findFirst|findUnique|findMany|updateMany|deleteMany|count|aggregate" --glob '*.{js,ts}'` then check whether any `where` value is a raw `req.body`/`req.query` field with no `typeof … === 'string'`/schema guard; `where:\s*\{[^}]*\breq\.(body|query)`; `\.where\(\s*req\.(body|query)`; spreads `where:\s*\{\s*\.\.\.req\.(body|query)`.
+
+### LIKE wildcards in a parameterized exact-match lookup (CWE-155)
+
+Not SQL injection — the query structure stays intact — but, like operator injection above, a bound parameter that still changes what the query matches: binding a value does not neutralize `%` (any run of characters) and `_` (any one character) when the operator is `LIKE`/`ILIKE`. A lookup meant as an exact match on an email, API key, token, username or tenant slug, written as `LIKE ?`, `.like(value)` or `[Op.iLike]: value` (often to get case-insensitive equality), matches other rows when the caller sends `%` or `_lice@example.com`. The impact follows the lookup: another user's record (IDOR), a key or token check passed without the secret, or a tenant filter widened to every tenant.
+
+```python
+# VULN — "exact" API-key lookup; key="%" matches the first row
+row = db.execute("SELECT id FROM api_keys WHERE key LIKE ?", (key,)).fetchone()
+
+# SAFE — equality for exact matches
+row = db.execute("SELECT id FROM api_keys WHERE key = ?", (key,)).fetchone()
+
+# SAFE — a real substring search escapes the wildcards and names the escape character
+def like_escape(s):
+    return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+rows = db.execute("SELECT id FROM docs WHERE title LIKE ? ESCAPE '!'", ("%" + like_escape(q) + "%",)).fetchall()
+```
+
+Django's LIKE-based lookups (`iexact`, `contains`, `icontains`, `startswith`, `istartswith`, `endswith`, `iendswith`) escape `%` and `_` themselves; SQLAlchemy's `contains()`, `startswith()` and `endswith()` do only with `autoescape=True`. SQLAlchemy `.like()`/`.ilike()`, Sequelize `[Op.like]`/`[Op.iLike]` and raw SQL pass the wildcards through. For case-insensitive equality, compare normalized values (`lower(email) = lower(?)`, a `citext` column) instead of `ILIKE`. **Recon**: `rg -n -i 'like\s+(\?|:\w|[$][0-9])|\.i?like\(|Op\.i?Like|whereI?Like' --glob '*.{py,js,ts,java,go,rb,php,cs}'` then check whether the column is an identifier or secret and whether the value is escaped.
 
 ### PDO Emulated Prepared-Statement Parser Confusion (PHP)
 

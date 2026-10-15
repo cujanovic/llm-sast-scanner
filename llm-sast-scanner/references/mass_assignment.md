@@ -1,7 +1,7 @@
 ---
 name: mass_assignment
-version: "0.3"
-description: Mass assignment / object injection allowing privilege fields to be set from user input, including a case-variant JSON key that a case-insensitive binder accepts past an exact-match key guard (CWE-915)
+version: "0.4"
+description: Mass assignment / object injection allowing privilege fields to be set from user input, including a case-variant JSON key that a case-insensitive binder accepts past an exact-match key guard, and an escaped key past a raw-text denylist (CWE-915)
 ---
 
 # Mass Assignment (CWE-915)
@@ -25,6 +25,7 @@ Stateful taint tracking applies in Ruby: user params start in an **unpermitted**
 - Node/Mongoose `User.findByIdAndUpdate(id, req.body)` where `req.body` may contain `role`, `isAdmin`, etc.
 - Spring `@ModelAttribute User user` binding all request fields without `@InitBinder` field blocklist
 - **Case-variant JSON key past an exact-match key guard (case-insensitive binder)**: a middleware, validator or gateway rejects privileged keys by exact comparison on the raw JSON (`k == "role"`, `'isAdmin' in body`, `TryGetProperty("role")`), but the deserializer that fills the model matches keys case-insensitively, so `{"Role": "admin"}` passes the guard and still binds. Case-insensitive binders: Go `encoding/json` (any case of a field's name or tag, and the last matching key wins); Newtonsoft Json.NET (exact match first, then any case); `System.Text.Json` with web defaults, which ASP.NET Core input binding uses (`PropertyNameCaseInsensitive = true`); Jackson only with `ACCEPT_CASE_INSENSITIVE_PROPERTIES` enabled. Last-key-wins adds a value variant: a guard that reads `body["role"]` and allows `"user"` passes `{"role":"user","Role":"admin"}`, and Go binds `admin`. The guard and the binder may sit in different services (a gateway filtering keys, a backend in another language binding them). A raw-key **allowlist** compared exactly is not this bug, because it rejects `Role` as unknown. Fix: check the bound struct/DTO after deserialization, or bind a DTO that has no privileged field
+- **Escaped JSON key past a raw-text denylist**: a guard that searches the raw body text for `"role"` (a regex, `includes`, `strings.Contains`) misses the same key written with a JSON escape, `{"\u0072ole": "admin"}`, which the JSON parser decodes to `role` (both `JSON.parse` and Go `encoding/json` do). Check keys after parsing, as above
 
 ## Safe Patterns
 

@@ -1,7 +1,7 @@
 ---
 name: weak_crypto_hash
-version: "0.3"
-description: Weak cryptography, weak hashing, and insecure randomness detection (CWE-327/328/330/335)
+version: "0.4"
+description: Weak cryptography, weak hashing, insecure randomness, and encoding used as encryption detection (CWE-327/328/330/335/311)
 ---
 
 # Weak Cryptography, Hash & Randomness
@@ -45,6 +45,7 @@ Do **not** require a library digester name. Vendored or copy-pasted MD5/SHA-1 *i
 - `Cipher.getInstance("AES/ECB/...")` — ECB mode is insecure
 - `Cipher.getInstance("RC2/...")` or `"RC4/..."` or `"Blowfish/..."` — weak
 - `javax.crypto.NullCipher` (or a custom `CipherSpi`/`Cipher` whose transform returns the plaintext unchanged) — **no-op "encryption"**: the data is not encrypted at all, so anything relying on it for confidentiality is in cleartext. Flag any `new NullCipher()` / `Cipher.getInstance("...")` resolving to an identity transform on a confidentiality path.
+- **Encoding used as encryption**: Base64, hex or URL encoding applied where the code means to encrypt or protect a value (an `encrypt()` helper that returns `Buffer.from(s).toString('base64')`, `base64.b64encode(ssn)` stored as the "encrypted" column, a base64 JSON cookie trusted for its role). Encoding has no key, so anyone reverses or rewrites it: treat the value as plaintext for confidentiality (CWE-311, CWE-261 for passwords) and as unsigned for integrity (`trust_boundary.md`). Base64 around a real ciphertext or signature is not this bug.
 
 **SAFE** (any match):
 - `Cipher.getInstance("AES/GCM/...")` or other AEAD modes — prefer authenticated encryption; AES/CBC alone (even with random IV) lacks integrity and is vulnerable to padding-oracle attacks unless combined with encrypt-then-MAC
