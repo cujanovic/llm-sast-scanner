@@ -1,7 +1,7 @@
 ---
 name: mass_assignment
-version: "0.4"
-description: Mass assignment / object injection allowing privilege fields to be set from user input, including a case-variant JSON key that a case-insensitive binder accepts past an exact-match key guard, and an escaped key past a raw-text denylist (CWE-915)
+version: "0.5"
+description: Mass assignment / object injection allowing privilege fields to be set from user input, including a case-variant JSON key that a case-insensitive binder accepts past an exact-match key guard, an escaped key past a raw-text denylist, and a JSON Patch applied to a stored record (CWE-915)
 ---
 
 # Mass Assignment (CWE-915)
@@ -236,6 +236,27 @@ A schema validator is a mass-assignment **allowlist only when it strips keys it 
 **SAFE**: rely on Zod's default strip (do **not** call `.passthrough()`/`.catchall()`), or `.strict()` (throws on any unknown key); Yup `.noUnknown()` / `validate(..., { stripUnknown: true })`. Then still bind only declared columns into the ORM call.
 
 **Key rule for SAST**: treat any spread/pass of a *parsed/validated* object into an ORM write as a sink — **post-validation data is not an allowlist unless the schema strips unknown keys**. Column-scoped writes that are sinks here: Drizzle `.values(obj)` / `.set(obj)`, Prisma `create({ data: obj })` / `update({ data: obj })`, Mongoose `create`/`updateOne`. Recon: `rg -n "\.passthrough\s*\(|\.catchall\s*\(|stripUnknown\s*:\s*false"` then check whether the parsed result feeds an ORM `values`/`set`/`data`.
+
+### JSON Patch (RFC 6902) applied to a stored record
+
+A JSON Patch body names the paths it changes, so applying the request's patch to the stored record lets the caller set any field the record has, add new ones, or `copy`/`move` a value from one field into another, a secret field into one they can read included. A field allowlist on the ordinary update form does not cover it. Shapes: fast-json-patch `applyPatch(record, req.body)` (by default it blocks only `__proto__` and `constructor/prototype` paths); Python `jsonpatch.apply_patch(record, patch)` with every key of the result saved; ASP.NET Core `JsonPatchDocument<User>.ApplyTo(user)` on the entity, where Microsoft's documentation states the implementation does not mitigate the format's inherent risks, the target's runtime type decides which properties a patch changes, and the advice is to apply it to a POCO with only safe properties or validate the object afterwards.
+
+```js
+// VULN — the request's patch is applied to the stored record as is
+const user = await db.users.get(req.user.id);
+applyPatch(user, req.body);   // [{"op":"replace","path":"/role","value":"admin"}] or {"op":"copy","from":"/apiKey","path":"/name"}
+await db.users.put(user.id, user);
+
+// SAFE — allow only replace on named paths, and reject `from`
+const ALLOWED = new Set(['/name', '/email']);
+if (!Array.isArray(req.body) || !req.body.every(op => op.op === 'replace' && ALLOWED.has(op.path) && op.from === undefined)) {
+  return res.status(400).end();
+}
+applyPatch(user, req.body);
+await db.users.put(user.id, user);
+```
+
+**SAST signal**: a patch document from the request reaching `applyPatch`, `applyOperation`, `jsonpatch.apply_patch`, `JsonPatch(...).apply` or `ApplyTo(` on a persisted record, with no allowlist of operations and paths (and of `from` for `copy`/`move`) and no DTO in between. Recon: `rg -n "applyPatch\(|applyOperation\(|apply_patch\(|JsonPatch\(|JsonPatchDocument<|\.ApplyTo\(" --glob '*.{js,ts,py,cs}'`.
 
 ## Common False Alarms
 

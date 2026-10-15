@@ -1,7 +1,7 @@
 ---
 name: authentication_jwt
-version: "0.5"
-description: JWT and OIDC security testing covering token forgery, algorithm confusion (incl. whitespace-PEM HS fallback), JSON array wrapping of alg/iss/aud, kid/jku/x5u/jwk/x5c header injection and JKU allowlist bypass, JWE encryption-layer attacks (RSA1_5/CBC padding oracle, ECDH-ES invalid curve, PBES2 p2c DoS, GCM nonce reuse, zip decompression bomb, nested alg:none JWE→JWS confusion), ECDSA psychic signatures, OAuth/OIDC token-validation gaps (at+jwt typ confusion, ALBeast shared-signer binding, DPoP downgrade/ath), claim manipulation, trust-binding confusion (subject-vs-session, tenant-claim-vs-route, stale authorization after role downgrade), and stateless-JWT-as-sole-session design flaws (no server-side session binding/revocation)
+version: "0.6"
+description: JWT and OIDC security testing covering token forgery, algorithm confusion (incl. whitespace-PEM HS fallback), JSON array wrapping of alg/iss/aud, kid/jku/x5u/jwk/x5c header injection and JKU allowlist bypass, JWE encryption-layer attacks (RSA1_5/CBC padding oracle, ECDH-ES invalid curve, PBES2 p2c DoS, GCM nonce reuse, zip decompression bomb, nested alg:none JWE→JWS confusion), ECDSA psychic signatures, OAuth/OIDC token-validation gaps (at+jwt typ confusion, ALBeast shared-signer binding, DPoP downgrade/ath), claim manipulation, trust-binding confusion (subject-vs-session, tenant-claim-vs-route, stale authorization after role downgrade), stateless-JWT-as-sole-session design flaws (no server-side session binding/revocation), and wallet sign-in that accepts a signed message without binding it to a server nonce, domain, chain and expiry
 ---
 
 # Authentication / JWT / OIDC
@@ -407,6 +407,32 @@ store.save(hash(token), userId, expiresAt);
 ```
 
 **Detection indicators**: distinct login/reset error strings, missing `recordFailedAttempt`/`rateLimit` on auth routes, plaintext reset tokens, auto-login after reset without re-auth, no session/token revocation on password change.
+
+### Wallet Sign-In (signed-message login, EIP-4361)
+
+A wallet login proves only that the key holder signed *a* message. The server must bind the signature to this login: a nonce it issued and keeps server-side, used once; its own domain; the chain it expects; and an expiry. Otherwise a signature the victim gave another site, an old login, or a sign-in message a phishing page asked them to sign logs the attacker in as the victim.
+
+- **VULN**: `new SiweMessage(message).verify({ signature })` with no `nonce` or `domain`. The `siwe` library checks the nonce, domain and scheme only when the caller passes them, and never compares the chain ID; it checks the message's own `expirationTime` and `notBefore` when present, and the client wrote those. A nonce taken from the request body instead of the session, or never deleted after use, is no binding either.
+- **VULN**: a hand-rolled login that recovers the signer (`verifyMessage`, `recoverAddress`, `ecrecover`) and creates a session without parsing the message for the server's nonce, domain and expiry.
+- **SAFE**: issue a random nonce per login attempt and keep it server-side; pass it and the server's own domain to `verify`; compare `chainId` to the expected chain; require an `expirationTime`; delete the nonce on the first attempt, success or failure.
+
+```js
+// VULN — any signature over any sign-in message for this address is accepted
+const { data } = await new SiweMessage(req.body.message).verify({ signature: req.body.signature });
+req.session.address = data.address;
+
+// SAFE — bind the login to the nonce this server issued, its own domain and chain, once
+const nonce = req.session.siweNonce;
+delete req.session.siweNonce;                       // one attempt per issued nonce
+if (!nonce) return res.status(401).end();
+const result = await new SiweMessage(req.body.message)
+  .verify({ signature: req.body.signature, nonce, domain: 'app.example.com' })
+  .catch(() => null);
+if (!result?.success || result.data.chainId !== 1 || !result.data.expirationTime) return res.status(401).end();
+req.session.address = result.data.address;
+```
+
+**Recon**: `rg -n "SiweMessage|verify\(\s*\{\s*signature|verifyMessage\(|recoverAddress\(|ecrecover|personal_ecRecover" --glob '*.{js,ts,py,go}'` then check what the login binds the signature to. On-chain signature digests are covered in `smart_contract_security.md`.
 
 ## Advanced Techniques
 

@@ -1,7 +1,7 @@
 ---
 name: arbitrary_file_upload
-version: "0.4"
-description: Detect unrestricted file upload vulnerabilities where attackers can upload executable files leading to Remote Code Execution or path traversal, and post-upload media/variant pipelines that process untrusted image bytes through unsafe default loaders.
+version: "0.5"
+description: Detect unrestricted file upload vulnerabilities where attackers can upload executable files leading to Remote Code Execution or path traversal, post-upload media/variant pipelines that process untrusted image bytes through unsafe default loaders, and document converters (pandoc) that read local files or fetch URLs a user document names.
 ---
 
 # Unrestricted File Upload
@@ -484,6 +484,15 @@ avatar.variant(resize_to_limit: [200, 200]).processed
 **Impact note**: arbitrary file read via a media loader often yields process environment / framework secrets (`secret_key_base`, cloud keys) → session forgery or lateral movement. Tag `path_traversal` / `information_disclosure` for the read face and `rce` when the chain reaches execution; do not require a public PoC to keep the structural finding.
 
 Tag secondary impact as `ssrf` or RCE when the processing chain invokes network/file handlers on attacker content; cross-ref `ssrf.md` for URL-fetch variants and `rce.md` *Media and Document Pipelines* for libvips / ImageMagick controls.
+
+### Document converters reading local files or fetching URLs (pandoc)
+
+A user document that pandoc converts, uploaded or typed into a form, in LaTeX, RST, Org or Typst, can name local files in include directives, and pandoc reads them into the output. Output formats that embed resources (RTF, FB2, EPUB, Docx, ODT, HTML with `--embed-resources`/`--self-contained`) pull images in from the filesystem or the web, which reads non-image files or fetches URLs the document names; when reading HTML, pandoc fetches `iframe` sources too. pandoc's own guidance for untrusted input is `--sandbox`, which limits its readers and writers to the files named on the command line; it does not limit filters or PDF production, and a filter can do anything (LaTeX compilation itself is covered in `rce.md`).
+
+- **VULN**: `subprocess.run(["pandoc", upload_path, "-o", out])`, `pypandoc.convert_file(path, "docx")`, or a shell `pandoc` call on user content without `--sandbox`; user content rendered to PDF through a LaTeX engine; a `--filter`/`--lua-filter` choice the user influences.
+- **SAFE**: pass `--sandbox` on every call that reads user content; run the converter with no network and a minimal read-only filesystem, under a timeout and a heap limit (pandoc's guidance: `+RTS -M512M -RTS`).
+
+**Recon**: `rg -n -i "pandoc" --glob '*.{py,js,ts,rb,go,java,sh}'` then check each call for `--sandbox` and for what the user controls (input format, output format, filters).
 
 ## SVG Upload — Server-Side Processing (XSS / SSRF / XXE)
 

@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.32"
+  version: "1.50.33"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -527,6 +527,9 @@ For each candidate finding, answer all of the following:
 - [ ] For logic bugs: is the business impact real, or hypothetical?
 - [ ] Is the chosen tag the most precise valid label for this finding?
 - [ ] **Victim other than the attacker**: does exploitation harm a *different* user, the system, or other tenants — not only the attacker themselves? A flow where the attacker can only affect their own account/session/data/cache entry (e.g. self-XSS pasted into one's own browser, poisoning only one's own row, DoSing only one's own request) is **not** a finding unless it can be delivered to or triggered against a victim (stored/reflected to others, CSRF-delivered, cache-key-shared). When uncertain whether a victim exists, try multiple delivery paths before concluding it is self-harm only.
+- [ ] **Required values**: name each value the attack needs that the attacker does not choose freely — a victim's identifier, a victim's token or code, a resource name — and where the attacker gets it, as the code and configuration of this repository show. A role or credential the attacker must hold as their own, never a victim's, is a position, not a required value: the Severity Downgrade Rule rates it. A value from their own session or records, or one they can enumerate or guess (a sequential ID, a username), changes nothing; so does a value the application, working as intended, shows them or puts where others see it — a list, search, export, notification, email, URL or shared link (`idor.md`, UUID/Opaque ID Sources).
+  A credential the victim's own browser or client attaches to a request the attacker causes it to send — a session cookie on a cross-site, framed, WebSocket or credentialed cross-origin request (`csrf.md`, ambient authority) — is no required value: the attacker never obtains it. A value the recorded Flow itself obtains — a code it brute-forces, a token it predicts, fixes or leaks — is a step of the attack (Severity Downgrade Rule), never a prerequisite. A value they can get only through another finding in this report makes that finding a chained prerequisite (Severity Downgrade Rule), named and tested by the Downgrade validity check like any other; a stable object identifier is never one that only another finding yields, for it leaks through channels the repository cannot show (`idor.md`).
+  A value whose source the repository does not show is missing context: never a trigger, and never on its own grounds for LIKELY, an `UNCERTAIN` exploitability or its cap, FALSE POSITIVE or NEEDS CONTEXT (that question reads `PASS — <value> source not shown`; other questions keep their result); it is named as an open question on the `Required values:` line, never on the `Judge:` line. Whether a check in the code stops an attacker who lacks a value is the Counterevidence Record's question, answered by the control it cites. A hard-to-guess identifier is not a mitigation.
 
 **Confidence signals** (use to set verdict and severity, not to silently drop):
 - *Raises confidence*: reachable from the Internet (vs local console/CLI only); exploitable by an anonymous vs an authenticated user; the input (source) and output (sink) nodes match what the class actually requires.
@@ -535,6 +538,10 @@ For each candidate finding, answer all of the following:
   - **Second-order / stored input**: the flow starts from stored data (file/DB/cache/config) rather than a direct request — exploitability depends on how that store was populated. That open question is the LIKELY cap itself — its Exploitability `PASS — store population not shown`, the doubt carried by the LIKELY verdict — never an `UNCERTAIN cap:` on that question as well, nor a Step 6 `DISPUTED` or `WITHDRAWN` on it. Who may write content the code executes — a template, expression, script, serialized object or query — is not that open question: False Positive Guardrails (Trust Boundary) rate it, never NEEDS CONTEXT. The cap holds only while the repository does not show how the store is populated: once a tainted write site is identified — a write in code of what an attacker supplies, or, for content the code executes, a grant or route admitting a writer — the finding is CONFIRMED when its checks pass, LIKELY where False Positive Guardrails (Trust Boundary) leave the writers' authority not shown, and the flow is rated by **what the sink does, not by how the value arrived at it**: delay is not a precondition and indirection is not a mitigation. Persistence usually makes a finding worse rather than better — the payload re-executes on every read, it runs with no request to trace it back to, and it often runs with broader privileges than a request handler.
   - **Non-production sink**: output goes only to a debug/trace log or dev-only path typically disabled in production.
   - **Sanitizer present in the path** (even if imperfect), or the data-flow is very long/complex/hard to reproduce, or evidence is insufficient — do not report as CONFIRMED on weak evidence.
+
+#### Counterevidence Record
+
+Before a CONFIRMED or LIKELY verdict, write down the strongest harmless explanation of the flow — the reading of the code under which it is safe: a guard in a caller or middleware, a framework default, a type or format that cannot carry the value, a configuration the repository ships (a setting the attack needs that the code and every deployment config the repository ships show is off by default takes the non-default-configuration trigger, never a FALSE POSITIVE) — and the exact control you checked to test it, by its `file:line`, or `none in scope` when the repository has no such control. The record adds no verdict and no downgrade of its own. A control it finds that stops the attack on every path is positive evidence a FALSE POSITIVE may cite (FP burden of proof); a control that narrows the attack without stopping it, or a harmless reading the code does not prove, grounds no FALSE POSITIVE through this record — a False Positive Guardrail that skips the case still applies. The record itself lowers and settles nothing: the Judge's checks, gates, guardrails and the Severity Downgrade Rule rate the finding as they would without it. Both records stay internal, like the rest of the Judge Output Format: neither is ever a line of a Finding Format record.
 
 #### Judge Verdict
 
@@ -588,6 +595,8 @@ Finding: VULN-NNN — <class>
 Reachability:   PASS / FAIL / UNCERTAIN — <reason>
 Sanitization:   PASS / FAIL / UNCERTAIN — <reason>
 Exploitability: PASS / FAIL / UNCERTAIN — <reason>
+Counterevidence: <strongest harmless reading> — checked: <file:line of the control examined, or "none in scope">
+Required values: <value> ← <own session | enumerable | shown at file:line | Flow hop <n> (a step of the attack) | another finding: <class> at file:line | not shown (open question)>; …
 Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 ```
 
@@ -646,6 +655,8 @@ Judge Verdict:  CONFIRMED / LIKELY / NEEDS CONTEXT / FALSE POSITIVE
 - [ ] Production code, or demo/example/sample/test/fixture directory?
 - [ ] Attacker is genuinely untrusted, not an admin/operator within their own trust boundary? Content such a role writes that the code executes is a finding unless the repository, or the platform it extends, shows the role holds the workload's authority (False Positive Guardrails, Trust Boundary).
 - [ ] Concrete consequence derived and stated — a specific attacker outcome, not a vague "might/could"? (Fix lazy wording on a confirmed finding; use `NEEDS CONTEXT` only when the consequence is genuinely undeterminable.)
+- [ ] Counterevidence written: the strongest harmless reading and the control checked (`file:line` or `none in scope`), and a FALSE POSITIVE resting on that record only where its control stops the attack on every path?
+- [ ] Each required value's source named — the attacker's own, enumerable, shown to them as intended, obtained by a hop of the Flow (a step of the attack, never a control), another finding (a chained prerequisite, never for a stable identifier) or not shown (missing context, never a trigger)? A role or credential the attacker must hold as their own, never a victim's, is a position the Severity Downgrade Rule rates.
 - [ ] Verify DEFAULT config value — does the attack work with defaults?
 - [ ] SSRF required by protocol spec?
 - [ ] SSRF response reachable by attacker (readable / side effect / error oracle)?
@@ -691,6 +702,7 @@ For each matching finding, work through ALL of the following, answering each que
 - Could the surrounding architecture (WAF, API gateway, service mesh, network segmentation) neutralize this in practice?
 - Are you pattern-matching on a known vuln class without sufficient evidence for THIS specific codebase?
 - Did you confuse a defense-in-depth gap with an exploitable weakness?
+- What is the strongest harmless explanation, and which control did you check for it (`file:line`, or `none in scope`)? Start from the Judge's counterevidence record when this session holds it, otherwise write it, and test it against the whole code; the note after the verdict table decides what the answer may do.
 
 #### 2. Real Impact Assessment
 - What specifically can an attacker gain — data, access, availability, integrity?
@@ -702,6 +714,7 @@ For each matching finding, work through ALL of the following, answering each que
 #### 3. Practical Attack Scenarios
 - Write out a concrete, step-by-step attack scenario from the attacker's perspective.
 - What preconditions must hold (network position, auth level, timing, user interaction)?
+- For each value the scenario needs that the attacker does not choose freely (a victim's identifier, a victim's token or code), where do they get it? Start from the Judge's required-values record when this session holds it, otherwise write it. Where the attacker gets a required value is a downgrade only through a Severity Downgrade Rule trigger, and a `DISPUTED` or `WITHDRAWN` only as the verdict table and the note after it give: a value only another finding yields is a chained prerequisite under the Downgrade validity check, never a stable identifier, which leaks through channels the repository cannot show; a value whose source the repository does not show is missing context, named in the rationale as an open question, never a trigger and never on its own grounds for `DISPUTED` or `WITHDRAWN`. A hard-to-guess identifier is not a mitigation.
 - How likely are those preconditions in a real deployment?
 - Would a competent attacker actually pursue this, or are there far easier paths to the same goal?
 - Can the attack be performed reliably, or does it depend on race conditions / timing windows that make it impractical?
@@ -736,8 +749,10 @@ Neither `DISPUTED` nor `WITHDRAWN` rests on a ground barred by False Positive Gu
 ```
 Finding: VULN-NNN — <class>
 Why wrong:       <strongest counter-argument against the finding>
+Checked:         <file:line of the control examined for that counter-argument, or "none in scope">
 Real impact:     <concrete impact statement, or "theoretical only">
 Attack scenario: <1-2 sentence practical scenario, or "no credible scenario">
+Required values: <value> ← <source>; …
 Real-world:      VIABLE / MARGINAL / IMPRACTICAL — <reason>
 Production:      <impact on live systems>
 Adversarial Verdict: STANDING / DOWNGRADED / DISPUTED / WITHDRAWN — <rationale>
