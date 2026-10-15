@@ -1,7 +1,7 @@
 ---
 name: reverse_proxy_access_bypass
-version: "0.3"
-description: Reverse-proxy access bypass — authorization applied to a different path representation than the one the router or upstream honors (rewrite/forward headers, normalization mismatch, character-trim/strip differential where the backend framework silently removes non-printable/extended-ASCII bytes the edge kept, stale API versions, proxy config gaps, Referer/Origin gates) (CWE-863 / CWE-289 / CWE-436)
+version: "0.4"
+description: Reverse-proxy access bypass — authorization applied to a different path representation than the one the router or upstream honors (rewrite/forward headers, normalization mismatch, character-trim/strip differential where the backend framework silently removes non-printable/extended-ASCII bytes the edge kept, stale API versions, auth skipped by a static-file extension that a dynamic route still answers, proxy config gaps, Referer/Origin gates) (CWE-863 / CWE-289 / CWE-436)
 ---
 
 # Reverse-Proxy Access Bypass (CWE-863 / CWE-289 / CWE-436)
@@ -42,6 +42,9 @@ rg -ni 'PathPrefix|ReplacePath(Regex)?|AddPrefix|forwardedHeaders|X-Forwarded-' 
 rg -n 'RewriteCond[^\n]*REQUEST_URI|AllowEncodedSlashes|ProxyPassMatch|ProxyPass\s' --glob '*.{conf,htaccess}'  # Apache httpd
 rg -n 'respond\s+/|not\s*\{\s*path|@\w+\s*\{|strip_prefix|handle_path|header_up\s+Host' --glob 'Caddyfile*'    # Caddy matchers / strip_prefix / Host fwd
 rg -n 'normalize_path|merge_slashes|path_with_escaped_slashes_action|headers_with_underscores_action' --glob '*.{yaml,yml}'  # Envoy path-normalization knobs (flag when absent/off)
+# Auth skipped by a static-file extension (then find a parameter, wildcard or suffix-tolerant route that answers that shape)
+rg -n '\\\.\((\?:)?(css|js|png|jpe?g|gif|svg|ico|woff2?|map)\||endsWith\(\s*.\.(css|js|png|jpe?g|gif|svg|ico)|\*\*/\*\.(css|js|png|jpe?g|gif|svg|ico)' --glob '*.{js,ts,mjs,py,java,kt,go,rb,cs,conf}'
+rg -n 'matcher' --glob '**/middleware.{ts,js}'    # Next.js: read which paths the matcher leaves out of auth
 # Case-sensitive admin/privileged prefix checks
 rg -n '["'"'"']/admin|["'"'"']/Admin|["'"'"']/internal|startsWith\(["'"'"']/admin' --glob '*.{js,ts,py,java,cs,go,php}'
 # Security/routing regex run against the FULL url (incl. query) instead of pathname
@@ -100,6 +103,12 @@ For each hit, trace **two pipelines**: (1) what string the auth gate matches, an
   `source_ip`/auth/`host_header` conditions on every listener that reaches a shared target group; lock the origin SG to
   the CDN's managed prefix list.
 
+- **Auth skipped by a static-file extension while a dynamic route still answers the path**: middleware or proxy config exempts paths that look like static assets (`/\.(css|js|png|ico)$/.test(req.path)`, `endsWith('.css')`, Spring Security `web.ignoring()` or `permitAll()` on `/**/*.css`, a Next.js middleware `matcher` that leaves out every path containing a dot), and a dynamic handler still answers such a path. Shapes that reach protected data:
+  - **A route parameter or wildcard takes the dotted segment**: Express `/api/users/:id` receives `1.png`, and `parseInt('1.png', 10)` is `1`, so the user record is returned without auth. Same for `/files/:name`; `/admin/*` answers `/admin/users.css`.
+  - **The router tolerates a suffix**: Rails routes carry an optional `(.:format)`, so `/admin/users.css` reaches the `admin/users` action; Spring MVC maps `/person` to `/person.*` when suffix pattern matching is on (off by default since Spring Framework 5.3); see also the suffix-tolerant routers in `web_cache_deception.md`.
+  - **The test is unanchored or reads the full URL**: `/\.(css|js|png)/.test(req.url)` is passed by `/admin/users?x=.css`, because `req.url` keeps the query and `req.path` does not.
+  - **nginx regex location wins**: a `location ~* \.(css|js|png)$` that proxies to the app takes precedence over a prefix `location /admin/ { auth_request …; }` without `^~`, so `/admin/x.png` reaches the app without the auth subrequest.
+  **Not this bug**: a fixed route without a parameter, which does not match the suffixed path (Express returns `404` for `/admin/users.css`); a build-asset prefix the framework serves itself (`/_next/static`) left out of auth; a regex location that serves files from `root` without proxying. **SAFE**: mount a static handler for real files ahead of auth (or on its own prefix or origin) and never decide auth from how a path looks; if a skip is unavoidable, skip only when the static handler found a file.
 - **Character-trim/strip parser differential (the framework "heals" the path *after* the edge check)**: the edge allow/deny/`auth_request`/WAF rule matches an **exact** path (nginx `location = /admin`) or a **`$`-anchored** regex (`location ~ ^/admin$`, a WAF path rule `^/admin$`), but the backend framework **strips leading/trailing non-printable and extended-ASCII bytes from the path before routing**. Appending one such byte — `/admin\x09`, `/admin%A0`, `/admin%85`, `/admin%1F` (sent as the raw byte or percent-encoded) — makes the edge rule **miss** (the string is no longer exactly `/admin`, so it falls through to the public `location /`), while the framework normalizes the path back to `/admin` and serves the protected handler. The strip is usually **implicit** (framework default): there need be **no `.strip()`/`.trim()` in application code**, so "the app has no path normalizer, therefore it's safe" is a **false conclusion** (the RED failure this bullet exists to prevent — reviewers wrongly assume `GET /admin%A0` → 404). Byte sets (edge- and version-dependent; newer nginx normalizes more but `\x85`/`\xA0` still pass on current releases):
   - **Flask / Werkzeug** (Python `str.strip()`, the widest set): `\x09 \x0A \x0B \x0C \x0D \x1C \x1D \x1E \x1F \x20 \x85 \xA0`
   - **Node / Express**: `\xA0 \x09 \x0C`
@@ -138,6 +147,21 @@ function adminGuard(req, res, next) {
 }
 app.use(adminGuard);
 app.use('/admin', adminRouter);   // same prefix; handler also verifies role
+```
+
+### Express — auth skipped by static-file extension
+
+```javascript
+// VULN — skip auth for anything that looks like an asset; a parameter route still answers it
+app.use((req, res, next) =>
+  /\.(css|js|png|ico)$/.test(req.path) ? next() : requireAuth(req, res, next));
+app.get('/api/users/:id', (req, res) => res.json(findUser(parseInt(req.params.id, 10))));
+// GET /api/users/1.png → parseInt('1.png', 10) === 1 → user 1 returned without auth
+
+// SAFE — the static handler answers real files first; everything else passes auth
+app.use(express.static(path.join(__dirname, 'public')));
+app.use(requireAuth);
+app.get('/api/users/:id', (req, res) => res.json(findUser(parseInt(req.params.id, 10))));
 ```
 
 ### Next.js — middleware-only auth

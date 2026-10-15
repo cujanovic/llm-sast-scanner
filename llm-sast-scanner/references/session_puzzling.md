@@ -1,7 +1,7 @@
 ---
 name: session_puzzling
-version: "0.1"
-description: Session puzzling (session variable overloading) — an unauthenticated or mid-flow session attribute is later read as proof of full authentication or authorization (CWE-841 / CWE-384)
+version: "0.2"
+description: Session puzzling (session variable overloading) — an unauthenticated or mid-flow session attribute is later read as proof of full authentication or authorization, including the user key a password step writes before MFA completes (CWE-841 / CWE-384)
 ---
 
 # Session Puzzling / Session Variable Overloading (CWE-841 / CWE-384)
@@ -35,6 +35,8 @@ rg -n 'session\.(get|\[)|req\.session\.|HttpContext\.Session\.Get|getAttribute\(
 rg -n 'if\s*\(.*session\.(user|username|userId)|session\.get\(['"'"'"]user|!= null|!== undefined\)' --glob '*.{js,ts,py,php}'
 # MFA / step flags read outside the MFA flow
 rg -n 'mfaVerified|otpPassed|twoFactor|stepComplete|loginStep' --glob '*.{js,ts,py,php,java,cs}'
+# Password step that defers to MFA — read what it writes to the session before the redirect
+rg -n -i 'mfa.?pending|pending.?mfa|awaiting.?(mfa|otp|2fa)|redirect\(.*(mfa|otp|2fa|two.?factor)' --glob '*.{js,ts,py,php,java,cs,go,rb}'
 # Flask/Django/Express session config — shared cookie across flows
 rg -n 'SESSION_|session\.|SessionMiddleware|express-session' --glob '*.{py,js,ts,env*}'
 ```
@@ -49,6 +51,7 @@ For each session **write** in a pre-auth handler, search for **reads** of the sa
 - MFA handler sets `session.mfaPassed = true` after OTP; admin routes check `mfaPassed` but never confirm primary authentication completed in the same session.
 - Guard: `if (session['user'] != null) { allow }` — no distinction between "user object from recovery" and "user object from login".
 - Multiple flows share generic keys: `user`, `userId`, `username`, `email`, `role` — instead of flow-scoped keys cleared on transition.
+- **Password step's pre-MFA state accepted as a full login**: the login handler writes the user key that route guards read (`session['user_id'] = user.id`, `req.session.userId`) right after the password check and only then redirects to the MFA page, so a guard that tests for that key alone lets a caller who knows the password skip the MFA page and request protected routes directly. Pair each password-step write with the guards that read the same key; flag when, for a user with MFA enabled, the key is readable as a login before the second factor verifies. **SAFE**: keep the pending identity under a flow-scoped key and write the user key only after the second factor verifies. A separate endpoint that issues credentials without the MFA step (mobile or API login, reset-completion auto-login) is covered in `authentication_jwt.md` ("No MFA bypass on alternate flows"); a login delegated to an identity provider that enforces MFA (shown by its config or a checked `amr`/`acr` claim) is not that finding.
 
 ## Vulnerable vs Safe code examples
 
@@ -90,6 +93,51 @@ def dashboard():
     if not session.get('authenticated'):
         return redirect('/login')
     return render_template('dashboard.html', user=current_user())
+```
+
+### Flask — password step writes the login key before MFA
+
+```python
+# VULN — user_id is written after the password check, before MFA; the guard reads only user_id
+@app.post('/login')
+def login():
+    user = verify_password(request.form['email'], request.form['password'])
+    if not user:
+        abort(401)
+    session['user_id'] = user.id
+    if user.mfa_enabled:
+        return redirect('/mfa')      # a caller with the password skips this page
+    return redirect('/dashboard')
+
+def login_required(view):
+    @wraps(view)
+    def wrapped(*a, **kw):
+        if 'user_id' not in session:
+            return redirect('/login')
+        return view(*a, **kw)
+    return wrapped
+
+# SAFE — pending identity under a flow-scoped key; user_id only after the second factor
+@app.post('/login')
+def login():
+    user = verify_password(request.form['email'], request.form['password'])
+    if not user:
+        abort(401)
+    session.clear()
+    if user.mfa_enabled:
+        session['mfa_pending_user_id'] = user.id
+        return redirect('/mfa')
+    session['user_id'] = user.id
+    return redirect('/dashboard')
+
+@app.post('/mfa')
+def mfa():
+    uid = session.get('mfa_pending_user_id')
+    if uid is None or not verify_totp(uid, request.form['code']):
+        abort(401)
+    session.clear()
+    session['user_id'] = uid
+    return redirect('/dashboard')
 ```
 
 ### Express — registration step reuses `session.user`

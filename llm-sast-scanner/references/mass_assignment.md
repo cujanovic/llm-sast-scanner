@@ -1,7 +1,7 @@
 ---
 name: mass_assignment
-version: "0.2"
-description: Mass assignment / object injection allowing privilege fields to be set from user input (CWE-915)
+version: "0.3"
+description: Mass assignment / object injection allowing privilege fields to be set from user input, including a case-variant JSON key that a case-insensitive binder accepts past an exact-match key guard (CWE-915)
 ---
 
 # Mass Assignment (CWE-915)
@@ -24,6 +24,7 @@ Stateful taint tracking applies in Ruby: user params start in an **unpermitted**
 - Rails `params.permit()` with empty hash `{}` — equivalent to permitting arbitrary keys.
 - Node/Mongoose `User.findByIdAndUpdate(id, req.body)` where `req.body` may contain `role`, `isAdmin`, etc.
 - Spring `@ModelAttribute User user` binding all request fields without `@InitBinder` field blocklist
+- **Case-variant JSON key past an exact-match key guard (case-insensitive binder)**: a middleware, validator or gateway rejects privileged keys by exact comparison on the raw JSON (`k == "role"`, `'isAdmin' in body`, `TryGetProperty("role")`), but the deserializer that fills the model matches keys case-insensitively, so `{"Role": "admin"}` passes the guard and still binds. Case-insensitive binders: Go `encoding/json` (any case of a field's name or tag, and the last matching key wins); Newtonsoft Json.NET (exact match first, then any case); `System.Text.Json` with web defaults, which ASP.NET Core input binding uses (`PropertyNameCaseInsensitive = true`); Jackson only with `ACCEPT_CASE_INSENSITIVE_PROPERTIES` enabled. Last-key-wins adds a value variant: a guard that reads `body["role"]` and allows `"user"` passes `{"role":"user","Role":"admin"}`, and Go binds `admin`. The guard and the binder may sit in different services (a gateway filtering keys, a backend in another language binding them). A raw-key **allowlist** compared exactly is not this bug, because it rejects `Role` as unknown. Fix: check the bound struct/DTO after deserialization, or bind a DTO that has no privileged field
 
 ## Safe Patterns
 
@@ -95,6 +96,16 @@ setDisallowedFields\s*\(
 Bind\s*\(\s*"Include"
 ```
 
+Case-variant key past an exact-match key guard — find a raw-key check, then confirm a case-insensitive binder fills the model afterwards (in this service or a downstream one):
+
+```text
+map\[string\](any|interface\{\})
+TryGetProperty\(\s*"
+(hasOwnProperty|Object\.hasOwn)\([^)]*['"](role|isAdmin|is_admin|admin)
+['"](role|isAdmin|is_admin|admin)['"]\s+in\s+\w+
+JsonConvert\.DeserializeObject|AddNewtonsoftJson|ACCEPT_CASE_INSENSITIVE_PROPERTIES|accept-case-insensitive-properties
+```
+
 Missing allowlist signals (manual review):
 
 ```text
@@ -162,6 +173,42 @@ The contrast between `permit!` vs `permit(:name, :email)` is the canonical safe 
 **VULN**: `@RequestBody User user` on entity with Jackson default — all JSON properties deserialize.
 **SAFE**: `@InitBinder` → `binder.setAllowedFields("name", "email")`.
 **SAFE**: `@JsonIgnore` on privileged entity fields **plus** separate request DTO for writes (ignore alone is blocklist-style).
+
+### Case-variant JSON key past an exact-match key guard (Go, .NET, Jackson)
+
+```go
+// User: Role string `json:"role"`; IsAdmin bool `json:"isAdmin"`
+// VULN — exact-match key blocklist on the raw body; encoding/json binds any case of a field name
+func createUser(w http.ResponseWriter, r *http.Request) {
+    raw, _ := io.ReadAll(r.Body)
+    var m map[string]any
+    json.Unmarshal(raw, &m)
+    for k := range m {
+        if k == "role" || k == "isAdmin" { // misses "Role", "ROLE", "iſAdmin"
+            http.Error(w, "forbidden field", http.StatusForbidden)
+            return
+        }
+    }
+    var u User
+    json.Unmarshal(raw, &u) // {"Role":"admin"} sets u.Role
+    db.Create(&u)
+}
+
+// SAFE — bind a DTO with no privileged field; set privileged fields on the server
+func createUser(w http.ResponseWriter, r *http.Request) {
+    var dto struct {
+        Name  string `json:"name"`
+        Email string `json:"email"`
+    }
+    if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+        http.Error(w, "bad request", http.StatusBadRequest)
+        return
+    }
+    db.Create(&User{Name: dto.Name, Email: dto.Email, Role: "user"})
+}
+```
+
+Same shape in .NET: Json.NET falls back to a case-insensitive match by default, and ASP.NET Core input binding uses `System.Text.Json` web defaults (`PropertyNameCaseInsensitive = true`), while `JsonElement.TryGetProperty` compares case-sensitively, so a middleware `TryGetProperty("role")` check is passed by `"Role"`. Jackson binds case variants only with `ACCEPT_CASE_INSENSITIVE_PROPERTIES`. Lowercasing keys before the blocklist compare is not enough for Go, which also folds `ſ` to `s` (`iſAdmin` binds `isAdmin` while `strings.ToLower` leaves it unmatched); check the bound struct instead.
 
 ### JavaScript / Express (extended)
 

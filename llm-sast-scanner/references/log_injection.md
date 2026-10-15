@@ -1,6 +1,6 @@
 ---
 name: log_injection
-version: "0.2"
+version: "0.3"
 description: Log injection and log forging detection (CWE-117)
 ---
 
@@ -93,6 +93,7 @@ Commonly affected languages: Java, Python, JavaScript, Go, Ruby, C#, Rust (web s
 - Class default for log injection and forging (CWE-117): **Medium** — forged or hidden entries in audit trails and SIEM pipelines. An HTML log viewer that renders the content unencoded is that viewer's stored XSS, rated by `xss.md`.
 - A value the logger writes as an encoded field of a JSON formatter is the Common False Alarm above, its viewer check included, not a lower rating.
 - This default covers CWE-117 only; a missing security log (CWE-778, *Security Events to Log* below) is outside it.
+- An attacker-sized value written to a persistent log on every request (CWE-779, logging of excessive data) is a disk-exhaustion finding — `denial_of_service.md` (*Unbounded Attacker Data Written to Persistent Storage*) — in addition to, not instead of, CWE-117 where the same write passes CR/LF.
 
 ## Core Principle
 

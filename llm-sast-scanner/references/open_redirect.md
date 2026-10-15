@@ -1,7 +1,7 @@
 ---
 name: open_redirect
-version: "0.3"
-description: Open redirect and unvalidated forward detection (CWE-601), including Salesforce Apex PageReference, and allowlist/parser-confusion bypasses — protocol-relative, multiple slashes, backslash, userinfo @, encoded host, IDN/Unicode homoglyph, and bidi code-point evasions
+version: "0.4"
+description: Open redirect and unvalidated forward detection (CWE-601), including Salesforce Apex PageReference, and allowlist/parser-confusion bypasses — protocol-relative, multiple slashes, backslash, userinfo @, encoded host, IDN/Unicode homoglyph, and bidi code-point evasions, and the validated-parse / redirected-raw split
 ---
 
 # Open Redirect (CWE-601)
@@ -74,17 +74,18 @@ return redirect(url)
 - `/%09/evil.com` — tab character inserted to break naive pattern matching
 - **Leading whitespace before protocol-relative / absolute**: `%20//evil.com`, `+//evil.com`, ` //evil.com`, `%20https://evil.com`, `%09//evil.com` — a denylist that only checks `startswith("//")` / `startswith("http")` (and maybe literal `\`) on the **raw** string treats a leading space/tab as “not absolute.” Browsers **trim leading whitespace** before URL parsing, then resolve `//evil.com` off-site. **Do not CLOSE** because staff say “leading spaces are cosmetic” or “we already reject `//` and `http`.” Without strip+decode **before** the prefix check, that denylist is bypassable. Same class as `/\/\/evil.com` / `//%5Cevil.com` (backslash↔slash after decode) when validation runs on the undecoded form and the sink/browser normalizes later.
 - `https://trusted.com@evil.com` — attacker host hidden in the authority/userinfo section
-- URL encoding: `%2F%2Fevil.com`
+- URL encoding: `%2F%2Fevil.com` — off-site only when the server decodes the value after its check (*Validate-then-decode-again*); a browser keeps `%2F` in a `Location` path, so `/%2f%2fevil.com` stays on the current host
 - Go partial check bypass: `strings.HasPrefix(redir, "/")` passes for `//evil.com` and `/\evil.com` — weak prefix-only validation
 - **Scheme-relative variants**: `//evil.com/path`, `/%2f%2fevil.com`, `\evil.com` (leading backslash)
 - **Allowlist substring tricks**: `contains("trusted.com")` passes `https://evil.com/?x=trusted.com`; `endsWith(".trusted.com")` passes `evil-trusted.com`; `startsWith("https://trusted.com")` passes `https://trusted.com.evil.com`
 - **Userinfo @ variants**: `https://trusted.com@evil.com`, `//trusted.com@evil.com`, `/trusted.com@evil.com`
 - **CRLF in redirect value**: `%0d%0a` or literal `\r\n` embedded in param — flag taint reaching `Location`; classify as `http_response_splitting` only when CR/LF breaks header structure
-- **Multi-layer encoding**: `%252f%252fevil.com` (double-encoded `//`), `\u002f\u002fevil.com`, `%5c%65vil.com` (encoded `\e`)
+- **Multi-layer encoding**: `%252f%252fevil.com` (double-encoded `//`), `\u002f\u002fevil.com`, `%5c%65vil.com` (encoded `\e`) — each takes effect only where the value is decoded or unescaped after the check
 - **Mixed separators**: `/\/evil.com`, `//evil.com%2f@trusted.com` — parser/normalizer divergence vs naive prefix checks
 - **Multiple leading slashes**: `///evil.com`, `////evil.com`, `/////evil.com` — browsers collapse the extra slashes and treat the value as protocol-relative, while a guard that inspects only the first one or two characters (`startsWith("/")` and `!startsWith("//")`) passes it
-- **Backslash as authority separator**: browsers normalize `\` to `/`, so `\\evil.com`, `\/\/evil.com`, `/\/evil.com`, `/\/\/\evil.com`, `//\/evil.com`, and encoded forms `//%5Cevil.com` / `/%5Cevil.com` all resolve to an off-site protocol-relative target that slash-only or “literal `\` only” checks miss when they do not decode first
+- **Backslash as authority separator**: browsers normalize `\` to `/`, so `\\evil.com`, `\/\/evil.com`, `/\/evil.com`, `/\/\/\evil.com`, `//\/evil.com` all resolve to an off-site protocol-relative target that slash-only checks miss; the encoded forms `//%5Cevil.com` / `/%5Cevil.com` do so only when the server decodes the value after its check (*Validate-then-decode-again* below) — a browser does not decode `%5C` in a `Location` path, so `/%5Cevil.com` stays on the current host and `//%5Cevil.com` is no URL
 - **Parser-confusion via userinfo delimiters**: the validator and the browser disagree on where the host ends. `https://trusted.com#@evil.com`, `https://trusted.com?@evil.com`, `https://trusted.com:80#@evil.com`, `https://trusted.com;@evil.com`, a bare leading `@evil.com`, multiple `@` (`a@trusted.com@evil.com`), and encoded forms (`%40`, `%23`, `%3F`, Unicode small semicolon `﹔`) move the real host past a prefix/`contains` allowlist
+- **Backslash before the userinfo `@` (`\@`)**: `http://evil.com\@trusted.com/` — Python's `urlparse` takes everything before the last `@` as userinfo and reads host `trusted.com`, while the browser's WHATWG parser ends the authority at the `\` of an `http(s)` URL and navigates to `evil.com`. A check on the parsed host passes and the redirect lands off-site.
 - **Encoded host metacharacters**: `%2e` / double-encoded `%252e` for the dot (`trusted.com%2eevil.com`), `%2f`/`%5c` inside the host, and `%40` for `@` — decode server-side to push the effective host outside an allowlisted prefix
 - **Scheme obfuscation**: colon-only scheme with no slashes (`https:evil.com`, `http:evil.com`), encoded scheme colon (`https%3A/evil.com`), and `javascript:`/`data:` schemes hidden via HTML entities (`javascript&#58;`, `&colon;`, `&Tab;`/`&NewLine;`), `\xNN`/`\uNNNN`/octal `\NNN` escapes, or embedded newlines/tabs (`java%0ascript:`, `java%09script:`) — bypass denylists matching the literal scheme string
 - **IDN / Unicode host homoglyphs**: full-width or alternative code points that a parser maps back to ASCII — e.g. ideographic full stop `。` (`%E3%80%82`) or half-width `｡` used as the dot, full-width letters, and homoglyph domains — defeat an exact-string host compare unless the host is IDNA/punycode-normalized first
@@ -94,6 +95,8 @@ return redirect(url)
 - **Validate-then-decode-again (double-decode ordering bug)**: the validator parses/checks the value at decode-level *N*, but the code path that issues the redirect performs **one more decode** before writing `Location` (e.g. validate with `parse_url($next)` on the raw string, then `header("Location: ".urldecode($next))`). A double-encoded metacharacter survives the first decode as a harmless literal and is decoded into an active delimiter at redirect time. Canonical payload: `https://trusted.com%2523%40evil.com/path` → validation sees `https://trusted.com%23@evil.com` (the `%23` reads as a literal in the userinfo, host = `trusted.com`, **passes**) → the extra decode turns `%23` into `#`, yielding `https://trusted.com#@evil.com/...` so everything after `#` becomes a fragment and the browser navigates to `evil.com`. Same shape with `%252f`→`/`, `%255c`→`\`, `%2540`→`@`. Indicator: a `decode`/`unquote`/`urldecode` call between the validation point and the `Location`/`redirect()` sink, or validation on `request.GET['x']` while the framework decodes again downstream.
 
 **SAST principle for all of the above**: any allowlist/denylist applied to the **raw string** (prefix, suffix, `contains`, regex) is bypassable because the validator and the browser's URL parser disagree on scheme/host boundaries — **or because a second decode happens after validation**. Safe validation fully decodes/canonicalizes **first**, parses the value with a spec-compliant parser (WHATWG URL / `java.net.URI` / `urlparse`), **IDNA/punycode-normalizes the host**, compares the parsed host against an exact allowlist, rejects any non-`http(s)` scheme, backslash, or control character, and ensures **no further decoding occurs between validation and the redirect sink**.
+
+**Validate the same string you use.** Parsing before checking does not close the gap when the code then emits the original input: `if urlparse(next).hostname in ALLOWED: return redirect(next)` passes every value the validator's parser and the browser's parser read differently — a `\` in the authority: `\@` against an exact host set, `https://evil.com\.trusted.com` against a suffix check. Redirect only to a URL rebuilt from the validated components, or reject `\`, userinfo and control characters before parsing — the same split is behind OAuth loopback `redirect_uri` theft (`oauth_oidc_misconfiguration.md` condition 27). Read the sink before rating: a redirect helper that percent-encodes `\` (Starlette's `RedirectResponse` writes `%5C`) keeps the browser off the attacker's host.
 
 ## Detection Indicators (grep)
 
@@ -139,6 +142,7 @@ startsWith\s*\(\s*["']/["']
 HasPrefix\s*\([^,]+,\s*["']/["']
 indexOf\s*\(\s*["']trusted
 endsWith\s*\(\s*["']\.trusted
+urlparse\([^)]*\)\.(hostname|netloc)
 \.contains\s*\(\s*["']trusted
 match\s*\(\s*["']\^/
 ```

@@ -386,7 +386,7 @@ names that file (the path test below):
 > severity in capitals and without the Adversarial field — that field is consolidation's. After the records, four
 > sections the file holds even when it holds no finding: the Clearance Records for every class you cleared, the
 > coverage checklist, the pass log, and the convergence status; their numbers go into the sentinel below, whose
-> right-hand values are copied from `partition-p<n>-manifest.txt`. Your partition is a third of the repository, so a
+> right-hand values are copied from `partition-p<n>-manifest.txt`. Your partition is one part of the repository, so a
 > class or surface you found absent is written `SAFE in p<n> — no <surface> in this partition`, never the unscoped
 > `SAFE — no such production surface`; and a clearance that rests on absent callers names the sink, lists the callers
 > you enumerated repository-wide, and reads `no in-repository production caller` — what lies outside this repository is
@@ -1724,13 +1724,13 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   read from the `close-out:` line of the newest earlier report — the last file of the scan-plan's `earlier-reports:`
   row — as its `table rows` and `body blocks` values (`n/a` only when that row reads `earlier-reports: 0`), and `worker
   records` for this run is the table's rows minus its `carried` and `refuted` rows. The streak is derived, never asserted: the previous run line's streak plus one when `f` is 0, `k` is at most 3 and the
-  plan holds no `worker not run:` line — the union of findings has stopped growing, and a partition nobody read says nothing
-  about it — else 0. The body
+  plan holds no `worker not run:` line — the union of findings has all but stopped growing, and a partition nobody read
+  says nothing about it — else 0. The body
   count is no longer the measure: under the same-commit carry the body is the ledger's open keys plus this run's new
   ones, so it can only grow, and how many known sinks a day's workers happened to re-confirm no longer moves it; the
-  measure is whether the ledger still gains keys. Three new keys, not zero: one more caller of a known sink or one
-  re-keyed sink does not mean the repository is still yielding findings, and thirty new keys does. `mature` is
-  written only at a streak of 2 or more, and the
+  measure is whether the ledger still gains keys. Three new keys, not zero: re-scans of a converged commit still record
+  a key or two that the ledger did not hold, while thirty new keys mean the repository is still yielding findings.
+  `mature` is written only at a streak of 2 or more, and the
   memory's new run line carries the same streak, so the two never differ. The two `vs` pairs and `carried` are evidence for the
   reader, not inputs to the streak.
   The report header repeats the status on its first screen: a `Maturity:` line directly under `Base SHA:`, reading
@@ -1833,11 +1833,12 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   `earlier reports:` close-out line makes a loss visible instead of silent.
 - **The ledger-phrase gate is case-insensitive because most re-runs in one run were for `New entry points: 0` written
   at the start of a sentence** — the phrase was present; only its capitalization differed.
-- **Worker files must end in `coverage:` and `passes:` lines because a template sentence read as "omit them".** One
+- **Worker files hold their Clearance Records, coverage checklist, pass log and convergence status even with no finding
+  because a template sentence read as "omit them".** One
   run's workers took "without the Adversarial field, the Clearance Records, the coverage checklist, the pass log and
   the convergence status" literally: most files had no coverage line, nearly all no pass log or clearance records, and
   some held only the header, `ledger empty` and the sentinel — almost no evidence for the partition with the most
-  entry points. The sections are now required with two checkable lines, and the gate checks them.
+  entry points. The sections are now required, and their numbers go into the sentinel, which the gate reads.
 - **The gate writes a `gate:` line per worker file because a gate that ran only some of its checks passed a file
   citing a path that did not exist.** The consolidator's citation verification passed it too; the orchestrator found
   it after the report was written, re-ran the worker, and string-patched the report, table and gates file itself — a
@@ -1880,8 +1881,8 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   that confirmed many new findings.** The streak had been asserted by the writer into a memory line no reader opens;
   it is now derived from the new-key and found-late counts and shown beside the record counts, which are evidence for
   the reader and not inputs.
-- **Class clearances are partition-scoped and checked against the body because one worker cleared a whole attack
-  class from its third of the repository.** It wrote "0 applicable production hits in the assigned partition" and
+- **Class clearances are partition-scoped and checked against the body because one worker cleared a whole attack class
+  from its partition.** It wrote "0 applicable production hits in the assigned partition" and
   stamped it `SAFE — no such production surface`; another worker's body finding of exactly that class sat in the
   same report, and STEP X, which reconciles by sink, kept the clearance with a boilerplate verdict. A clearance
   resting on absent callers now also says "in-repository", because what an external consumer does with an upload
@@ -1898,9 +1899,9 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   The workers had not re-confirmed them, the writer read "mark now-fixed ones fixed" without a guard, archived them,
   and deleted a run line from the history; the next `new-scan` would have re-traced too few sinks and called the loss
   maturity. At the same commit a finding not re-found is a miss, and a miss stays open.
-- **Compiled contracts are checked for the two spec sentences because one omitted the first-line spec and every worker
-  of a wave came back with the wrong header.** The sentinel sentence in the same contract was verbatim and reached
-  every worker.
+- **Compiled contracts are checked for the first-line and sentinel forms because one omitted the first-line spec and
+  every worker of a wave came back with the wrong header.** The sentinel sentence in the same contract was verbatim and
+  reached every worker.
 - **The configuration rule names its trigger phrases because consolidations reported `rewritten: 0`** while the
   clearance it was written for — "disabled by default and environment-gated" — stood in every one of them.
 - **Verdicts carry across runs because consecutive re-scans downgraded nothing** at a commit where the run before them
@@ -1919,8 +1920,8 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   than the run before,** some of them across different entry points. The **Duplicates** rule's merges across classes
   or sink lines keep that constraint's point — one entry point, the merged class named on the kept block — and each is
   judged on a line of its own.
-- **The contract check asks for the two forms, not the template's sentences, because a paraphrased contract reached
-  every worker** while an earlier contract that omitted the first-line form reached none.
+- **The contract check asks for the two forms exactly and leaves the words around them to the orchestrator, because a
+  paraphrased contract reached every worker** while an earlier contract that omitted the first-line form reached none.
 - **The configuration phrases are narrowed because a flag named beside real code guards is not a clearance by
   configuration**; the broad list matched such guard lists and no configuration-only clearance.
 - **Record enumeration strips line prefixes because one worker wrote its records as headings and every count missed
@@ -2065,16 +2066,15 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   report's disputed sinks sat in its body as bare `STANDING`**.
 - **`entry points dispositioned` takes its denominator from a command because one report read `0/0` against a long
   list.**
-- **The maturity streak follows the body count, not the key count, because re-scans at one commit held the findings
-  level while the ledger kept growing**: the keys grow from re-keyed sinks and newly traced routes long after the
-  findings have stopped moving, so a key-based streak never leaves zero on a converged repository. Superseded: once
-  open ledger rows are carried into the body at an unchanged commit, the body can no longer swing with the workers'
-  re-confirmation, and the key count — bounded at three — is the measure again.
+- **The streak allows up to three new keys, not zero, because re-scans of a converged commit still record a key or two
+  that the ledger did not hold**: a streak that waits for zero new keys never leaves zero there. For a while the streak
+  followed the body count instead; once open ledger rows are carried into the body at an unchanged commit, the body can
+  no longer swing with the workers' re-confirmation, and the key count, bounded at three, is the measure again.
 - **The pre-write copy is per run and the row pattern admits a line range because one redo used the previous run's
   copy and one count missed the rows that cite a range**.
-- **The contract check asks for the two forms and nothing else because its third element, the partition manifest's
-  path, was never in a contract yet always reported present**: a contract is compiled per lens and serves three
-  partitions, so the path lives in the dispatch prompt, which the path test already verifies. A check with an element
+- **The contract check does not ask for the partition manifest's path because that element, once part of the check, was
+  never in a contract yet always reported present**: a contract is compiled per lens and serves every partition of its
+  lens, so the path lives in the dispatch prompt, which the path test already verifies. A check with an element
   nothing can satisfy is a check that gets asserted.
 - **The start count is taken over a copy STEP 1 makes because one scan plan carried the previous plan's number as a
   literal**: the script that wrote the row had a counting function and did not call it, the row was rewritten after
@@ -2130,7 +2130,7 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   hold still. Every source block of the newest report holding the key is carried, one per entry point, so a sink
   several routes reach keeps every route; each carried block says on its second line that it was not re-judged, its
   source is named and checked, the ledger stays the record, and maturity now asks the one question the streak was for:
-  has the union of findings stopped growing.
+  has the union of findings all but stopped growing.
 - **The start count names the section and the waves are rostered before dispatch because the same two slips recurred
   under rules that already forbade them**: runs counted the whole memory file where the rule said the ledger, and runs
   started more workers than a cap of fifteen allows. A count that names its boundaries and a list written before the
@@ -2167,11 +2167,12 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
 - **The recheck runs when the writing subagent has returned, never between its passes, because one set measured a
   skeleton** the writer was still filling and recorded mismatches that described nothing but the moment; a set taken
   on a draft is noise that a repair could be dispatched on.
-- **The recheck derives the maturity streak, checks the join line and the sentinel, because one report declared
-  `streak 1` over a body whose block count had moved, wrote `continuity join: 0` against previously downgraded sinks,
+- **The recheck derives the maturity streak, checks the join line and the sentinel, because one report declared a
+  `streak 1` its own counts did not give, wrote `continuity join: 0` against previously downgraded sinks,
   and ended without its sentinel while every counted item passed.** A maturity line that is asserted is the one line
   the reader acts on; a join line that is asserted makes continuity a repair again; a report without its last line is
-  unfinished by the skill's own definition. All three are now numbers the script computes.
+  unfinished by the skill's own definition. None of the three is the writer's word now: the script derives the streak,
+  recounts the join and reads the last line.
 - **The shipped recheck reads a corrected row's corrected value, matches a correction-appended line to its original,
   and counts a record whose heading opens with a confidence tag**, because its first run flagged things the rules had
   already accepted: a start count corrected by the append rule, the same append read as a removed STEP 1 row, and
@@ -2357,7 +2358,8 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   j + 1 rows over 15,000 / (j + 1) lines never share a partition under 15,000 — which ends where counting up from the
   floor does, in seconds where counting up took minutes on hundreds of big rows.
 - **Test code and prose docs have partitions of their own, and the browser lens reads its own family's files, because
-  the base lenses found nothing there.** In earlier runs no worker record stood in a file the test-name rule names and
+  the base lenses found almost nothing there and the browser lens little outside its family.** In earlier runs no worker
+  record stood in a file the test-name rule names and
   few in docs files, nearly all from the two lenses that still read them; of the browser lens's records that no base
   lens also found, the few outside its family each stood in a server-side handler in a file of no web extension. The
   family is read from file names and the entry list, never from a manifest or the derivation cell: the cell of a
@@ -2378,9 +2380,9 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   `test_goldens/`, `test_benchmarks/` or `test_app/`; the few under an agent directory stay source by the
   agent-configuration rule, and the few under a package's `lib/` — an environment module reading cloud keys and a
   test-utility package's library, under no test directory, and, by the `lib/` rule, a card test filed in a `tests/`
-  folder there; the directory rule keeps a `bloc_test` package's `lib/`, a `speed_test` package's `bin/`, a
-  `lib/features/speed_test/` or a `tool/ab_test/` folder source, and a repository whose own package is named `test`
-  would read that library as test), `.mdx` and the trees an application serves are never prose, agent skills
+  folder there — stay source too; the directory rule keeps a `bloc_test` package's `lib/`, a `speed_test` package's
+  `bin/`, a `lib/features/speed_test/` or a `tool/ab_test/` folder source, and a repository whose own package is named
+  `test` would read that library as test), `.mdx` and the trees an application serves are never prose, agent skills
   (`.agents/skills/*/SKILL.md`) and prompts are never prose, and cloud-infra was measured and kept on every source
   partition, many of its records outside CI, IaC and configuration files being found by no base lens. On the largest
   scopes this cuts a full scan's workers substantially; a repository with docs and no lock files, test code or browser

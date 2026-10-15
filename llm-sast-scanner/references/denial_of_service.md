@@ -1,7 +1,7 @@
 ---
 name: denial_of_service
-version: "0.4"
-description: Denial of Service detection — vulnerable code patterns for ReDoS, XML bomb, Zip bomb, resource exhaustion, unbounded operations, missing rate/size limits, Java exposed-monitor lock DoS (public static synchronized / locking on Class or this), and panic/abort/uncaught-exception crashes reachable from untrusted input (memory-safe languages — Rust unwrap/expect/index/overflow, Go type-assertion/nil-map/index, CWE-248)
+version: "0.5"
+description: Denial of Service detection — vulnerable code patterns for ReDoS, XML bomb, Zip bomb, resource exhaustion, unbounded operations, missing rate/size limits, uncapped request bodies buffered before the handler, attacker-sized writes to persistent logs (CWE-779), Java exposed-monitor lock DoS (public static synchronized / locking on Class or this), and panic/abort/uncaught-exception crashes reachable from untrusted input (memory-safe languages — Rust unwrap/expect/index/overflow, Go type-assertion/nil-map/index, CWE-248)
 ---
 
 # Denial of Service (DoS)
@@ -18,6 +18,7 @@ GraphQL endpoints accept declarative query documents that can amplify server wor
 - **CWE-770**: Allocation of Resources Without Limits or Throttling
 - **CWE-1333**: Inefficient Regular Expression Complexity (ReDoS)
 - **CWE-776**: Improper Restriction of Recursive Entity References in DTDs (Billion Laughs)
+- **CWE-779**: Logging of Excessive Data (attacker-sized writes to a persistent log)
 
 ## Vulnerable Patterns
 
@@ -159,6 +160,64 @@ def upload():
 app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16 MB
 ```
 
+### Unbounded Request Body Buffered Before the Handler
+
+Some stacks read the whole HTTP body into memory before the handler or its validation runs. FastAPI calls
+`await request.body()` for a JSON body parameter before model validation; Form and File parameters go through
+`request.form()`, where a multipart body is bounded per non-file part with its files spooled to disk, but a urlencoded
+body — the client picks the type — is buffered whole with no limit, as JSON is. Starlette's
+`Request.body()` / `json()` collect every chunk; Uvicorn has no HTTP request-body size setting (its limits cover headers,
+WebSocket messages and concurrency — checked on 0.33; confirm in the pinned version). An endpoint reachable without
+authentication that takes a body, with **no cap in effect**, lets one client hold as much memory as it sends, and
+concurrent requests multiply it: the client-controlled allocation the False Positive rule below asks for, not a
+missing-limit gap. A cap in effect clears it — one the repository sets in the application, a framework setting or the
+proxy configuration it ships, or a default of that framework, server or proxy at the pinned version (nginx's
+`client_max_body_size` defaults to 1m; Express's `json()` parser to 100kb); the ASGI stack above and Go's `net/http`
+when the handler reads `r.Body` itself (`ParseForm` caps a urlencoded body at 10 MB) have none. **A cap is a limit on
+the bytes actually received, enforced while reading and before parsing**: a check on
+the `Content-Length` header alone is not one — a chunked request carries no `Content-Length` and passes it.
+
+```python
+# VULNERABLE: the length check reads a header a chunked request omits; the body is then buffered whole
+@app.post("/auth/token")
+async def token(request: Request):
+    if int(request.headers.get("content-length", "0")) > 64_000:
+        raise HTTPException(413)
+    data = await request.json()
+
+# SAFE: count bytes while reading and stop at the cap
+async def read_capped(request: Request, cap: int = 64_000) -> bytes:
+    buf = bytearray()
+    async for chunk in request.stream():
+        buf += chunk
+        if len(buf) > cap:
+            raise HTTPException(413)
+    return bytes(buf)
+```
+
+`read_capped` caps only a handler that reads the request itself: where a body parameter is declared, the framework has
+buffered the body before the handler runs, so the cap belongs in middleware or the proxy. Go: wrap the body in
+`http.MaxBytesReader(w, r.Body, cap)` before decoding; `r.ContentLength` is `-1` for a chunked request.
+
+### Unbounded Attacker Data Written to Persistent Storage (CWE-779)
+
+A handler reachable without authentication that writes an attacker-sized value to a file that outlives the request — an
+audit or failed-login log, a debug dump, a spool — lets repeated requests fill the disk, and every component writing to
+that volume fails with it. Typical shape: a failed login logs the submitted username, provider or tenant field verbatim,
+with no length cap, before rejecting it; the response is an ordinary failure, so nothing stands out, and a rate-limit
+bypass (`xff_spoofing.md`) removes the bound on repetition. A per-field cap or a request-body cap in effect bounds each
+write and clears the finding; rotation (`RotatingFileHandler(maxBytes=…, backupCount=…)`, a logrotate configuration it
+ships) bounds the total only once each write is capped — one oversized record still lands whole.
+
+```python
+# VULNERABLE: an unbounded attacker field written to a persistent log on a pre-auth path
+audit.warning("login failed provider=%s user=%s", body["provider"], body["user"])
+
+# SAFE: cap each field, and cap the log itself
+audit.warning("login failed provider=%s user=%s", body["provider"][:64], body["user"][:128])
+handler = RotatingFileHandler(AUDIT_LOG, maxBytes=10_000_000, backupCount=5)
+```
+
 ### Missing Pagination / Unbounded DB Query
 
 ```java
@@ -266,6 +325,7 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 - DB query / `findAll()` with user-controlled unbounded page size (no upper bound enforcement) → **CONFIRM**
 - Missing rate limiting on auth endpoints → classify under `brute_force`, NOT `denial_of_service` (requires an actual unbounded/amplifiable resource sink)
 - `tarfile.extractall()` / `ZipFile.extractall()` without member size validation → **CONFIRM**
+- A route the auth middleware lets through without a session (login, token, refresh, authorize, signup, webhook) that buffers a body with no cap in effect, or writes an attacker-sized value to a persistent file → **CONFIRM** — check these routes first for bytes buffered or written
 
 ### FALSE POSITIVE
 
@@ -285,6 +345,8 @@ recursiveCompute(data, depth);   // no max depth → StackOverflowError or OOM
 | ReDoS: fixed super-linear pattern on an attacker-supplied subject no short cap bounds (report as `regex_injection_redos`) | High |
 | Zip/Tar decompression bomb without size limit | High |
 | Unbounded file upload (no size limit) | Medium |
+| Request body buffered with no cap in effect (a `Content-Length` check alone is none) | Medium, as an unbounded upload |
+| Attacker-sized field written to a persistent file per request (CWE-779) | Medium — High when reachable without authentication and repeatable without a rate limit |
 | Missing pagination on bulk data endpoints | Medium |
 | Missing rate limiting on auth endpoints | N/A — use `brute_force` tag |
 | User-controlled hash iterations (bcrypt rounds) | Medium |

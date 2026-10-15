@@ -1,7 +1,7 @@
 ---
 name: oauth_oidc_misconfiguration
-version: "0.7"
-description: OAuth 2.0 / OpenID Connect flow misconfiguration — weak redirect_uri validation, missing state/PKCE, authorization-code reuse, token-exchange and refresh-token rotation race conditions, incomplete revocation (persistent access after revoke, silent re-approval), cross-client token acceptance, unverified email linking, multi-tenant / enterprise SSO with customer-controlled IdP (missing verified-domain binding, global vs tenant-scoped identity, blind JIT provisioning → cross-tenant account takeover), scope manipulation (dropping email scope → absent/undefined email claim → ORM match-all wrong-user login), implicit/ROPC grants, XSS-on-callback authorization-code theft, dynamic registration SSRF, SAML signature flaws (stripping, wrapping, partial Response-only signing, comment truncation), and SAML ACS/Destination/Recipient binding gaps (CWE-287 / CWE-346 / CWE-362 / CWE-601 / CWE-613)
+version: "0.8"
+description: OAuth 2.0 / OpenID Connect flow misconfiguration — weak redirect_uri validation (including a loopback redirect_uri checked on a parsed host and emitted raw), missing state/PKCE, authorization-code reuse, token-exchange and refresh-token rotation race conditions, incomplete revocation (persistent access after revoke, silent re-approval), cross-client token acceptance, unverified email linking, multi-tenant / enterprise SSO with customer-controlled IdP (missing verified-domain binding, global vs tenant-scoped identity, blind JIT provisioning → cross-tenant account takeover), scope manipulation (dropping email scope → absent/undefined email claim → ORM match-all wrong-user login), implicit/ROPC grants, XSS-on-callback authorization-code theft, dynamic registration SSRF, SAML signature flaws (stripping, wrapping, partial Response-only signing, comment truncation), and SAML ACS/Destination/Recipient binding gaps (CWE-287 / CWE-346 / CWE-362 / CWE-601 / CWE-613)
 ---
 
 # OAuth 2.0 / OIDC Misconfiguration (CWE-287 / CWE-346 / CWE-601)
@@ -26,6 +26,7 @@ OAuth 2.0 and OpenID Connect delegate authentication and authorization to an ide
 # Redirect URI validation (weak match vs exact list)
 rg -ni 'redirect_uri|redirectUri|redirect_uri_valid|validateRedirect' --glob '*.{js,ts,jsx,tsx,py,java,go,rb,php,cs}'
 rg -ni 'startsWith|endsWith|includes\(|indexOf|match\(|RegExp|\.test\(' --glob '*.{js,ts,py,java}' -C2 | rg -i 'redirect'
+rg -ni 'urlparse|urlsplit|new URL\(|parse_url|getHost' -C3 --glob '*.{py,js,ts,java,go,rb,php,cs}' | rg -i 'redirect|loopback|127\.0\.0\.1|localhost'
 
 # Flow parameters
 rg -ni 'response_type|response_mode|grant_type|code_challenge|code_verifier|code_challenge_method' .
@@ -208,6 +209,7 @@ Then trace each hit: does redirect validation compare **full strings** against a
 24. **SAML ACS / Destination / Recipient binding gaps (SP open redirect & assertion mis-delivery)**: signature validation alone does not prove the Response was meant for **this** SP endpoint. Concrete shapes: (a) **ACS URL not allowlisted** — SP honors `AssertionConsumerServiceURL` from the AuthnRequest, an IdP override, or a client-supplied ACS without comparing it to a registered ACS set, then POSTs the assertion (or redirects the browser after login) to that URL → open redirect / token theft at an attacker ACS. (b) **`Response/@Destination` not checked** — SP never asserts `Destination == registered ACS` (scheme/host/path exact), so a Response crafted for another endpoint is accepted. (c) **`SubjectConfirmationData/@Recipient` not checked** — same class for the assertion subject confirmation recipient. Distinct from OAuth `redirect_uri` (condition 1) and from `RelayState` open redirects (`open_redirect.md`): here the binding is SAML protocol attributes on the Response/Assertion. **Do not CLOSE** because staff say "ACS is IdP configuration." The SP must enforce its own ACS allowlist and Destination/Recipient equality. Indicators: ACS taken from request/AuthnRequest without set membership; no `getDestination`/`Recipient` compare; `allowRequestAcsUrl=true` without an allowlist. Controls: exact-match registered ACS list; require `Destination` and `Recipient` equal the consuming ACS; treat `RelayState` as a separate allowlisted redirect (see `open_redirect.md`).
 25. **Non-happy-path credential retention + third-party URL leak ("dirty dancing")**: the IdP still issues a valid `code`/`token`, but the client **fails closed** on `state` / wrong `response_type` / unexpected mode and renders an **error, login, or marketing page that (a) does not strip/consume the credential from the URL and (b) loads third-party or first-party scripts that can exfiltrate `location.href`** (analytics SDKs, chat widgets, GTM, storage iframes, weak `postMessage` listeners — see `postmessage_security.md`). Classic chain: attacker starts authorize with **their** `state`/`code_challenge`, sends the victim that authorize URL; victim completes IdP login; client rejects `state` and shows an error **still carrying the victim's `code`**; a URL-leak gadget returns the URL to the attacker; attacker redeems with **their** `code_verifier`. **PKCE does not stop this** — the attacker prepared the challenge. **Do not CLOSE** because "state is validated correctly" or "third-party scripts are out of OAuth scope." **SAFE**: on every OAuth callback outcome (success **and** failure), immediately strip `code`/`token`/`id_token` from the URL (replace/redirect to a clean path, or backend-only exchange with no credential in a renderable URL); **do not** load third-party scripts, chat widgets, or analytics on callback/error pages involved in the dance (OAuth BCP); prefer a bare error response; restrict the client to the single `response_type`/`response_mode` you implement.
 26. **The scanned app IS the IdP, and it issues grants for accounts it never verified** (provider-side mirror of item 6, which is the consumer trusting the claim): the authorization endpoint mints a code/token for a self-registered account whose address was never proven, so every downstream relying party — which reads the address as identity and merges it with an existing local account — inherits an identity the provider never established. Two shapes, and both ship: (a) the flow contains **no verification check at all**, so registering under any address yields a working grant; (b) the check exists **only where the page is rendered** — a "verify your email before signing in" branch in the view, with the authorize handler accepting a POST that carries a valid CSRF token, client_id, redirect_uri, state and session cookie. Shape (b) survives review because the guard is visibly present and even server-rendered; it is the *handler* that never re-evaluates it (see `privilege_escalation.md` → Client-Side Enforcement). Indicators: an `/oauth/authorize`-equivalent action, or the grant/consent service it delegates to, with no `confirmed_at` / `email_verified` / `account.active` predicate on the POST path; a verification condition that appears in a template or a `before_action` scoped to `GET` only; token/userinfo responses emitting an `email` claim with no `email_verified` alongside it, or emitting `email_verified: true` derived from anything other than a completed proof-of-ownership event. Fix: gate grant issuance on the persisted verification fact inside the authorization handler, on every method; never emit `email_verified: true` for an address that has no completed verification record; and treat a stale `email_verified` as unverified when the address changed after it was set
+27. **Loopback `redirect_uri` checked on a parsed host, then used as the raw string (native / CLI clients)**: RFC 8252 has the authorization server accept any port at request time for a loopback redirect, so the server validates by host — typically `urlparse(uri).hostname in ("127.0.0.1", "localhost", "::1")` — and then stores the **original string** and later redirects the browser to it with the `code` appended. The validator's parser and the browser's disagree on where the host ends: for `http://attacker.example\@127.0.0.1:12345/cb` Python's `urlparse` reads host `127.0.0.1`, while the browser's WHATWG parser ends the authority at the `\` of an `http(s)` URL and navigates to `attacker.example`, delivering the code there. **PKCE does not mitigate it**: the attacker starts the flow with a `code_challenge` of their own and redeems the stolen code with their `code_verifier`. The sink decides exploitability: a redirect helper that percent-encodes `\` defeats it — Starlette's `RedirectResponse` writes `%5C`, which the browser keeps inside the userinfo, so the host stays loopback — while a hand-set `Location` header, a script redirect (`window.location`) or a meta refresh sends the raw string; read every sink the stored URI reaches before rating. The finding is the validated-parse / emitted-raw split; the parser-confusion forms are in `open_redirect.md` (*Evasion Patterns*, *Validate the same string you use*) and `ssrf.md` (*WHATWG vs RFC3986*).
 
 ## Vulnerable vs Safe Code Examples
 
@@ -225,6 +227,26 @@ function validateRedirect(requested, registeredList) {
 ```
 
 **`@`-userinfo bypass + the trailing-slash discriminator.** A prefix check is also defeated by the URL *userinfo* component: `https://app.example.com@evil.com/cb` passes `startsWith("https://app.example.com")`, but a browser parses everything before the `@` as userinfo and navigates to **evil.com**. Exploitability turns on a **trailing slash**: `startsWith("https://app.example.com")` (no slash) is vulnerable (`...com@evil.com` matches the prefix), while `startsWith("https://app.example.com/")` (with slash) is **not** — the `@` then falls after the first path `/`, so the authority stays the legit host. (URL rule: `@` separates userinfo from host; the host component ends at the first `/`, `?`, or `#`.) Use this as a true/false-positive discriminator on prefix-match findings: a **no-trailing-slash** prefix is exploitable via both `@`-userinfo and the `.evil.com` sibling-domain trick; a **trailing-slash** prefix closes the `@`-userinfo vector (still verify there's no path wildcard / open redirect path). The robust fix remains exact-match against the registered set.
+
+```python
+# VULN: loopback check on the parsed host; the raw string is stored and redirected to
+def accept_native_redirect(raw):
+    if urlparse(raw).hostname not in ("127.0.0.1", "localhost", "::1"):
+        raise ValueError("loopback only")
+    return raw   # http://attacker.example\@127.0.0.1:12345/cb passes; the browser goes to attacker.example
+
+# SAFE: reject what the browser parses differently, match the registered path (only the port varies), store the rebuilt URI
+def accept_native_redirect(raw, registered_path):
+    if "\\" in raw or any(ord(c) < 0x21 or ord(c) == 0x7f for c in raw):
+        raise ValueError("bad redirect_uri")
+    u = urlsplit(raw)
+    if u.scheme != "http" or "@" in u.netloc or u.path != registered_path:
+        raise ValueError("bad redirect_uri")
+    if u.hostname not in ("127.0.0.1", "::1") or not u.port:
+        raise ValueError("loopback only")
+    host = f"[{u.hostname}]" if ":" in u.hostname else u.hostname
+    return urlunsplit(("http", f"{host}:{u.port}", u.path, u.query, ""))
+```
 
 ```javascript
 // VULN: callback without state verification — CSRF / forced login
@@ -430,6 +452,7 @@ def register_client(body):
 ## Safe Patterns
 
 - **Redirect URI**: register exact URIs per client; compare with constant-time equality (or normalized canonical form with fixed rules); reject open redirects on callback landing pages.
+- **Loopback redirect for native clients** (condition 27): parse once; reject `\`, control characters, userinfo and any scheme but `http`; compare the host to the loopback IP literal; rebuild the URI from the validated parts and store and redirect to only the rebuilt value — the string validated is the string sent.
 - **State + nonce**: CSPRNG `state` stored server-side; single use; OIDC `nonce` echoed in ID token per spec.
 - **PKCE**: require for public clients; only `S256`; bind challenge to authorization request record; verify at token endpoint.
 - **Authorization code**: short TTL (minutes); cryptographically random; delete on successful exchange inside a transaction/lock.
@@ -449,6 +472,7 @@ def register_client(body):
 | Condition | Typical severity |
 |-----------|------------------|
 | Prefix/wildcard `redirect_uri` on confidential or public client | **High** — code/token theft |
+| Loopback `redirect_uri` validated on a parsed host, raw string stored and redirected to (condition 27) | **High** — code theft and session takeover; **Critical** when the stolen session reaches code execution (an admin terminal, a configuration that runs commands) |
 | Missing/weak `state` on login/linking callback | **High** — CSRF account binding |
 | Missing PKCE on public client + predictable redirect | **High** |
 | Authorization code reuse / no TTL | **High** |
@@ -488,7 +512,7 @@ Downgrade when: exact redirect list enforced, state/PKCE/nonce verified, codes s
 - `authentication_jwt.md` — JWT/OIDC **cryptographic** verification, algorithm confusion, `kid`/`jku`, claim validation (`exp`, `iss`, `aud`, `nbf`); not duplicated here.
 - `csrf.md` — OAuth `state` as CSRF token; constant-state anti-patterns.
 - `race_conditions.md` — generic concurrency patterns (TOCTOU, missing lock/atomicity) behind code/refresh token-exchange races.
-- `open_redirect.md` — attacker-controlled redirect destinations; often chained with loose `redirect_uri`.
+- `open_redirect.md` — attacker-controlled redirect destinations; often chained with loose `redirect_uri`. Its *Evasion Patterns* and *Validate the same string you use* hold the parser-confusion forms behind condition 27.
 - `ssrf.md` — server-side fetch of `logo_uri`/`client_uri` during dynamic client registration.
 - `session_fixation.md` — session rotation after OAuth callback / account linking.
 - `host_header_poisoning.md` — poisoned host affecting redirect URI construction.

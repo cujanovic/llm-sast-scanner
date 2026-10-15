@@ -1,7 +1,7 @@
 ---
 name: verification_code_abuse
-version: "0.6"
-description: Detect OTP, captcha, and verification-code flaws such as server-assisted verification bypass (the server obtains and consumes its own challenge), predictable generation, disclosure, brute force, weak TOTP config (short digits, wide acceptance/grace window), replay, shared state, missing reset/OTP token binding (single-use, cross-account, and cross-tenant/workspace scope), ORM operator-injection bypass of a correctly-bound token lookup (non-scalar code/token value), and prototype-chain lookup bypass when a plain JS object is used as an in-memory OTP/session/reset verify map (read-side `__proto__`/`toString`/`constructor` key resolves truthy).
+version: "0.7"
+description: Detect OTP, captcha, and verification-code flaws such as server-assisted verification bypass (the server obtains and consumes its own challenge), predictable generation, disclosure, brute force, weak TOTP config (short digits, wide acceptance/grace window), replay, shared state, missing reset/OTP token binding (single-use, cross-account, and cross-tenant/workspace scope), ORM operator-injection bypass of a correctly-bound token lookup (non-scalar code/token value), and prototype-chain lookup bypass when a plain JS object is used as an in-memory OTP/session/reset verify map (read-side `__proto__`/`toString`/`constructor` key resolves truthy), plus an empty or null placeholder code matched before asynchronous generation writes the real one.
 ---
 
 # Verification Code / OTP / Captcha Abuse
@@ -182,6 +182,10 @@ submitted = (request.json.get('code') or '').strip()
 if not submitted or not secrets.compare_digest(submitted, expected):
     return abort(401)
 ```
+
+## Empty placeholder code matched before asynchronous generation
+
+When the verification row is inserted with an empty or null code and a queue job, callback or unawaited write fills in the real code later, the empty-submission bypass above is reachable only inside that window, so do not clear it because the generator always ends up setting a code. Inside the window an empty or null submission matches the placeholder: a JS `==`/`===` compare (`null === null`, `"" === ""`), an ORM filter that turns `None`/`null` into `IS NULL` (SQLAlchemy `filter_by(code=None)` or `== None`, Prisma `code: null`), and a MongoDB `{ code: null }` filter, which also matches a row with no `code` field. Raw SQL `code = ?` bound to NULL matches nothing, so with raw SQL only an empty-string placeholder is exploitable. A generation step that fails after the insert leaves the same placeholder. This is the request-versus-background-worker race in `race_conditions.md`. Separately, and with no window at all, Prisma treats an omitted `code` as `undefined` and drops the condition (see `oauth_oidc_misconfiguration.md`). **SAFE**: insert the row with its code in one write (or insert nothing until the code exists), and reject an empty or non-string submission before any lookup.
 
 ## Cross-account OTP / token reuse (missing binding)
 
@@ -366,3 +370,4 @@ rg -n "valid_window|grace|skew|drift|window" --glob "*.{py,js,ts,go,java,rb,php}
 
 - `brute_force.md` — attempt counters, lockout, throttling, CAPTCHA on OTP/login/reset endpoints.
 - `authentication_jwt.md` — MFA/TOTP flow binding, recovery-token hashing, session revocation on password change, uniform reset responses.
+- `race_conditions.md` — request-versus-background-worker races, such as an empty placeholder code matched before generation writes the real one.
