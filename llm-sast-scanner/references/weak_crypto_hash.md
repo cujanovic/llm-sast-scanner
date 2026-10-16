@@ -1,6 +1,6 @@
 ---
 name: weak_crypto_hash
-version: "0.4"
+version: "0.5"
 description: Weak cryptography, weak hashing, insecure randomness, and encoding used as encryption detection (CWE-327/328/330/335/311)
 ---
 
@@ -263,6 +263,8 @@ CWE-326 (insufficient key size), CWE-780 (RSA without OAEP), CWE-1204 (static IV
 | Ruby | `==` / `!=` on HMAC | `ActiveSupport::SecurityUtils.secure_compare`, `OpenSSL.fixed_length_secure_compare` |
 | Java | `String.equals` / `Arrays.equals` on MAC | `MessageDigest.isEqual`, `Arrays.compareUnsigned` |
 
+**Not a timing target — a value the requester already holds:** a CSRF or OAuth `state` token compared with the requester's own value — decoded from their own signed-only session cookie (`insecure_cookie.md`) or shown to them in their own page as a form field — is no timing secret, because the comparison can reveal to whoever sends the request only what they already have; it is no finding on that ground. The rule keeps applying where the requester must not learn the expected value: a MAC or signature computed with a server key (a webhook signature), or an API key, reset or verification token checked against a stored value the requester never sees — including one held in a server-side session.
+
 **Other timing leaks on secret-derived values (not just equality)** — flag when the operand is a key, nonce, or other secret:
 - **Division / modulo** (`/`, `%`) on secret-derived values — variable-time on many CPUs (KyberSlash-class leaks in crypto/KEM code). Prefer constant-time arithmetic or masking.
 - **Secret-dependent branches** — `if (secretByte == x)`, early-return on first mismatch in a compare loop, or differing work per secret bit.
@@ -477,8 +479,9 @@ SecretKeySpec\s*\([^)]*\.getBytes\(\)
 - DEK stored with ciphertext without KEK wrap (JSON `{key, data}`, key file beside `.enc`)
 - Password/phrase as raw symmetric key (no KDF), or key shorter than the minimum size below
 - Static/reused IV/nonce; long-lived key with no version/alias/rotation metadata when KMS is absent
+- A signing or session key that is also another credential — `SECRET_KEY` set to an OAuth client secret, an API key or a database password, whether written as a literal (the de-confliction note below applies) or loaded (`app.secret_key = os.environ["OAUTH_CLIENT_SECRET"]`): the key then travels wherever that credential does (the identity provider, other services' config, objects the app serializes — `insecure_cookie.md`, signed-only sessions), so any exposure of it forges every signed value; one key shared across hosts or apps makes a value forged for one valid on all (`authentication_jwt.md`, Key and Cache Issues). Rate it High where the code shows the reused credential exposed to someone who should not hold it (a readable session, a client bundle, a log, config another service reads); its normal use — sent to its own provider, read from this app's environment — is no exposure, and the bullet then keeps this class's rating
 
-> **De-confliction (avoid double-reporting):** a key that is merely *hardcoded and extractable* — `SECRET_KEY = "…"`, `byte[] key = {0x…}`, Base64 key literal in source/committed config — whose size and algorithm are otherwise adequate is **`hardcoded_secrets`** (CWE-798, see `hardcoded_secrets.md`), **not** this class. Report `weak_crypto_hash` only when the *cryptographic* property is wrong (too short, reused for encrypt+sign, DEK-with-ciphertext, password-as-key, static IV). When both are true (e.g. a hardcoded **and** undersized key), prefer `weak_crypto_hash` and note the exposure; do not emit both for the same literal.
+> **De-confliction (avoid double-reporting):** a key that is merely *hardcoded and extractable* — `SECRET_KEY = "…"`, `byte[] key = {0x…}`, Base64 key literal in source/committed config — whose size and algorithm are otherwise adequate is **`hardcoded_secrets`** (CWE-798, see `hardcoded_secrets.md`), **not** this class. Report `weak_crypto_hash` only when the *cryptographic* property is wrong (too short, reused for encrypt+sign, reused as another credential, DEK-with-ciphertext, password-as-key, static IV). When both are true (e.g. a hardcoded **and** undersized key), prefer `weak_crypto_hash` and note the exposure; do not emit both for the same literal.
 
 **SAFE** (any match):
 

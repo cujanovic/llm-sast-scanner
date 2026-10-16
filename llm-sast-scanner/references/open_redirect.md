@@ -1,7 +1,7 @@
 ---
 name: open_redirect
-version: "0.4"
-description: Open redirect and unvalidated forward detection (CWE-601), including Salesforce Apex PageReference, and allowlist/parser-confusion bypasses — protocol-relative, multiple slashes, backslash, userinfo @, encoded host, IDN/Unicode homoglyph, and bidi code-point evasions, and the validated-parse / redirected-raw split
+version: "0.5"
+description: Open redirect and unvalidated forward detection (CWE-601), including Salesforce Apex PageReference, and allowlist/parser-confusion bypasses — protocol-relative, multiple slashes, backslash, userinfo @, encoded host, IDN/Unicode homoglyph, and bidi code-point evasions, and the validated-parse / redirected-raw split, plus Refresh header and meta refresh redirect sinks
 ---
 
 # Open Redirect (CWE-601)
@@ -20,6 +20,7 @@ Identify cases where user-controlled input reaches a redirect or forward target 
 - `RequestDispatcher.forward(userInput)`
 - `ModelAndView("redirect:" + userInput)`
 - JavaScript server-side: `res.redirect(userUrl)`, `Location` response header writes
+- **`Refresh` header and meta refresh**: `res.set('Refresh', '0;url=' + next)`, `response.setHeader("Refresh", "0;url=" + next)`, or a server-rendered `<meta http-equiv="refresh" content="0;url=<user value>">`. The HTML standard gives both the same timed-redirect processing. The response is a `200`, so a check that looks only for `Location` or a 3xx status misses it, and HTML-escaping the value stops markup injection, not the redirect. A `javascript:` target is not run this way (the standard returns without navigating), so the issue is the off-site redirect itself
 - JavaScript client-side: `window.location`, `location.href`, `location.assign` (browser redirect)
 - Python: Flask `redirect()`, Django `HttpResponseRedirect`
 - Go: `http.Redirect`, `Header().Set("Location", ...)`; web-framework redirect helpers — Echo `c.Redirect(code, userURL)`, fasthttp `RequestCtx.Redirect`, Beego `Controller.Redirect`, Revel `Controller.Redirect`, Gin `c.Redirect`

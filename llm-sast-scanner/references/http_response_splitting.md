@@ -1,7 +1,7 @@
 ---
 name: http_response_splitting
-version: "0.1"
-description: HTTP response splitting, CRLF injection, and header/cookie injection detection — including encoding-based sanitizer bypasses (double-encoding, %u, overlong UTF-8, %5c escapes, obs-fold) (CWE-113)
+version: "0.2"
+description: HTTP response splitting, CRLF injection, and header/cookie injection detection — including encoding-based sanitizer bypasses (double-encoding, %u, overlong UTF-8, %5c escapes, obs-fold), and Server-Sent Events field injection (CR/LF in a text/event-stream frame) (CWE-113)
 ---
 
 # HTTP Response Splitting / Header Injection (CWE-113)
@@ -77,6 +77,20 @@ Beyond a single tainted header write, two structural shapes reflect *whole* requ
 - **Honoring a request-supplied `Content-Type` on the response → content-type confusion → XSS.** When the response Content-Type is taken from (or overridable by) the request — common with the "set Content-Type only if not already present" idiom after headers were mirrored — an endpoint that returns a *non-HTML* type containing reflected input (a JSON/`pageProps` blob, a server-component/`text/x-component` payload, an API echo) can be flipped to `text/html`. The reflected input (often an unescaped URL parameter, because escaping was deemed unnecessary for the "safe" type) then executes as HTML. If the flipped response is also cacheable, this is a **stored XSS via cache poisoning** (cross-ref `web_cache_deception.md`, `xss.md`). **SAST signal**: response `Content-Type` derived from request input, or a `if (!res.getHeader('Content-Type')) ...` set *after* request headers were mirrored; combined with reflected request data in the body.
 - **A framework response helper silently re-derives `Content-Type` from a filename, overriding a safe type set earlier.** A dev sets a hardening type (`ctx.set('Content-Type','text/plain')` / `res.type('text/plain')`) on a stored user file, then calls a helper that **re-computes** Content-Type from the (attacker-controlled) filename extension — Koa `ctx.attachment('x.html')`, Express `res.attachment('x.html')` / `res.download(path)` / `res.sendFile(path)` (each calls `res.type()` off the extension), Rails `send_file`/`send_data` with a `:filename` and no explicit `:content_type`. The later call wins, so the object is served as `text/html`/`image/svg+xml` and renders → XSS, defeating the "we forced a safe Content-Type" assumption. **SAST signal**: an explicit safe `Content-Type` set on a user-content response **followed by** an `attachment`/`download`/`sendFile`/`type` call whose name/extension is user-influenced. **SAFE**: set (and re-assert) `Content-Type` + `X-Content-Type-Options: nosniff` **after** the helper, or force `attachment` disposition with a server-fixed extension.
 - **Request param reflected into `Set-Cookie`** (tracking/marketing/A-B params echoed into a cookie): an unvalidated value in the cookie enables cookie injection and, with a payload the WAF would normally block, a persistent self-DoS (the poisoned cookie is replayed on every request and rejected) or escalation when the cookie is later reflected into HTML. Treat `Set-Cookie` value built from request input as a header sink (canonicalize-then-reject CR/LF and constrain the value).
+
+## Server-Sent Events Field Injection
+
+A `text/event-stream` response is a line-based format: a line ends at CRLF, LF or a lone CR, `field: value` lines set `event`, `data`, `id` and `retry`, and a blank line dispatches the event (the HTML standard's server-sent events section). A server that writes request- or user-derived text into a frame as is (`` res.write(`data: ${msg}\n\n`) ``, `yield f"data: {msg}\n\n"`, `writer.write("data: " + msg + "\n\n")`) lets a line break in that text end the event and start new fields or new events: another `event:` type, a forged `data:` payload, an `id:` that becomes the client's `Last-Event-ID` on reconnect, or a `retry:` value. On a broadcast stream (chat, notifications, live updates) every subscriber receives the forged event, and when the client puts event data into HTML it becomes XSS.
+
+```js
+// VULN — user text written into the frame as is; "hi\n\nevent: admin\ndata: {...}" reaches every subscriber as a separate admin event
+for (const c of clients) c.write(`event: chat\ndata: ${text}\n\n`);
+
+// SAFE — every line of the value becomes its own data: field; the event name is fixed
+for (const c of clients) c.write('event: chat\n' + text.split(/\r\n|\r|\n/).map(l => `data: ${l}\n`).join('') + '\n');
+```
+
+**SAFE**: write a multi-line value as one `data:` line per line (or JSON-encode it, which leaves no raw line break), and strip or reject CR and LF in `event`, `id` and comment values; or use a library that does both (sse-starlette's `ServerSentEvent` splits `data` on line breaks and strips them from `event` and `id`). **Recon**: `rg -n "text/event-stream|EventSource|ServerSentEvent|SseEmitter|EventSourceResponse|sse_starlette" --glob '*.{js,ts,py,java,kt,go,rb,php,cs}'`, then check what each stream's writes interpolate.
 
 ## Sanitizers / Barriers
 

@@ -1,7 +1,7 @@
 ---
 name: insecure_deserialization
-version: "1.2"
-description: Insecure deserialization detection covering Java native serialization, JSON libraries, YAML/XML, LDAP entry poisoning via SearchControls returningObj, implicit Python pickle sinks (pyzmq, msgpack-numpy), Rails cache and signed-cookie Marshal paths, and .NET/PHP/Node/Ruby/Go/Rust sinks
+version: "1.3"
+description: Insecure deserialization detection covering Java native serialization, JSON libraries, YAML/XML, LDAP entry poisoning via SearchControls returningObj, implicit Python pickle sinks (pyzmq, msgpack-numpy), Rails cache and signed-cookie Marshal paths, pickled values in signed client-held Python sessions (Flask, Django signed_cookies, itsdangerous), and .NET/PHP/Node/Ruby/Go/Rust sinks
 ---
 
 # Insecure Deserialization
@@ -128,6 +128,26 @@ A **framework request-body → object mapper** becomes a deserialization gadget 
 - **Detection**: grep `action_dispatch.cookies_serializer` assigned `:marshal` or `:hybrid`, then locate signed/encrypted cookie reads and any accepted old key rotations. A signature is an integrity barrier, not a safe codec: if a current or still-accepted legacy signing secret leaks, an attacker can submit a validly signed Marshal gadget payload.
 - **Triage**: do not claim unconditional unauthenticated RCE from the configuration alone. Confirm a forged-valid-cookie path (weak/leaked/reused secret, accepted compromised rotation key, or signature-verification bypass) and a compatible gadget chain for High/Critical. With strong uncompromised signing and no attacker-mintable cookie, retain the unsafe migration surface as Medium/Review rather than dismissing it as harmless.
 - **Safe-repair contract**: switch to `:json`, expire or rename legacy cookies, and remove old key rotations after the migration window. Merely protecting the signing key or waiting for natural expiry while `:hybrid` remains enabled does not remove the Marshal fallback.
+
+### Python signed-session pickle (Flask, Django, itsdangerous)
+
+A session the client holds becomes a native-object deserialization sink when its values are pickled. Flask's own session serializer is tagged JSON and safe by itself; the sink is code that stores `pickle.dumps(obj)` in `session` and later calls `pickle.loads` on it, which leaves the signature as the only barrier between a request and a pickle stream.
+
+```python
+# VULN — the signed cookie carries a pickle; the signing key is the only barrier
+session["flow_" + csrf] = pickle.dumps(flow)            # authorize
+flow = pickle.loads(session.pop("flow_" + state))       # callback
+
+# SAFE — the object stays on the server; the cookie holds an opaque id
+flow_id = secrets.token_urlsafe(32)
+FLOWS[flow_id] = flow                                    # server-side store (DB/Redis), with expiry
+session["flow_id"] = flow_id
+flow = FLOWS.pop(session.pop("flow_id", ""), None)
+```
+
+- **Detection**: `session[...] = pickle.dumps(...)` paired with `pickle.loads(session[...])` or `pickle.loads(session.pop(...))`; Django `SESSION_ENGINE = "django.contrib.sessions.backends.signed_cookies"` with a `SESSION_SERIALIZER` that names `PickleSerializer` (deprecated, removed in Django 5.0) or any pickle-based class; itsdangerous `Serializer` / `URLSafeSerializer(key, serializer=pickle)`. Libraries do it too: `oauth2client.contrib.flask_util` (deprecated) pickles its OAuth flow object into `session["google_oauth2_flow_<csrf>"]` on `/oauth2authorize` and unpickles it on `/oauth2callback`, both reachable without signing in. A signature is an integrity barrier, not a safe codec.
+- **Triage**: as for Rails signed cookies, do not claim unconditional unauthenticated RCE from the pickle alone. Confirm a forged-valid-cookie path for High/Critical — a hardcoded, weak, leaked or reused signing key, an old key still accepted (`SECRET_KEY_FALLBACKS`, Flask 3.1+), or a key the session itself exposes: a signed-only cookie is readable by whoever holds it (`insecure_cookie.md`), and a pickled object can carry the very credential the app reuses as its `SECRET_KEY` (`weak_crypto_hash.md`, Key Management). Pickle needs no gadget chain: `__reduce__` names any callable. A CSRF or `state` check that compares a request value with a session value stops no forger, who writes both. With a strong uncompromised key and no attacker-mintable cookie, retain the pickle-in-session surface as Medium/Review rather than dismissing it as harmless.
+- **Safe-repair contract**: keep the object on the server and put only an opaque random id in the session, or store data-only fields (JSON) and rebuild the object; give the session a random per-deployment key unrelated to any other credential, and rotate it (dropping fallbacks) once a pickle cookie may have been forged.
 
 ## Detection Patterns (Static Analysis)
 
@@ -493,6 +513,7 @@ dto = json.loads(body, object_hook=lambda d: UserDto(**d))
 
 **Python unsafe deserializers** (user/network/file input → CONFIRM):
 - `pickle.load` / `pickle.loads` / `cPickle`, `dill.load`, `marshal.loads`
+- `pickle.loads` on a value read back from a client-held session (Flask `session`, Django `signed_cookies` with a pickle serializer, itsdangerous with `serializer=pickle`) — a valid signature does not make the bytes safe (Python signed-session pickle above)
 - `yaml.load` / `yaml.unsafe_load` / `yaml.full_load` without `Loader=SafeLoader`
 - `jsonpickle.decode`, `torch.load` without `weights_only=True` (PyTorch ≥2.0)
 - **msgpack-numpy**: `msgpack_numpy.patch()` globally installs its encoder/decoder, and `msgpack.unpack*`/`load*` with `object_hook=msgpack_numpy.decode` invokes `pickle.loads` when a crafted record declares NumPy object dtype (`kind == b'O'`). MessagePack is only the outer format; untrusted packed bytes still reach pickle. Encoding-only calls are not the sink.

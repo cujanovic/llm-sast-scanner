@@ -1,6 +1,6 @@
 ---
 name: idor
-version: "0.4"
+version: "0.5"
 description: IDOR/BOLA testing for object-level authorization failures and cross-account data access, including an identifier checked from one request source but loaded from another, and field or relation selection taken from the request
 ---
 
@@ -83,6 +83,9 @@ An "unpredictable" ID (UUID/ULID/opaque blob) is not secret — it leaks through
 - **Infrastructure logs**: HTTP access logs held by IT, reverse proxies, CDNs, VPNs, and ISPs capture IDs in paths/query strings
 - **Insider / offline**: ex-employees who saved IDs from local storage/logs before access revocation
 - **Weak randomness**: "random" IDs with a design flaw (sequential within a shard, embedded timestamp, low entropy) — time-based IDs (UUIDv1, ULID) may be predictable within a window
+- **Hardcoded or default identifiers**: a fixed ID written in code, seed or migration data (a nil or pattern UUID, a default organization, workspace or template ID) is known to every attacker, so an IDOR on that object needs no leak at all; privilege mapped to such an ID is the Sentinel / Backdoor UUIDs case below
+- **Captured from the victim's own view**: a UI-redress trick (clickjacking) that gets the victim to reveal an identifier shown on their page
+- **Leaks the code does not show today**: a later feature or export, a log line or another bug exposes the ID tomorrow; a source the repository does not show is never evidence the ID stays secret, and the ownership check is the only durable control
 - **Lower-exposure case**: an ID that only ever travels in a POST/JSON **body** (never in a URL/path) leaks through fewer of the above — this lowers likelihood/severity but does **not** make the missing check safe
 
 ### Static Code Indicators

@@ -1,7 +1,7 @@
 ---
 name: ios_security
-version: "0.1"
-description: iOS/macOS application security (Swift / Objective-C) — insecure storage (UserDefaults/plist/Core Data/file-protection), Keychain misuse (weak kSecAttrAccessible class), local-authentication/biometric bypass (boolean LAContext.evaluatePolicy, weak SecAccessControl ACL), deep-link/URL-scheme handling to WKWebView/open, App Transport Security bypass (NSAllowsArbitraryLoads, low TLSMinimumSupportedProtocolVersion), crypto misuse (DES/3DES/RC4, hardcoded keys, arc4random), TLS trust bypass (missing SecTrustEvaluateWithError), clipboard/keyboard-cache/screen-capture leakage, client-only jailbreak detection (CWE-287/295/305/312/319/327/524/798/939). Load when an iOS/Swift/Objective-C project is present (*.swift/*.m + Info.plist/*.xcodeproj/Podfile).
+version: "0.2"
+description: iOS/macOS application security (Swift / Objective-C) — insecure storage (UserDefaults/plist/Core Data/file-protection), Keychain misuse (weak kSecAttrAccessible class), local-authentication/biometric bypass (boolean LAContext.evaluatePolicy, weak SecAccessControl ACL), deep-link/URL-scheme handling to WKWebView/open, App Transport Security bypass (NSAllowsArbitraryLoads, low TLSMinimumSupportedProtocolVersion), crypto misuse (DES/3DES/RC4, hardcoded keys, arc4random), TLS trust bypass (missing SecTrustEvaluateWithError), clipboard/keyboard-cache/screen-capture leakage, client-only jailbreak detection, and the Documents folder shared by UIFileSharingEnabled (CWE-287/295/305/312/319/327/524/798/939). Load when an iOS/Swift/Objective-C project is present (*.swift/*.m + Info.plist/*.xcodeproj/Podfile).
 ---
 
 # iOS Security (Swift / Objective-C)
@@ -79,6 +79,16 @@ try sensitiveData.write(to: path, options: .completeFileProtection)
 **TRUE POSITIVE**: `.write(to: path)` or `FileManager.createFile(atPath:contents:attributes:)` with `attributes: nil` (or absent `NSFileProtectionKey`) when the written content is sensitive.
 
 **FALSE POSITIVE**: Writing cached images, non-sensitive JSON configuration, or temporary files to `.cachesDirectory` without file protection is low risk; flag only when the written data contains credentials or PII.
+
+#### Documents Folder Shared Through File Sharing (`UIFileSharingEnabled`)
+
+With `UIFileSharingEnabled` set to `YES` in `Info.plist`, the app shares the files in its `Documents` folder with the user (Apple: "Place the files in a `Documents` folder located in the app's home directory"; the default is `NO`; Xcode labels the key "Application supports iTunes file sharing"). Anything else the app writes there — tokens, databases, cached API responses, exported reports, logs — can then be copied off the device by whoever has it unlocked or paired with a computer, outside the app's own controls; a file protection class does not help while the device is unlocked.
+
+**VULN**: `<key>UIFileSharingEnabled</key><true/>` together with sensitive data written under `.documentDirectory` (`credentials.json`, a SQLite store, cached responses with personal data).
+
+**SAFE**: leave the key off, or share only the user documents meant for export and keep everything else under `Library/Application Support` (`.applicationSupportDirectory`) or in the Keychain.
+
+**Recon**: `rg -n "UIFileSharingEnabled|LSSupportsOpeningDocumentsInPlace" --glob '*.plist'`, then `rg -n "\.documentDirectory|NSDocumentDirectory" --glob '*.{swift,m}'` for what the app writes there.
 
 ---
 

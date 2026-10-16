@@ -1,7 +1,7 @@
 ---
 name: insecure_cookie
-version: "0.2"
-description: Insecure cookie flags detection (CWE-614 Secure flag, CWE-1004 HttpOnly flag) and sensitive payloads stuffed into client-held session cookies (Rails CookieStore / encrypted cookie sessions)
+version: "0.3"
+description: Insecure cookie flags detection (CWE-614 Secure flag, CWE-1004 HttpOnly flag) and sensitive payloads stuffed into client-held session cookies (Rails CookieStore / encrypted cookie sessions, and signed-only Flask / Django signed_cookies sessions anyone holding the cookie can read)
 ---
 
 # Insecure Cookie
@@ -363,6 +363,16 @@ session[:user_id] = user.id
 ```
 
 **Do not CLOSE** because staff say “CookieStore is encrypted / Rails default.” Default ≠ appropriate for secrets; KEEP when passwords, tokens, PII, or long-lived credentials are assigned into `session[...]` under CookieStore (or any client-serialized session). Missing `Secure`/`HttpOnly`/`SameSite` on the session cookie remains a separate flag finding above.
+
+### Signed-only session cookies are readable (Flask, Django `signed_cookies`)
+
+Flask's default session and Django's `signed_cookies` session engine are signed, not encrypted: the cookie body is base64 — a leading `.` means zlib-compressed, and Flask tags bytes values `" b"` — that anyone holding the cookie decodes without the key. The format is not the finding: an ordinary session that holds a user id, a CSRF token or a flash message is fine. The finding is a secret placed there.
+
+- **VULN**: a value the visitor must not see — an application secret (an OAuth client secret, an API key, a signing key, a service token) or another party's data — placed in the session, directly or inside an object pickled or serialized into it. Check what the stored object carries, not only the key name: an OAuth flow object holds the client ID and client secret. Such a value is disclosed to every visitor who receives the cookie — no XSS, theft or key needed.
+- The user's own tokens or personal data in a signed-only session are the CookieStore case above, exposed to whatever reads the cookie: `oauth2client.contrib.flask_util`'s default storage keeps the user's OAuth credentials in the Flask session, and its docs warn that with Flask's default configuration they are visible in the session cookie.
+- **Severity**: an application credential readable from the cookie (an OAuth client secret, an API key, a signing key, a service token) is High — the disclosed secret is the finding, so the cookie-flag rating does not apply. The user's own tokens or personal data in their own cookie keep this class's rating. A finding that chains from the disclosure (forged sessions, a pickled value run) carries its own rating and does not raise this one.
+- **SAFE**: a server-side store (Flask-Session with Redis or SQL, Django's `db` or `cache` session engines), or only non-secret ids in the cookie; a secret the browser never needs stays on the server.
+- A disclosed signing key — or a credential the app reuses as its session key — forges every session (`weak_crypto_hash.md`, Key Management) and turns a pickled session value into code execution (`insecure_deserialization.md`, Python signed-session pickle); an OAuth client secret that reaches the browser is also the client-secret case of `oauth_oidc_misconfiguration.md`.
 
 ## Consolidated Detection Checklist
 

@@ -1,7 +1,7 @@
 ---
 name: path_traversal_lfi_rfi
-version: "0.5"
-description: Path traversal and file inclusion testing for local/remote file access and code execution — including name-only validators that miss a tainted base path, and media-variant loaders that read files without a classic path parameter
+version: "0.6"
+description: Path traversal and file inclusion testing for local/remote file access and code execution — including name-only validators that miss a tainted base path, media-variant loaders that read files without a classic path parameter, and paths the application's own decode, unescape or separator substitution rebuilds after the traversal check
 ---
 
 # Path Traversal / LFI / RFI
@@ -130,6 +130,33 @@ A join helper that **validates only the trailing `name`** (reject `..` / absolut
 - **VULN**: `validate_*` / `join_validated_*` rejects traversal in `name` but never canonicalizes or confines `base`; or an **empty-name exemption** (`if name.is_empty() { return base }`) returns the tainted `base` verbatim so `File::create(base)` / `write_bytes` resolves embedded `../` (Startup folder, `.ssh/authorized_keys`, etc.). Presence of a name validator does **not** discharge — **Do not CLOSE** as "validated" without confirming `base` is a fixed server-chosen root (or is itself validated + confined). Cross-layer/FFI: judge the **whole flow** (UI join + native validator + write), not the validator file alone.
 - **SAFE**: treat the final write path as one value — `realpath`/`canonicalize` the joined path and require `commonpath`/`starts_with` against a **fixed** download root; reject `..`/absolute in **every** segment including `base`; never return `base` unchanged on empty name unless `base` was already confined; normalize peer `Entry.name` before any join.
 - Grep: `rg -n "join_validated|validate_file_name|no_traversal|empty.*name|FilePath|PathBuf::from" --glob '*.{rs,py,go,java,ts}'` then confirm both `base` and `name` are confined.
+
+### Path rebuilt after the check (reversible transform, segment stripping, prefix mapping)
+
+The traversal check, or the URL-level filter in front of the handler, reads one form of the path; the code then changes the path before the file read. Judge the path the file API receives, not the one the check read.
+
+- **Reversible transform after the check**: the application encodes `/` its own way so a path fits one URL segment or parameter — a separator substitute (`::`, `|`, `~`), a base64- or hex-encoded path, an "unescape" helper — and undoes it after the check. `..::..::WEB-INF::web.xml` holds no `../` and no `/WEB-INF/` path, so it passes a `../` check and the URL-level rules written for the slash form (the container's `/WEB-INF/` block, a proxy deny on `/WEB-INF/`); the handler turns it into `../../WEB-INF/web.xml`.
+- **Stripping instead of confining**: a filter that removes or rejects `..` segment by segment is not, by itself, a containment check. A split on `/` keeps `..\..\Windows\win.ini` whole while Windows treats `\` as a separator, and a decode after the strip (`%2e%2e/` → `../`) or a transform like the one above rebuilds the segment.
+- **Prefix-to-directory mapping**: a route maps its first segment to a directory (`static` → the assets, `plugins` → the plugin folder) and appends the rest of the path with no containment check, so `plugins/../WEB-INF/web.xml` leaves the mapped directory. A mapped directory broader than the assets — the web-app root, the classpath root — exposes config with no `..` at all (the base-confined case under Java/JVM web apps above).
+
+```javascript
+// VULN — the check sees the escaped name; "::" becomes "/" afterwards
+app.get('/resources/:name', (req, res) => {
+  if (req.params.name.includes('../')) return res.status(400).end();
+  res.sendFile(path.join(RES_DIR, req.params.name.replaceAll('::', '/')));
+});
+// GET /resources/..::..::WEB-INF::web.xml → RES_DIR/../../WEB-INF/web.xml
+
+// SAFE — undo the transform first, then canonicalize and confine the final path
+app.get('/resources/:name', (req, res) => {
+  const p = path.resolve(RES_DIR, req.params.name.replaceAll('::', '/'));
+  if (!p.startsWith(RES_DIR + path.sep)) return res.status(404).end();
+  res.sendFile(p);
+});
+```
+
+- **SAFE**: undo every transform (decode, unescape, separator substitute) before the check, then canonicalize the final path (`realpath`, `path.resolve`, `getCanonicalPath`) and require it inside the fixed mapped directory with a trailing separator; map each prefix to a directory that holds only public files.
+- Grep: `rg -n "replace(All)?\(['\"](::|\||~)|unescape|b64decode|atob\(|Base64\.get(Url)?Decoder|URLDecoder\.decode|decodeURIComponent"` then confirm whether the transform runs after the traversal check or URL filter and before the file read.
 
 ### Path Traversal Bypasses
 
@@ -310,6 +337,7 @@ filename = FILE_MAP.get(user_id)
 - Single URL-decode — double-encoding (`%252e%252e%252f`) survives
 - Extension-only checks without containment — `../../etc/passwd%00.pdf` on legacy systems
 - Prefix check without trailing separator — `startswith('/var/www')` matches `/var/www-evil`
+- Blocking named files (`web.xml`, `.env`) — every other file in the same tree (`WEB-INF/classes/*.properties`, other config) stays readable; confine the path to a directory that holds only public files
 
 ## Business Risk
 
