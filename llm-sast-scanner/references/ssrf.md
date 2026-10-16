@@ -1,6 +1,6 @@
 ---
 name: ssrf
-version: "0.10"
+version: "0.11"
 description: Server-Side Request Forgery detection (CWE-918) — including DNS-only resolve severity cap, header-gated cloud metadata/credential endpoints (GCP/Azure/IMDSv2 headers, ECS/EKS/Lambda credential env-vars), non-HTTP outbound sinks (gRPC target strings, WebSocket clients, service-mesh sidecar / Envoy admin), IPFS gateway / Kubo node RPC (:5001) targets, and response-written-to-disk "disk-spill" write/RCE sinks (Content-Disposition / URL-basename naming, path traversal, zip-slip, temp-symlink race, cache/WSDL poisoning, deserialization)
 ---
 
@@ -1304,7 +1304,7 @@ Reaching the internal service is only the first half of SSRF. The second half is
 - **Oversized / chunked / no-`Content-Length` / slow-drip body** → clients that cannot pre-size a response spool it to a temp file instead of memory.
 - **`1xx` preamble** (`100`/`102`/`103` before the real status) or a **lied `Content-Length`** → some clients commit a (partial) file early.
 - **Redirect to `file://`** (or `ftp`/`gopher`/`dict`) → on clients that permit a cross-scheme redirect (not curl's default, which refuses `file://` on redirect unless `--proto-redir` re-enables it), the fetch reads or **writes** to another scheme — e.g. a `307`/`308`→`file://` on a `PUT` writes the body locally, or a redirect into `ftp` becomes an upload gadget.
-- **`Content-Disposition: attachment; filename=...`** → names the on-disk file (verified for `curl -OJ`; `wget --content-disposition` is documented to do the same — the header-supplied name, not the URL basename). Note both keep only the **basename** (they strip a `../` path); the directory-escaping variant below is a *non-sanitizing library's* behavior, not curl's/wget's.
+- **`Content-Disposition: attachment; filename=...`** → names the on-disk file (verified for `curl -OJ`; `wget --content-disposition` is documented to do the same — the header-supplied name, not the URL basename). Note both keep only the **basename** (they strip a `../` path); the directory-escaping variant below is a *non-sanitizing library's* behavior, not curl's/wget's — or a library that strips to the basename **before** decoding, so an encoded `..` (`%2e%2e%2f`) survives the strip and re-forms afterward (e.g. a downloader that `decodeURI`s after taking the basename); see *Path rebuilt after the check* in `path_traversal_lfi_rfi.md`.
 - **URL basename** (no CD header) → the client names the file from the last URL path segment, also attacker-set.
 - **Malicious archive** (zip/tar whose members contain `../`) → extracted without a per-member path check.
 - **Non-seekable request body + redirect** → the streamed body is replayed to the new origin (exfil); **credentials + redirect** → `Authorization`/`Cookie` resent to the attacker host and written into world-readable cookie jars / logs.

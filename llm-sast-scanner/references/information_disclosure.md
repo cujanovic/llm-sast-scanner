@@ -1,6 +1,6 @@
 ---
 name: information_disclosure
-version: "0.6"
+version: "0.7"
 description: Information disclosure testing covering error messages, debug endpoints, request-supplied debug switches, metadata leakage, source exposure, and serialization-redaction bypass / excessive data exposure (denylist as_json/toJSON failing open, Go pointer-receiver MarshalJSON skipped on by-value encode, malformed Go JSON omission tags)
 ---
 
@@ -30,6 +30,16 @@ Leaked information acts as a force multiplier for attackers — it maps the code
 - Stack traces: absolute paths, class/method names, framework versions, developer emails
 - Template engine probes: `{{7*7}}`, `${7*7}` identify templating stack
 - JSON/XML parsers: type mismatches leak internal model names
+
+### Resource-load error/crash oracle (file existence / path / OS)
+
+A document or media renderer (HTML-to-PDF, SVG/image, office converter, templating engine) that **branches its observable behavior on whether a referenced *local* resource exists** leaks existence/path/OS metadata **without ever returning the file contents** — so it bypasses a chroot and any content/egress filter, because only the side channel leaks. The reference is attacker-supplied markup: `<img src="/path">`, CSS `@font-face { src: url("file://...") }`, `<link href="file://...">`, an SVG `<image>`.
+
+- **Existence via crash/timing**: the renderer does heavy work (or OOMs) when the path **exists** and skips it when it does not — repeat the reference hundreds of times to force a differential (a crash/`memory_limit` fatal vs. a clean document). Existing file → fatal; missing → normal output. Pairs with any later LFI and enumerates paths through a chroot.
+- **Path via error text**: a failed resource load emits an error message containing the **resolved absolute path** (`Unable to get the size of /home/app/.env`), disclosing both existence and layout; a list of candidate paths in one request dies on the first hit and returns it.
+- **OS/layout via differential output**: a reference to a directory (`/etc`, `C:/Windows`, `/var/www/<guess>`) crashes or warns only when the directory exists, fingerprinting OS and confirming deploy paths.
+
+SAST signals: a renderer/converter sink (`WriteHTML`/`loadHtml`/`render`, `ImageSVG`, `getimagesize`/`file_get_contents`/`fopen` reached from markup) whose **error/exception path differs by the existence of a request-referenced local path**, or whose error message includes a filesystem path; a per-reference parse with no cap that an attacker can repeat. Fix: resolve and **confine** referenced paths to an allowlisted base before the load (reject `file://`/absolute/UNC and out-of-base paths), return a **uniform** result whether or not the resource exists, and keep filesystem paths out of error output.
 
 ### Debug and Env Modes
 

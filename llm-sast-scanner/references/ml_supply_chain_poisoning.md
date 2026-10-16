@@ -1,6 +1,6 @@
 ---
 name: ml_supply_chain_poisoning
-version: "0.2"
+version: "0.3"
 description: ML/AI model supply chain and data/model poisoning — unsafe model deserialization (pickle/torch.load), remote-code model loading, unverified models & adapters, unpinned ML deps, and unvalidated training/fine-tuning data (OWASP LLM03/LLM04, CWE-502/494/1357/829)
 ---
 
@@ -117,9 +117,10 @@ const clf = await pipeline("text-classification", "guard-model");
 
 ### Inference-serving exposure & executable model metadata
 
-Two static surfaces beyond the model-*load* call:
+Three static surfaces beyond the model-*load* call:
 
 - **Inference-server deployment exposure** — the model-serving framework itself reachable with no auth: vLLM / TGI / NVIDIA Triton / Ray Serve, or a Flask/FastAPI model server, launched with `--host 0.0.0.0` / `app.run(host="0.0.0.0")` and **no API token / auth dependency**, Triton's model-control / repository endpoint exposed, or the inference API served without TLS. Anonymous access = free inference (denial-of-wallet), prompt/model theft, or — with model-control enabled — loading attacker weights. **Safe**: bind localhost/private network, require an auth token on the inference route, enable TLS, disable remote model-control in production. (Mirrors the vector-store deployment block in `rag_vector_security.md`; the firewall-layer `0.0.0.0/0` view is `iac_security.md`.)
+- **Disaggregated-serving KV-cache transfer channel** — in disaggregated prefill/decode serving the prompt's **KV cache** (`past_key_values`) is moved from the prefill (producer) node to the decode (consumer) node over a **separate transfer channel that sits outside the inference API's auth**: a socket / RDMA / NCCL / UCX endpoint or a shared store (NIXL, LMCache, Mooncake, a Redis/object store, a shared filesystem path). In vLLM this is `KVTransferConfig` / `--kv-transfer-config` — `kv_connector` ∈ {`NixlConnector`, `NixlPullConnector`, `NixlPushConnector`, `LMCacheConnectorV1`, `MooncakeConnector`, `MooncakeStoreConnector`, `MultiConnector`, `OffloadingConnector`}, `kv_role` = producer/consumer, default `kv_port` 14579. When that endpoint is **bound to a routable interface with no transport auth/encryption and no network policy confining it to the serving pool**, an on-network attacker can **read the KV cache in transit** (another user's prompt/context — a disaggregated analogue of prompt theft) or **write/poison it** so the consumer node decodes from attacker-chosen tensors. The inference API being authenticated does **not** cover this side channel. **Safe**: confine the KV-transfer connector to the serving pool's private network (NetworkPolicy / private subnet), require transport auth/encryption where the connector supports it, and never bind the transfer port to a routable interface. The cross-tenant KV-reuse/poison *integrity* case (one engine's shared prefix cache) is `shared_client_cache_leak.md`. Grep: `KVTransferConfig|kv-transfer-config|kv_connector|kv_role|kv_producer|kv_consumer|NixlConnector|LMCacheConnector|MooncakeConnector|kv_port`.
 - **Executable metadata shipped with a model** — an artifact carries logic that runs at load/render even without pickle: a poisoned **`chat_template`** (Jinja2) in `tokenizer_config.json` / GGUF metadata with conditionals that inject hidden system-prompt overrides or emit attacker URLs when rendered, or Keras HDF5 **`Lambda`** layers (arbitrary Python). Treat `chat_template` / `tokenizer_config.json` from an untrusted model as code, not data. **Safe**: vendor and review the tokenizer/template, pin + checksum, render chat templates only from a trusted fixed source.
 
 ## Severity & Triage

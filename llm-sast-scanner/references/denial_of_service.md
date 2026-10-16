@@ -1,6 +1,6 @@
 ---
 name: denial_of_service
-version: "0.5"
+version: "0.6"
 description: Denial of Service detection — vulnerable code patterns for ReDoS, XML bomb, Zip bomb, resource exhaustion, unbounded operations, missing rate/size limits, uncapped request bodies buffered before the handler, attacker-sized writes to persistent logs (CWE-779), Java exposed-monitor lock DoS (public static synchronized / locking on Class or this), and panic/abort/uncaught-exception crashes reachable from untrusted input (memory-safe languages — Rust unwrap/expect/index/overflow, Go type-assertion/nil-map/index, CWE-248)
 ---
 
@@ -94,6 +94,8 @@ from lxml import etree
 tree = etree.parse(user_xml_source)   # no XMLParser with resolve_entities=False
 # billion laughs can exhaust memory
 ```
+
+- **Hand-rolled entity/macro expansion defeats the parser's limits**: a library that re-implements `<!ENTITY>` (or any macro/include) expansion in application code — a `preg_replace`/regex substitution **in a loop**, a manual DOCTYPE pre-processor — never goes through the XML parser, so the parser's entity-expansion caps are irrelevant and a billion-laughs payload expands unbounded. The hardened-parser checks above (`disallow-doctype-decl`, `resolve_entities=False`, entity limits) do **not** apply when the app does its own expansion. Grep for app-level entity handling outside the parser: `<!ENTITY`, `&\w+;` substitution, `preg_replace`/`str_replace`/`re.sub` on a DOCTYPE or SVG/XML string in a loop, a custom `expandEntities`/`replaceEntities`. Fix: let the XML parser do the expansion with entity limits (and DTD disabled where possible); if a custom expander is unavoidable, cap total output size and recursion depth per step.
 
 ### Zip Bomb / Decompression Bomb
 

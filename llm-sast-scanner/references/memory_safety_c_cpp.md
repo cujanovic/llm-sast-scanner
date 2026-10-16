@@ -1,6 +1,6 @@
 ---
 name: memory_safety_c_cpp
-version: "0.2"
+version: "0.4"
 description: C/C++ memory safety detection — buffer overflow, use-after-free, use-after-move, unbounded string functions, integer overflow in allocation, and toolchain hardening gaps
 ---
 
@@ -16,6 +16,7 @@ Manual memory management in C/C++ enables stack/heap corruption, out-of-bounds a
 - **Stack buffer overflow**: write past fixed `char buf[N]` via unbounded copy/format/read
 - **Heap buffer overflow**: write past `malloc`/`new[]` allocation via wrong `size`/`count`
 - **Out-of-bounds read/write**: index `arr[i]` or pointer arithmetic without `i < len` proof
+- **Negative / sentinel index (buffer underflow)**: `arr[i]` where a **signed** `i` can go **negative** — a field with a documented sentinel (`-1` = none/rowid/EOF/default) or offset arithmetic (`i = field - BASE`) that underflows — writes **below** the array; an upper-bound-only check (`i < len`) and `assert`-only guards miss it
 - **Use-after-free (UAF)**: dereference after `free`/`delete`; stale pointer in container/callback
 - **Use-after-move (C++11+)**: read/write/`operator bool`/pass an object after `std::move` / `std::forward` transferred its resources (valid-but-unspecified ≠ safe to keep using)
 - **Double-free**: second `free`/`delete` on same address; `delete` after ownership transfer
@@ -236,6 +237,24 @@ if (user_index >= vec.size()) throw std::out_of_range("index");
 return vec[user_index];
 ```
 
+#### Negative / sentinel index (buffer underflow)
+
+An `arr[i]` whose index is **signed** and can be **negative** writes *below* the array — a distinct bug from running off the top, and a plain `i < len` check does not catch it. The index often comes from a field with a documented **sentinel** (`-1` meaning none / rowid / EOF / "use default") or from **offset arithmetic** (`i = field - BASE`) that goes negative when `field` is below `BASE`.
+
+```c
+// VULN — a -1 sentinel flows through offset math into a signed index; only the top end is checked
+int pos = field - BASE;            // field == -1 (sentinel) -> pos negative
+assert(pos >= 0 && pos <= 2);      // compiled out under -DNDEBUG (see note)
+slot[pos] = v;                     // negative pos writes below slot[]
+
+// SECURE — a real runtime check on BOTH ends, before the access
+if (pos < 0 || pos >= (int)(sizeof slot / sizeof slot[0])) return ERROR;
+slot[pos] = v;
+```
+
+- **`assert()` is not a bounds check in release**: `assert(i >= 0 && i < N)` is removed by `-DNDEBUG` (standard for release / `-O2` builds), so an access guarded **only** by `assert` is **unprotected** in production — treat it as if the check were absent and do **not** CLOSE `arr[i]` because an `assert` precedes it.
+- Seeds: a signed `int`/`long` index in `arr[i]` with only an `i < len` / `i <= MAX` check and no `i >= 0`; a `field - BASE` offset feeding an index; fields documented with a `-1` / sentinel meaning; `assert(` as the sole guard before an array write.
+
 ### Use-after-free / double-free
 
 ```c
@@ -272,6 +291,27 @@ Many real UAFs span function boundaries — the pointer is freed in one function
 - **Propagation to follow**: copies/aliases (`q = p;`), struct field stores (`ctx->buf = p;`) and later `ctx->buf` reads, pass-through via function parameters and return values, and the same global/field touched by two functions sharing a caller.
 - **Barriers that clear the finding** (must occur on the path between free and use): reassignment to `NULL`/`0`, or **reallocation** of the same pointer (`malloc`/`calloc`/`realloc`/`new`, kernel `kmalloc`/`kzalloc`/`kvmalloc`).
 - **Triage before reporting**: (1) does the free provably execute *before* the use on some path? (2) is it the *same* object/alias (pointer-type-compatible)? (3) is the object still freed at the use (not nulled, reinitialized, or reallocated)? A double-free is the same pattern with a second deallocator as the sink.
+
+#### Cached pointer to an externally-owned object (ownership-boundary UAF)
+
+A long-lived structure (a context, registry, callback table, connection pool, event loop) that **caches a raw pointer to an object whose lifetime another component owns** is a UAF waiting on that owner's `free`. The free is often **not in the same translation unit** — the owner is the library's *caller*, a parent subsystem, or a sibling module that releases the object per an API/ownership contract — so a tracer that only follows `free`→use inside the analyzed code misses it. Flag the **structural** shape, not a visible `free`→use pair: a stored raw back-pointer with **no invalidate-on-free / unregister path** that clears it when the owner releases the object, then a later read (frequently during teardown/cleanup) that dereferences it.
+
+- **VULN signal**: a struct field or global holds a `T*` to a caller-supplied / externally-created object (`ctx->current = handle;`, `pool->active[i] = conn;`); the object is freed by code the struct does not control; the field is neither nulled on that free nor re-validated before a later `->`/call. A **function pointer** read from the reused slot is a control-flow hijack (call through freed→reused memory), not just a bad read.
+- **SAFE**: do not cache a raw pointer to something you do not own — store a stable **id/handle and look the object up on use** (lookup returns `NULL` once it is removed), hold a **`weak_ptr`** / ref-counted owner, or require an explicit **unregister/detach** that nulls every cached pointer and is provably called on every free path. Nulling the field on free is the minimum barrier.
+
+```c
+// VULN — registry caches a raw pointer the caller owns and frees
+struct registry { struct worker *current; };               // raw back-pointer; lifetime owned elsewhere
+void attach(struct registry *r, struct worker *w) { r->current = w; }     // no invalidate-on-free link
+void flush(struct registry *r) { if (r->current) r->current->on_done(); } // later deref -> UAF once the caller free()s w
+
+// SAFE — store an id; resolve on use (NULL once the worker is removed)
+struct registry { int current_id; };
+void attach(struct registry *r, struct worker *w) { r->current_id = w->id; }
+void flush(struct registry *r) { struct worker *w = lookup(r->current_id); if (w) w->on_done(); }
+```
+
+- Seeds: a struct field assigned a pointer **parameter/handle** (fields named `current`/`active`/`owner`/`parent`/`cb`/`handler`/`ctx`/`conn`) and later dereferenced; a registration function (`register`/`attach`/`subscribe`/`set_*`) with **no paired** `unregister`/`detach`/`remove`/`clear` on the object's free path.
 
 ### Unbounded input (`gets`, `scanf`)
 

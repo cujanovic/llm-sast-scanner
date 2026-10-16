@@ -1,6 +1,6 @@
 ---
 name: graphql_injection
-version: "0.3"
+version: "0.4"
 description: Detect GraphQL security issues including document injection, resolver-layer taint to SQL/NoSQL/RCE/SSRF/XSS sinks, default/fallback field resolution reaching reflective method dispatch (undeclared-field-name execution via validate-vs-execute document divergence), per-operation shared-state bleed across batched operations (one operation running or returning another's document), schema-level input validation (weak/over-permissive argument typing, custom-scalar coercion, missing semantic validation), introspection and information disclosure, authorization gaps, CSRF/request forgery, WebSocket transport parity, and operation-name injection — structural DoS covered in graphql_dos.md.
 ---
 
@@ -467,6 +467,9 @@ mutation { updateProfile(input: { emial: "x" }) { ok } }
 ### Partial introspection disable
 
 Middleware/WAF blocking only `__schema` while `__type(name: "User")` / `__typename` still work — incomplete hide. Rely on **engine-native** `introspection: false` or validation rules, not substring denylists on query text.
+
+- **Lexical bypass (same field, insignificant token inserted)**: an exact string/regex filter on `__schema {` or `__type(` is defeated by a token GraphQL ignores — a newline, space, tab, or comma after the field name (`__schema\n{ … }`, `__schema ,{ … }`, `__typename # comment`) — so the operation still runs while the filter pattern no longer matches. Inspecting request text is the wrong layer.
+- **Transport bypass (filter scoped to one method/content-type)**: a filter that inspects only `POST` + `application/json` bodies misses the same introspection sent as `GET /graphql?query={__schema…}`, `Content-Type: application/graphql` (raw-query body), or `application/x-www-form-urlencoded` — any transport the server still accepts but the filter does not parse (see the method / content-type op-gate bypass elsewhere in this file).
 
 **Grep**:
 ```bash

@@ -1,6 +1,6 @@
 ---
 name: postmessage_security
-version: "0.4"
+version: "0.5"
 description: postMessage origin validation failures — receivers that trust event.data without checking event.origin, wildcard targetOrigin ('*'), weak substring/regex origin checks, sender targetOrigin bypass via URL-parser host normalization (numeric IPv4 like 2130706433 → 127.0.0.1), and listeners that start OAuth / navigate to authorize URLs (escalating sibling XSS into code theft) that allow cross-origin message injection or secret leakage (CWE-345, CWE-346)
 ---
 
@@ -33,6 +33,7 @@ The `postMessage` API lets browsing contexts exchange data across origins (ifram
 - `event.data` → JS execution: `eval`, `new Function`, `setTimeout(string)`, dynamic `<script>` / `.src` / `.setAttribute('src', …)`
 - `event.data` → navigation: `location.href`, `location.assign`, `window.open(event.data)`
 - Pair any sink above with missing/weak origin check → **CONFIRMED** cross-origin script or data injection. For sink-only analysis without origin context, cross-reference `xss.md`.
+- **Not a sanitizer before an HTML sink**: `String(event.data.x)` / `event.data.x.toString()` / a template literal only **coerces to string**, it does not HTML-encode — `el.innerHTML = e.data.val.toString()` is still DOM XSS. Only context-correct encoding or `textContent` / a sanitizer (DOMPurify) clears the sink; a bare key/shape check on `event.data` (a required property, `Object.keys(e.data).length`, an `action` allowlist) is message-shape validation, never a substitute for the `event.origin` check.
 
 **Aggravating context**
 - Listener registered on a top-level app page that holds session tokens, admin flags, or PII in replies
