@@ -1,6 +1,6 @@
 ---
 name: insecure_temp_file
-version: "0.1"
+version: "0.2"
 description: Insecure temporary file creation — predictable names, race windows, world-readable paths (CWE-377)
 ---
 
@@ -23,6 +23,7 @@ Temporary files created with predictable names, split create/open steps, or perm
 ## Vulnerable Conditions
 
 - **Name-then-open race**: `filename = mktemp(); open(filename, "w")` — attacker creates symlink/file between calls
+- **SSRF fetch into a predictable temp**: a URL-download helper that writes the response to a guessable `0666` temp without `O_EXCL`/`O_NOFOLLOW` lets a local attacker pre-plant a symlink the fetch then follows — the write is driven by a server-side fetch (see the disk-spill section in `ssrf.md`)
 - **Predictable paths**: `path.join(os.tmpdir(), "test-" + Date.now() + ".txt")` — guessable, no exclusive create
 - **World-accessible temp dir defaults**: files in `/tmp` readable/writable by other users unless mode restricted
 - **Missing secure mode on Node `fs` calls**: no `mode: 0o600` (or equivalent) when writing under tmpdir

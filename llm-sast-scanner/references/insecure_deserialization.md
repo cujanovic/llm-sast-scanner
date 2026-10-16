@@ -1,6 +1,6 @@
 ---
 name: insecure_deserialization
-version: "1.3"
+version: "1.4"
 description: Insecure deserialization detection covering Java native serialization, JSON libraries, YAML/XML, LDAP entry poisoning via SearchControls returningObj, implicit Python pickle sinks (pyzmq, msgpack-numpy), Rails cache and signed-cookie Marshal paths, pickled values in signed client-held Python sessions (Flask, Django signed_cookies, itsdangerous), and .NET/PHP/Node/Ruby/Go/Rust sinks
 ---
 
@@ -14,6 +14,8 @@ Insecure deserialization happens when an application reconstructs objects from u
 - **CWE-915**: Improperly Controlled Modification of Dynamically-Determined Object Attributes
 
 ## Where to Look
+
+- **Fetched-then-cached body (SSRF disk-spill)** — a URL fetch whose response is persisted to a predictable URL-keyed cache and later deserialized (e.g. a SOAP client that pickles the parsed WSDL into a temp dir and `pickle.load`s it on the next call) is an SSRF-reachable deserialization sink; the untrusted bytes arrive by server-side fetch, not a request body — see the disk-spill section in `ssrf.md`.
 
 ### Java Native Serialization (`ObjectInputStream`)
 - `ObjectInputStream.readObject()` / `readUnshared()` called on untrusted input

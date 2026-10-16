@@ -1,6 +1,6 @@
 ---
 name: arbitrary_file_upload
-version: "0.5"
+version: "0.6"
 description: Detect unrestricted file upload vulnerabilities where attackers can upload executable files leading to Remote Code Execution or path traversal, post-upload media/variant pipelines that process untrusted image bytes through unsafe default loaders, and document converters (pandoc) that read local files or fetch URLs a user document names.
 ---
 
@@ -28,6 +28,7 @@ The core pattern: *a user-supplied file reaches a storage location without adequ
 
 - **Stored XSS via SVG/HTML** — embedded `<script>` in an uploaded SVG reflected back; sink is output encoding, not server-side execution
 - **SSRF/XXE via file content** — uploaded XML/SVG triggering outbound requests; separate class
+- **SSRF disk-spill (attacker-named write)** — a server-side URL fetch whose response a **non-sanitizing** download helper writes to disk under an attacker-controlled name/extension/path (e.g. a `Content-Disposition: filename="../public/shell.php"` the client does **not** strip — unlike `curl -OJ`/`wget`, which keep only the basename) is an upload-equivalent RCE sink reached *without* a direct upload — see the disk-spill section in `ssrf.md`
 - **DoS via large files** — missing size limits; availability issue, not execution
 - **IDOR on download** — accessing another user's file without authorization
 - **Path traversal alone** — reading/writing files outside intended dirs without an upload execution chain; tag `path_traversal` when no web-shell deposit is possible

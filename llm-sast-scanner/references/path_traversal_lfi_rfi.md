@@ -1,6 +1,6 @@
 ---
 name: path_traversal_lfi_rfi
-version: "0.6"
+version: "0.7"
 description: Path traversal and file inclusion testing for local/remote file access and code execution — including name-only validators that miss a tainted base path, media-variant loaders that read files without a classic path parameter, and paths the application's own decode, unescape or separator substitution rebuilds after the traversal check
 ---
 
@@ -40,6 +40,7 @@ The core pattern: *unvalidated user input reaches a filesystem operation and the
 
 **Archive Extraction**
 - Zip Slip: write outside target directory upon unzip/untar
+- **SSRF disk-spill**: the `../` traversal (or zip-slip archive) can arrive from a *server-side fetch* whose response is written to a path named by `Content-Disposition`/URL-basename/object key, not just an upload — see the disk-spill section in `ssrf.md`.
 
 **Normalization Mismatches**
 - Server/proxy differences (nginx alias/root, upstream decoders)

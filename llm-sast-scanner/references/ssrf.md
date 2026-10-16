@@ -1,7 +1,7 @@
 ---
 name: ssrf
-version: "0.7"
-description: Server-Side Request Forgery detection (CWE-918) — including DNS-only resolve severity cap
+version: "0.10"
+description: Server-Side Request Forgery detection (CWE-918) — including DNS-only resolve severity cap, header-gated cloud metadata/credential endpoints (GCP/Azure/IMDSv2 headers, ECS/EKS/Lambda credential env-vars), non-HTTP outbound sinks (gRPC target strings, WebSocket clients, service-mesh sidecar / Envoy admin), IPFS gateway / Kubo node RPC (:5001) targets, and response-written-to-disk "disk-spill" write/RCE sinks (Content-Disposition / URL-basename naming, path traversal, zip-slip, temp-symlink race, cache/WSDL poisoning, deserialization)
 ---
 
 # SSRF (CWE-918)
@@ -685,7 +685,7 @@ rg -n "allowlist|allowed.?hosts|urlparse|new URL\(|url\.Parse" -A6 --glob '*.{py
 
 ## Scheme Allowlist / Protocol Smuggling
 
-When the client is **not** restricted to `{http, https}`, an attacker swaps the scheme to reach non-HTTP services and escalate beyond a read-only fetch. `java.net.URL.openConnection()` handles `file`, `jar`, `ftp`, `netdoc`; `libcurl` (PHP `curl`, shell-outs) additionally handles `gopher`, `dict`, `ldap`, `tftp`, `smtp`, `imap`, `telnet`; PHP stream wrappers add `php://`, `data://`, `expect://`.
+When the client is **not** restricted to `{http, https}`, an attacker swaps the scheme to reach non-HTTP services and escalate beyond a read-only fetch. `java.net.URL.openConnection()` handles `file`, `jar`, `ftp`, `netdoc`; `libcurl` (PHP `curl`, shell-outs) additionally handles `gopher`, `dict`, `ldap`, `tftp`, `smtp`, `imap`, `telnet`; PHP stream wrappers add `php://`, `data://`, `expect://`. In Python the fetching library decides: `urllib`/`urllib.request.urlopen` handles `file://` (reading a local file → SSRF→LFI) and `ftp://`, whereas `requests` does **not** (it raises `InvalidSchema`) — so a `file://` payload reaches a local-file read through a `urllib`-based sink but not a `requests`-based one.
 
 ```java
 // VULNERABLE: URL client that supports non-HTTP schemes
@@ -939,13 +939,47 @@ httputil.NewSingleHostReverseProxy(target).ServeHTTP(w, r)   // also a custom Di
 
 > **Go safety note**: Go's `encoding/xml` does **not** resolve external entities/DTDs, so it is not an XXE→SSRF sink the way Java/PHP XML parsers are — don't flag it as one.
 
+## Non-HTTP Outbound Clients and the Mesh Sidecar
+
+SSRF is not only an HTTP-client problem. A user-controlled **gRPC target string** or a user-controlled **`ws://`/`wss://`** URL is an outbound-request sink that a URL/host allowlist built for `http.Client` usually never inspects, and on a service mesh every outbound request leaves with the workload's own identity.
+
+### gRPC channel target
+
+A gRPC channel takes a **target string**; if it is user-controlled the channel dials wherever the string points, including internal services and unix sockets. Go `grpc.NewClient` resolves the target with the `dns` scheme by default (the deprecated `grpc.Dial` uses `passthrough`); Python `grpc.insecure_channel(target)` and `grpc.secure_channel(target, creds)` take the target directly; Java `ManagedChannelBuilder.forTarget` and grpc-js `new Client` take a target the same way. The gRPC name-resolution spec accepts the schemes `unix:`, `unix-abstract:`, `vsock:`, `ipv4:`, and `ipv6:`, so a target string can reach a unix-domain socket or an explicit internal IP that an `http://`-oriented blocklist never sees.
+
+**Grep seeds**:
+```bash
+rg -n "grpc\.NewClient|grpc\.Dial|insecure_channel|secure_channel|ManagedChannelBuilder\.forTarget|new Client\(" --glob '*.{go,py,java,js,ts}'
+```
+
+**SAFE**: build the channel from a fixed, config-supplied target (or an allowlist of service names); never pass a request value as the target; if cross-service targets must be dynamic, validate against an allowlist of `host:port` and reject `unix:` / `unix-abstract:` / `vsock:` schemes.
+
+### WebSocket client
+
+A server-side WebSocket client (Node `ws`, Python `websockets`, Go gorilla `Dialer.Dial`) that opens a user-controlled `ws://`/`wss://` URL connects outbound to internal hosts. The WebSocket opening handshake is an **HTTP `GET` with `Upgrade: websocket`** that carries the request **path and query** (RFC 6455), so even a plain-HTTP internal endpoint that never speaks WebSocket still receives the attacker's `GET` — a read or trigger of internal HTTP routes reached through a WS sink.
+
+**SAFE**: allowlist the WebSocket host and scheme and resolve-and-pin the IP before connecting, exactly as for an HTTP SSRF guard; do not derive the WS URL from request input.
+
+### Service-mesh sidecar (Istio / Envoy)
+
+Inside a mesh, an app's outbound traffic exits through its **sidecar carrying the workload's own mTLS identity**, and `AuthorizationPolicy` matches on `source.principal`. So mesh **identity / authorization policies stop nothing** against an SSRF that originates inside the workload — the forged request legitimately carries the workload's identity, and any peer that trusts that principal accepts it. What still constrains the blast radius is **egress restriction** (Istio `REGISTRY_ONLY` outbound mode, egress gateways, Kubernetes `NetworkPolicy`), weighed the same way this file already weighs egress controls. The Envoy **admin interface on `:15000`** is pod-internal and a prime localhost SSRF target: `GET /config_dump` (Envoy attempts to redact private keys and passwords) and `GET /clusters` read mesh config and the upstream list, while its mutating endpoints require `POST`.
+
+**Grep seeds**:
+```bash
+rg -n "AuthorizationPolicy|source\.principal|REGISTRY_ONLY|egressGateway|:15000|config_dump|/clusters" --glob '*.{yaml,yml}'
+```
+
 ## SSRF in Cloud/Kubernetes Environments — Additional Targets
 
 When running on cloud/k8s, these internal URLs are high-value SSRF targets:
 - `http://169.254.169.254/` — AWS/Azure/GCP instance metadata (the shared link-local IP)
 - `http://instance-data/latest/meta-data/` — AWS hostname alias for the metadata IP (bypasses IP-string blocklists)
-- `http://169.254.170.2/v2/credentials/` — AWS ECS/Fargate task-role credentials endpoint
-- `http://metadata.google.internal/computeMetadata/v1/...?recursive=true` — GCP (header `Metadata-Flavor: Google`; recursive pulls whole subtrees)
+- `http://169.254.170.2${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}` — AWS ECS/Fargate task-role credentials; the path is the per-task value of the `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` env var (**not** a fixed `/v2/credentials/` path), so an SSRF must know or leak that value to hit it
+- `${AWS_CONTAINER_CREDENTIALS_FULL_URI}` plus an `Authorization` token read from a file — AWS **EKS Pod Identity** credentials; both the full URL and the token come from the pod's env/filesystem, not a fixed link-local IP
+- AWS **Lambda** — the execution-role keys are exposed as **environment variables** (`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`), so an env-var-read gadget is the usual credential path there; the Lambda **runtime API** `GET http://${AWS_LAMBDA_RUNTIME_API}/2018-06-01/runtime/invocation/next` returns the next invocation's event (documented behavior)
+- `http://metadata.google.internal/computeMetadata/v1/...?recursive=true` — GCP; requires header `Metadata-Flavor: Google` **and rejects any request carrying `X-Forwarded-For`** (recursive pulls whole subtrees)
+- `http://169.254.169.254/metadata/instance` — Azure IMDS; requires header `Metadata: true` and the request must **not** carry `X-Forwarded-For`
+- `${IDENTITY_ENDPOINT}` with header `X-IDENTITY-HEADER: ${IDENTITY_HEADER}` — Azure **App Service / Functions** managed-identity token endpoint; the header value is the rotated `IDENTITY_HEADER` env var, so the endpoint is not reachable by URL alone
 - `http://100.100.100.200/latest/meta-data/` — Alibaba Cloud metadata
 - `http://169.254.169.254/metadata/v1.json` — DigitalOcean (no header)
 - `http://169.254.169.254/opc/v1/instance/` and `http://192.0.0.192/latest/meta-data/` — Oracle Cloud (two distinct endpoints/IPs)
@@ -956,7 +990,9 @@ When running on cloud/k8s, these internal URLs are high-value SSRF targets:
 - `http://10.0.0.1/` — typical internal gateway
 - Redis on `redis://localhost:6379` — via gopher:// if supported
 
-Flag any user-controlled URL fetch where these are not explicitly blocked. Note that hostname aliases (`instance-data`, `metadata.google.internal`, `metadata.tencentyun.com`) and the alternate IPs (`169.254.170.2`, `100.100.100.200`, `192.0.0.192`) defeat blocklists that only string-match `169.254.169.254`. Cross-ref `kubernetes_cloud_security.md`.
+Flag any user-controlled URL fetch where these are not explicitly blocked. Note that hostname aliases (`instance-data`, `metadata.google.internal`, `metadata.tencentyun.com`) and the alternate IPs (`169.254.170.2`, `100.100.100.200`, `192.0.0.192`) defeat blocklists that only string-match `169.254.169.254`.
+
+**Header-gating triage (reachability, like the IMDSv2 note below):** a GET-only SSRF that cannot set request headers reaches **none** of the header-gated endpoints — GCP (`Metadata-Flavor: Google`), Azure IMDS (`Metadata: true`), Azure App Service (`X-IDENTITY-HEADER`), or AWS IMDSv2 (token header). Worse for the attacker, any path that *adds* `X-Forwarded-For` — which most reverse proxies do — is **rejected outright by GCP and Azure IMDS**. And the ECS/EKS/Lambda credential targets are built from per-task/per-pod env vars (`AWS_CONTAINER_CREDENTIALS_RELATIVE_URI` / `_FULL_URI`) or are env vars themselves, so they need that value, not just link-local reach. For a header-incapable or `X-Forwarded-For`-injecting SSRF, do not claim credential theft through these endpoints — note this in triage, as for IMDSv2; the finding is rated by what the request does reach, and this is no Severity Downgrade Rule trigger. Cross-ref `kubernetes_cloud_security.md`.
 
 ## URL-Fetch / Media-Proxy SSRF (`url=` parameter pattern)
 
@@ -1199,6 +1235,25 @@ docs = loader.load()
 
 **SAFE**: validate **every** outbound hop (initial URL *and* discovered links) with semantic origin comparison (`new URL(link).origin === new URL(base).origin`), not `startsWith`; block private/reserved/metadata ranges and non-`http(s)` schemes; resolve DNS once and **pin** the connection to the validated IP (no validate-then-fetch); disable redirects or re-validate each hop; expose an `allow_fetching_images=False`/allowlist switch for multimodal paths. LangChain ships `validate_safe_url` / `SSRFSafeSyncTransport` — prefer the library's SSRF-safe transport over a bare client.
 
+## IPFS Gateway & Node RPC SSRF
+
+Two IPFS surfaces matter for SSRF.
+
+**Kubo / go-ipfs node RPC API — a high-impact localhost target.** A Kubo node exposes an admin RPC at `http://127.0.0.1:5001/api/v0/` (bound to `localhost` by default, unauthenticated unless `--api-auth` is set). Reaching it is node takeover, not a read. It is **POST-only** — a `GET` returns `405`, so a GET-only SSRF cannot drive it — and it has a CSRF `Origin` guard, but that guard only blocks a mismatched **browser** `Origin` (`403`); a server-side request that sends **no `Origin` header succeeds (`200`)**, so the guard does not stop a POST-capable SSRF. High-value calls: `config/replace` rewrites the node config (rebind the API to `0.0.0.0`, add peers) for persistent compromise; `add` / `pin/add` / `files/write` write and pin data; `name/publish` hijacks IPNS names; `shutdown` stops the node (DoS); `key/gen|import|rm` manage keypairs. `config/show` dumps the full node config but **scrubs the private key and remote-service secrets** (it still leaks PeerID, listen addresses, bootstrap peers, and datastore layout) — treat it as admin-config disclosure, not key theft. Treat `:5001` like an unauthenticated Docker socket or Redis on localhost.
+
+**Gateway / `ipfs://` / `ipns://` as a fetch sink.** When an app retrieves content through an IPFS HTTP gateway (default read-only `:8080`) from user input, the SSRF depends on what is user-controlled:
+- **User-controlled gateway host** (`fetch(userGateway + "/ipfs/" + cid)`) — ordinary host-level SSRF; allowlist the gateway host.
+- **`/ipns/<name>` with a user-supplied DNSLink domain** — the gateway resolves `_dnslink.<domain>` from a DNS `TXT` record the attacker controls (pointing at an `/ipfs/` or `/ipns/` target), so a user-named IPNS domain steers what the server fetches (`/ipns/` is mutable / name-based).
+- **`add` / import / pin-by-URL features** — `ipfs add <url>` and pinning-service "pin from source URL" fetch an arbitrary user URL server-side (a `url=`-class sink).
+- **Not SSRF by itself:** a `/ipfs/<CID>` fetch to a **fixed** gateway is content-addressed — the CID pins the bytes and the host is fixed, so it cannot be steered to an internal host. Flag only when the gateway host, an `/ipns/` DNSLink name, or an import-from-URL path is user-controlled.
+
+**Grep seeds**:
+```bash
+rg -n "127\.0\.0\.1:5001|localhost:5001|/api/v0/|/ipfs/|/ipns/|ipfs://|ipns://|dnslink|dweb\.link|ipfs\.io" --glob '*.{js,ts,py,go,rb,java,php,cs}'
+```
+
+**SAFE**: keep the node RPC `:5001` bound to localhost and set `--api-auth`; never let request input choose the gateway host or an IPNS/DNSLink name without an allowlist; fetch `/ipfs/<CID>` only from a fixed pinned gateway; treat any user-URL "add/pin" feature as an SSRF sink (allowlist + resolve-and-pin). Cross-ref `kubernetes_cloud_security.md`.
+
 ## DNS-only / resolve-only severity
 
 `dns.lookup` / `socket.gethostbyname` / equivalent on a user-controlled host **is** an SSRF-class sink (recon / internal hostname→IP oracle). It is **not** the same impact as an HTTP(S) fetch to metadata or an internal admin panel.
@@ -1240,6 +1295,51 @@ Even a **blind** SSRF (no response body returned) escalates when it can reach an
 | Metrics exporters (Prometheus/Grafana) | `http://` exporter port | Data-source SSRF pivot (e.g. CVE-2020-13379) |
 
 **SAST takeaway**: severity of any user-controlled outbound fetch should assume these gadgets are reachable unless egress is network-restricted; the presence of `gopher`/`dict`/`file` scheme support escalates blind SSRF to RCE-class.
+
+## SSRF Response Written to Disk (Disk-Spill → Write / RCE)
+
+Reaching the internal service is only the first half of SSRF. The second half is what the **response** does when the client cannot keep it in memory (it is large, chunked, slow, or `1xx`-prefixed) or a library **persists** it (HTTP cache, cookie jar, WSDL/model store): a local file is written, and the malicious origin frequently controls that file's **name, extension, directory, predictability, and content** — turning a read-only SSRF into an arbitrary write, and an arbitrary write into RCE. So an SSRF-reachable fetch whose result is **written or persisted to disk** is more than an info-read; grade it by what it writes.
+
+**How an origin forces the write (spill triggers)** — the attacker's server shapes its response:
+- **Oversized / chunked / no-`Content-Length` / slow-drip body** → clients that cannot pre-size a response spool it to a temp file instead of memory.
+- **`1xx` preamble** (`100`/`102`/`103` before the real status) or a **lied `Content-Length`** → some clients commit a (partial) file early.
+- **Redirect to `file://`** (or `ftp`/`gopher`/`dict`) → on clients that permit a cross-scheme redirect (not curl's default, which refuses `file://` on redirect unless `--proto-redir` re-enables it), the fetch reads or **writes** to another scheme — e.g. a `307`/`308`→`file://` on a `PUT` writes the body locally, or a redirect into `ftp` becomes an upload gadget.
+- **`Content-Disposition: attachment; filename=...`** → names the on-disk file (verified for `curl -OJ`; `wget --content-disposition` is documented to do the same — the header-supplied name, not the URL basename). Note both keep only the **basename** (they strip a `../` path); the directory-escaping variant below is a *non-sanitizing library's* behavior, not curl's/wget's.
+- **URL basename** (no CD header) → the client names the file from the last URL path segment, also attacker-set.
+- **Malicious archive** (zip/tar whose members contain `../`) → extracted without a per-member path check.
+- **Non-seekable request body + redirect** → the streamed body is replayed to the new origin (exfil); **credentials + redirect** → `Authorization`/`Cookie` resent to the attacker host and written into world-readable cookie jars / logs.
+
+**What the write becomes (outcome classes)** — grade a sink by which control axes it concedes (content ≈ always; **name/ext**; **path**; **predictability**; **persistence**):
+- **Name / extension control** — drop a `.php`/`.jsp`/`.sh` into a served or executed directory, or overwrite a sibling by name.
+- **Path traversal → arbitrary write** — a `../` in the `Content-Disposition` filename, the URL basename, or an object-store **key** escapes the intended directory and writes anywhere the process can (`cron.d`, startup files, `authorized_keys`, app code) → RCE. The canonical sink is an object-store/download loader that joins a remote key into a local path with no `..` check (`file_path = f"{dir}/{key}"`, `path.join(dir, entry.path)`).
+- **Temp / symlink race** — a predictable `0666` temp created without `O_EXCL`/`O_NOFOLLOW`: a local attacker pre-plants a symlink at the guessable path and the fetch follows it, overwriting the target (`torch.hub`/mirror-helper class) — cross-ref `insecure_temp_file.md`.
+- **Cache / WSDL poisoning** — a predictable URL-keyed cache (HTTP cache, cookie jar, SOAP/WSDL store) writes the attacker body **before** validation; a later read serves or parses it.
+- **Zip-slip → RCE** — a fetched archive with `../` members extracted without containment (`extractall`/`unpack_archive`/`unzipper.Parse` → `path.join(dir, entry)` with no check) overwrites application code; an update/install flow then re-runs it.
+- **Deserialization → RCE** — a cached body is later unpickled/unmarshalled (e.g. a SOAP client **configured with a pickle file-cache** that writes the parsed WSDL to a predictable temp and `pickle.load`s it on the next call) — cross-ref `insecure_deserialization.md`.
+- **Cross-protocol write gadget** — a redirect into `ftp`/`gopher`/`dict`, or a `file://` `PUT`, turns the fetch into a write to another service.
+
+**SAST signals** — a URL fetch whose result reaches a disk write/persist with an attacker-influenced name, path, or content:
+```bash
+# download-to-file helpers that take the name/path from the response or URL
+rg -n "urlretrieve|download_url_to_file|DownloadFile|SaveMultipartFile|copyurl|wget|curl .*-O[J]?\b|content-disposition|SetOutput" --glob '*.{py,js,ts,go,java,cs,rb,php,sh,pl}'
+# fetched archive extracted with no per-member containment (zip-slip)
+rg -n "extractall|unpack_archive|unzipper|decompress\(|tar\.extract|ZipFile|CopyToDirectory" --glob '*.{py,js,ts,go,java,rb,cs}'
+# object-store / loader joins a remote key into a local path with no .. check
+rg -n "os\.path\.join\([^)]*(key|name|filename)|path\.join\([^)]*entry|f\"\{[^}]*(dir|tmp)[^}]*\}/\{[^}]*(key|name)" --glob '*.{py,js,ts,go}'
+# predictable temp or URL-keyed cache written then read/executed/deserialized
+rg -n "NamedTemporaryFile|mkstemp|/tmp/.*(md5|sha|wsdl|cache)|requests_cache|SoapClient|ObjectCache|FileCookieJar" --glob '*.{py,js,ts,php,rb}'
+```
+
+**Guards — most "URL validators" are not SSRF guards.** A check that only validates URL **shape** (a regex like Django `URLValidator`, or no host guard at all — Scrapy offsite, Tornado) permits a raw `127.0.0.1`/`169.254.169.254`; a **DNS-existence** check (Laravel `active_url` → `dns_get_record`) instead permits any **resolvable hostname** — including one an attacker points at `127.0.0.1`/`169.254.169.254` — while only incidentally rejecting a raw-IP literal. Neither inspects the *resolved address* or says anything about the write; even redirect-revalidating ones usually leave a **DNS-rebind TOCTOU** (resolve at validation, resolve again at connect). Only guards that **pin or re-check the connected IP per hop** close the reach half (e.g. Symfony `NoPrivateNetworkHttpClient`, unjs IPX). And guarding the *fetch* half does **not** cover the disk-spill half: the write itself must be validated — reject `..`/absolute paths, ignore attacker `Content-Disposition` for the stored name, create temps with `O_EXCL`+`O_NOFOLLOW`, and enforce per-member archive containment.
+
+### TRUE POSITIVE
+- A URL fetch an attacker can point (SSRF reach) whose response is written or persisted to disk with an attacker-influenced **name, path, extension, or archive member**, and the file is later served, executed, extracted, or deserialized. Rate at the class the chain reaches per the base severity table: a write that reaches **code execution** (web-root `.php`, zip-slip over app code, `cron.d`, a body later unpickled by a code-running deserializer) is **Critical** (Direct RCE); an arbitrary write or disclosure that does not reach execution is rated at that sink's own class.
+
+### FALSE POSITIVE
+- The fetch result stays in memory (transport / in-memory client), or is written to a server-fixed path with a server-generated random name and no attacker-controlled component, and is never re-executed/extracted/deserialized.
+- A path-traversal / zip-slip / temp-race / deserialization finding whose write input is **not** reachable through an attacker-pointable fetch — that is the sink class's own finding (`path_traversal_lfi_rfi.md`, etc.), not SSRF.
+
+**Cross-refs**: `path_traversal_lfi_rfi.md` (traversal / zip-slip on the written name), `arbitrary_file_upload.md` (attacker-named write into a served dir), `insecure_deserialization.md` (cached body later unpickled), `insecure_temp_file.md` (predictable `0666` temp symlink race).
 
 ## Dynamic Test / PoC
 
@@ -1345,7 +1445,7 @@ curl -F "file=@poc.m3u8" "https://app.example.com/convert"
 **Broadened cloud metadata (provider-specific)**
 ```bash
 curl "https://app.example.com/fetch?url=http://instance-data/latest/meta-data/"              # AWS hostname alias
-curl "https://app.example.com/fetch?url=http://169.254.170.2/v2/credentials/"                # AWS ECS task role
+curl "https://app.example.com/fetch?url=http://169.254.170.2\${AWS_CONTAINER_CREDENTIALS_RELATIVE_URI}"  # AWS ECS/Fargate task role — path is the per-task env-var value, not a fixed /v2/credentials/
 curl "https://app.example.com/fetch?url=http://169.254.169.254/metadata/v1.json"             # DigitalOcean
 curl "https://app.example.com/fetch?url=http://169.254.169.254/opc/v1/instance/"             # Oracle Cloud
 curl "https://app.example.com/fetch?url=http://metadata.tencentyun.com/latest/meta-data/"    # Tencent Cloud
