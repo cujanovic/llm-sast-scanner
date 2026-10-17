@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.33"
+  version: "1.50.34"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -22,7 +22,7 @@ severity ratings, affected code locations (file + line number), and remediation 
 
 ## Scope
 
-This skill covers the following 103 vulnerability classes. Each has a dedicated reference file loaded on demand,
+This skill covers the following 106 vulnerability classes. Each has a dedicated reference file loaded on demand,
 documenting the sources, sinks, and sanitizers/barriers used to detect and triage that class:
 
 | Category | Vulnerabilities |
@@ -185,8 +185,8 @@ last-updated: <YYYY-MM-DD>
 Fixed and superseded rows live in `.llm-sast-scanner-cache/project-memory-archive.md`, one line each in the ledger
 row format; it is append-only and detection runs do not read it.
 
-The orchestrator should add `.llm-sast-scanner-cache/` to the scanned repo's `.gitignore` (or commit it
-deliberately to share memory across developers).
+The orchestrator should keep `.llm-sast-scanner-cache/` untracked via the scanned repo's `.git/info/exclude` — not
+`.gitignore`, which makes agent runtimes that block writes to ignore-file-matched paths refuse to create the cache (or commit it deliberately to share memory across developers).
 
 ---
 

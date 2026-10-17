@@ -18,7 +18,7 @@ Traditional SAST tools rely on fixed rule sets and tend to drown teams in false 
 |-----------|-----------|
 | **`llm-sast-scanner/`** | The core skill — a 7-step detection workflow plus Judge verification and an optional adversarial pass, backed by 106 vulnerability reference knowledge bases. |
 | **`llm-sast-scanner-convergence-loop/`** | The audit procedure: an exhaustive, convergence-driven, line-by-line audit of an entire repository, guaranteeing 100% line coverage. Holds all the audit mechanics. |
-| **`llm-sast-scanner-full-scan-loop/`** | A thin wrapper that fixes the **partitioned run configuration** (every vulnerability lens × 3 line-balanced partitions, one subagent each) as the default, plus the consolidation reconciliation steps. Mechanics stay in the convergence loop; only the run configuration lives here. |
+| **`llm-sast-scanner-full-scan-loop/`** | A thin wrapper that fixes the **partitioned run configuration** (every vulnerability lens × N line-balanced partitions — three, or one per 12,000 lines when larger — one subagent each) as the default, plus the consolidation reconciliation steps. Mechanics stay in the convergence loop; only the run configuration lives here. |
 | **`AGENTS.md` / `CLAUDE.md`** | The repo-level orchestrator playbook that drives parallel multi-agent scanning and report consolidation. `CLAUDE.md` is a symlink to `AGENTS.md`. |
 | **`.claude/skills/`, `.agents/skills/`** | Per-runtime skill discovery directories — both symlink to the single canonical skill source, so the two runtimes can never drift apart. |
 
@@ -100,7 +100,7 @@ The full per-class list (with files and CWE mappings) lives in `llm-sast-scanner
 | **Low** | Information disclosure, open redirect, weak crypto, insecure cookie |
 | **Info** | Missing security headers, verbose errors, defense-in-depth gaps |
 
-Exploitation that requires authentication, non-default config, chaining, or admin/internal-only access is downgraded one level from the class default.
+Exploitation that requires one of exactly three things — a **privileged position** (admin/operator/internal, or a network location the code shows is not exposed), a **non-default configuration** that ships off by default, or a **chained prerequisite** (another finding established first) — is downgraded one level from the class default. Ordinary authentication is not a downgrade: an attack any signed-in user can perform is rated at the class default.
 
 ---
 
