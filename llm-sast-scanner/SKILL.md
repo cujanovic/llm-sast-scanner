@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.50.34"
+  version: "1.51.0"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -129,9 +129,11 @@ line are not keys of their own — no row is written for them — and a row alre
 is re-verified by that finding. Record WITHDRAWN findings — a finding defeated by a named guard, type fact or deployment fact — as false-positive-pattern rows; a DOWNGRADED or DISPUTED finding is real, keeps its ledger row carrying its verdict, and is never a false-positive pattern. Write those rows **with the rationale
 that defeated them**; an Unverifiable (NEEDS CONTEXT) finding is not a false-positive pattern and is never written to that
 section — it stays a ledger row, status `open`, its brief naming the missing context; refresh project security primitives and hotspots by editing their rows; append exactly one
-line to **Coverage / depth notes** per run (sha, new-confirmed, found-late, maturity-streak — incremented when
-new-confirmed is at most 3 and found-late is empty, else reset to 0 — deep pass, thin
-areas) — consumed by iterative re-scans (`new-scan`) to steer the next run's depth; set `last-scanned-sha` to
+line to **Coverage / depth notes** per run (sha, new-confirmed, new-crit-high, found-late, maturity-streak — incremented
+when new-confirmed is at most 3 and found-late is empty, else reset to 0 — risk-stable-streak — incremented when
+new-crit-high (new ledger keys whose finding is Critical or High at its final post-validation severity) is 0, else reset
+to 0, the repo **risk-stable** at a streak of 2 or more, a separate reporting-only signal that never changes scan depth —
+deep pass, thin areas) — consumed by iterative re-scans (`new-scan`) to steer the next run's depth; set `last-scanned-sha` to
 `git rev-parse HEAD` (or `unknown` if not a git repo) and `last-updated` to today. History is kept, never
 deleted: a row whose status becomes `fixed` or `superseded` moves, as one line in the same row format, to
 `.llm-sast-scanner-cache/project-memory-archive.md` (append-only; detection runs never read it), and when
@@ -179,7 +181,7 @@ last-updated: <YYYY-MM-DD>
 <!-- file/dir | note -->
 
 ## Coverage / depth notes
-<!-- one line per run: run <git sha> <YYYY-MM-DD>: new-confirmed=<n> | found-late=<files swept-clean-before-now-flagged> | maturity-streak=<n> | deep pass=<files/classes> | thin, deepen next=<files/classes>; at most ten run lines plus one `earlier runs: <n>` line -->
+<!-- one line per run: run <git sha> <YYYY-MM-DD>: new-confirmed=<n> | new-crit-high=<n> | found-late=<files swept-clean-before-now-flagged> | maturity-streak=<n> | risk-stable-streak=<n> | deep pass=<files/classes> | thin, deepen next=<files/classes>; at most ten run lines plus one `earlier runs: <n>` line; a previous run line with no risk-stable-streak= field reads as 0 -->
 ```
 
 Fixed and superseded rows live in `.llm-sast-scanner-cache/project-memory-archive.md`, one line each in the ledger

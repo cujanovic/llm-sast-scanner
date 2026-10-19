@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.27.2"
+  version: "2.28.0"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -885,7 +885,10 @@ streak` — the streak derived as the maturity rule states: the memory's previou
 `found-late` is 0, `new keys` is at most 3 and no `worker not run:` line stands in the plan, else 0, against
 the appendix's `streak <n>`, with the header's `Maturity:` line required to repeat it, and the memory holding exactly one
 `run ` line more than the pre-write copy (ten at most, the oldest folded) — a run line replaced instead of appended is a
-history rewritten; (22) `continuity join` — the
+history rewritten; (21b) `risk-stable streak` — derived like item (21) but severity-gated and separate: the previous run
+line's `risk-stable-streak` plus one when `new crit/high` (the new keys whose body record is Critical/High at its final
+post-Step-6 severity) is 0 and no `worker not run:` line stands, else 0, against the appendix `risk:` line and the
+header's `Risk:` line that must repeat it — checked only for a report of a wrapper 2.28.0 or later; (22) `continuity join` — the
 scan-plan's `continuity join: <n> rows carry a previous verdict — <ids>` against the rows the join yields, the sum of
 carried, voided and bare, with `n` equal to the ids listed and `listed rows bare <x>` — listed rows whose block's
 `Adversarial:` line is a bare `STANDING` — required to be 0; a join line without its ids is a count nobody can walk, and
@@ -1736,6 +1739,18 @@ partition holding a `worker not run:` pair, since a worker that passed its gate 
   The report header repeats the status on its first screen: a `Maturity:` line directly under `Base SHA:`, reading
   `Maturity: streak <n> — <mature | not mature>`, copied from this appendix line once it is derived and from nowhere
   else; a header whose `Maturity:` line differs from the appendix line is a STEP 3 error, repaired in place.
+- Risk-stable: one line, `risk: new crit/high <n> | risk-stable-streak <n> | <risk-stable | not risk-stable>` — `n` the
+  new Critical/High keys of this run: the new ledger keys of recheck item (12) whose body record is rendered Critical or
+  High at its FINAL, post-Step-6 severity, so a High that Step 6 downgraded does not count. This is a SEPARATE signal from
+  the maturity line and NEVER changes scan depth or coverage; it answers only whether new *serious* findings were
+  discovered. The streak is derived, never asserted: the previous run line's `risk-stable-streak` plus one when `new
+  crit/high` is 0 and the plan holds no `worker not run:` line — no new serious finding and no unread partition — else 0; a
+  previous run line with no `risk-stable-streak=` field reads as 0. `risk-stable` is written only at a streak of 2 or more,
+  and the memory's new run line carries the same `risk-stable-streak=<n>`, so the two never differ. The report header
+  repeats it on its first screen: a `Risk:` line directly under the `Maturity:` line, reading `Risk: streak <n> —
+  <risk-stable | not risk-stable>`, copied from this appendix line once derived and from nowhere else; a header whose
+  `Risk:` line differs from the appendix line is a STEP 3 error, repaired in place. A report of a wrapper before 2.28.0
+  predates this line and does not carry it.
 - Body/histogram reconciliation: one line per severity, `<severity>: <records counted in body> / <histogram
   count>`, produced by recounting the finished body; every pair equal.
 

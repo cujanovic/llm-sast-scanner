@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.17.5"
+  version: "1.18.0"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -106,6 +106,13 @@ run's memory as a plan — not by scanning less. The mechanics:
      After **K consecutive `new-scan`s with at most 3 new-confirmed keys, zero found-late files and
      zero re-opened/regressed findings** (default **K=2**), record the repo as **mature** and say so in the run
      summary. The new-key count is the streak's input: a run that adds more than three keys to the ledger resets it, because a repository that is still yielding new sinks is not mature whatever its body count does.
+   - **New-crit-high count per run** — the new-confirmed keys whose **final (post-validation) severity is Critical or
+     High**. This drives a **separate `risk-stable-streak`**: incremented on a `new-scan` when new-crit-high is 0 (a
+     previous run line with no `risk-stable-streak=` field reads as 0), else reset to 0; at a streak of **2 or more** record
+     the repo **risk-stable**. It answers "were any *serious* findings discovered?" independently of maturity — a run that
+     adds only new Low/Medium findings advances `risk-stable-streak` while `maturity-streak` resets. It is
+     **reporting-only**: it never reduces scan depth or coverage (every in-scope line is still read every run), so it can
+     never suppress a finding.
    - **Found-late = shallow-coverage feedback**: a `new-scan` confirms a finding in a file with **no prior
      `## Confirmed findings ledger` entry** (previously swept clean — detectable from the persisted ledger, not
      the overwritten results files). That file got a shallow pass last time — record it as a `## Hotspots`
@@ -303,10 +310,12 @@ Launch one subagent:
 > DOWNGRADED/DISPUTED/WITHDRAWN as
 > false-positive patterns with the rationale that defeated them; refresh primitives/hotspots; bump
 > `last-scanned-sha`/`last-updated`; and append a run entry to the memory's **`## Coverage / depth notes`**
-> section — `new-confirmed=<n>`, any **found-late** files (swept clean last run, flagged now → also add to
+> section — `new-confirmed=<n>`, `new-crit-high=<n>` (new keys Critical/High at final severity), any **found-late** files
+> (swept clean last run, flagged now → also add to
 > `## Hotspots`), the updated `maturity-streak` (increment if new-confirmed is at most 3, no found-late
 > files and no regressions, else reset to 0; K=2 ⇒ mark
-> repo mature), and per-lens deep-pass vs. thin areas — so the next `new-scan`'s
+> repo mature), the updated `risk-stable-streak` (increment if new-crit-high is 0, else reset to 0; K=2 ⇒ mark repo
+> risk-stable — a separate, reporting-only signal), and per-lens deep-pass vs. thin areas — so the next `new-scan`'s
 > `scan-plan.md` can target the thin areas and track cross-run convergence).
 
 When D3 finishes, tell the user the report path and summarize the highest-severity findings. **In parallel
@@ -665,9 +674,12 @@ OUTPUT (single-agent mode)
   `open|fixed` status of every re-verified prior finding** (mark now-fixed ones `fixed`), record
   WITHDRAWN findings as false-positive patterns with the rationale that defeated them — DOWNGRADED and DISPUTED findings are real and stay ledger rows carrying their verdict, never false-positive patterns —,
   refresh project security primitives and hotspots, bump `last-scanned-sha` / `last-updated`, and append a run
-  entry to the memory's **`## Coverage / depth notes`** section — `new-confirmed=<n>`, any **found-late** files
+  entry to the memory's **`## Coverage / depth notes`** section — `new-confirmed=<n>`, `new-crit-high=<n>` (new keys
+  Critical/High at final severity), any **found-late** files
   (swept clean last run, flagged now → also add to `## Hotspots`), the updated `maturity-streak` (increment if
-  new-confirmed is at most 3 with no found-late files and no regressions, else reset; K=2 ⇒ mark mature), and deep vs. thin areas per class — for
+  new-confirmed is at most 3 with no found-late files and no regressions, else reset; K=2 ⇒ mark mature), the updated
+  `risk-stable-streak` (increment if new-crit-high is 0, else reset; K=2 ⇒ mark risk-stable — separate, reporting-only),
+  and deep vs. thin areas per class — for
   the next `new-scan`.
 
 ---

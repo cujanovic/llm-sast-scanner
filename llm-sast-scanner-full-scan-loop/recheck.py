@@ -1375,6 +1375,9 @@ NO_MOVE_FROM = (2, 26, 16)
 OWNED_FROM = (2, 27, 0)
 # from 2.27.1 on a cut still over the caps is set against the fullest-fit packing too, and `*_test.dart` is test code
 FIT_FROM = (2, 27, 1)
+# from 2.28.0 on a report carries the risk-stable signal: a `risk:` appendix line and a `Risk:` header line, severity-gated
+# on new Critical/High keys only (a separate convergence-of-serious-findings measure, apart from the all-severity maturity streak)
+RISK_STABLE_FROM = (2, 28, 0)
 
 
 def checks_line(ok: bool, parts: list[str], fails: list[str]) -> str:
@@ -3369,6 +3372,19 @@ def main() -> int:
         return sink not in copy_sinks_nonstem
     new_keys = sum(1 for k in ledger_keys if is_new(k))
 
+    # new keys whose body record is rendered Critical/High in the FINAL (post-Step-6) report — the risk-stable signal's
+    # input. Severity read from the block the row's id heads (the histogram's severity), so a High downgraded to Medium
+    # does not count. new_crit_high ⊆ new_keys by construction (a crit/high body key is a body key is a ledger key).
+    def _final_sev(c: list[str]) -> str | None:
+        b_ = block_id.get(c[6].upper())
+        m_ = RECORD_RX.match(b_) if b_ else None
+        return m_.group(1).upper() if m_ else None
+    crit_high_keys = {key_of(c[3], c[2]) for c in body_rows if _final_sev(c) in ("CRITICAL", "HIGH")}
+    new_crit_high = sum(1 for k in crit_high_keys if is_new(k))
+    # a body row whose id heads no block has no readable severity: it would silently drop from the count above and
+    # wrongly let the streak advance, so it fails the risk item (the close-out body-blocks equation also catches it)
+    sev_unknown = sum(1 for c in body_rows if _final_sev(c) is None)
+
     co_m = re.search(r"^close-out: table rows (\d+) \| file records (\d+) \| body rows (\d+) \| promoted (\d+) (?:\| carried (\d+) )?\| body blocks (\d+) \| linked blocks (\d+) \| invalid cells (\d+)", appendix, re.M)
     closeout = [int(co_m.group(i)) for i in (1, 2, 3, 4, 6, 7, 8)] if co_m else None  # n f b p k j c
     co_carried = int(co_m.group(5)) if co_m and co_m.group(5) is not None else 0
@@ -4950,6 +4966,27 @@ def main() -> int:
     header_ok = bool(rep_streak) and header_mat.startswith(f"streak {rep_streak[0]} — ") and (("mature" in header_mat and "not mature" not in header_mat) == (derived >= 2))
     emit("maturity streak", f"{derived} (previous run line {prev_streak}, new keys {new_keys} bound {NEW_KEY_BOUND}, found-late {found_late[0] if found_late else 'absent'}, worker not run {len(not_run_pairs)}, body blocks {this_blocks} vs previous {prev_blocks}) | header {'consistent' if header_ok else 'INCONSISTENT'} | run lines {run_now} (copy {run_copy} + 1{' — replaced, not appended' if not run_ok else ''})",
          str(rep_streak[0]) if rep_streak else "absent", bool(rep_streak) and rep_streak[0] == derived and header_ok and run_ok)
+
+    # 21b. risk-stable streak — a separate, severity-gated convergence signal: new Critical/High keys only, apart from the
+    # all-severity maturity streak above. Reporting-only (it never changes scan depth). From RISK_STABLE_FROM the report must
+    # carry a `risk:` appendix line and a `Risk:` header line; a report before that version is not required to and passes.
+    wv_risk = wrapper_version(plan)
+    risk_gated = bool(wv_risk) and wv_risk >= RISK_STABLE_FROM
+    risk_streaks = re.findall(r"^run .*risk-stable-streak=(\d+)", memory, re.M)
+    prev_risk = int(risk_streaks[-2]) if len(risk_streaks) >= 2 else 0  # a previous run line without the field reads as 0
+    risk_derived = prev_risk + 1 if (new_crit_high == 0 and not not_run_pairs) else 0
+    rep_risk = ints(r"^risk: .*risk-stable-streak (\d+)", appendix)
+    rep_nch = ints(r"^risk: new crit/high (\d+)", appendix)
+    header_risk = row(report, "Risk:") or ""
+    header_risk_ok = bool(rep_risk) and header_risk.startswith(f"streak {rep_risk[0]} — ") and (("risk-stable" in header_risk and "not risk-stable" not in header_risk) == (risk_derived >= 2))
+    risk_ok = (bool(rep_risk) and rep_risk[0] == risk_derived and bool(rep_nch) and rep_nch[0] == new_crit_high
+               and new_crit_high <= new_keys and sev_unknown == 0 and header_risk_ok)
+    if risk_gated:
+        emit("risk-stable streak", f"{risk_derived} (previous run line {prev_risk}, new crit/high {new_crit_high} of new keys {new_keys}, body rows with no block {sev_unknown}, worker not run {len(not_run_pairs)}) | header {'consistent' if header_risk_ok else 'INCONSISTENT'}",
+             str(rep_risk[0]) if rep_risk else "absent", risk_ok,
+             "the `risk:` appendix line reads `new crit/high <n> | risk-stable-streak <n> | <risk-stable|not risk-stable>` and the header a `Risk: streak <n> — <risk-stable|not risk-stable>` line, `new crit/high` this run's new Critical/High keys, the streak the previous run line's risk-stable-streak + 1 when new crit/high is 0 and no worker was not run, else 0, and risk-stable at streak 2 or more")
+    else:
+        emit("risk-stable streak", f"not required (wrapper {'.'.join(map(str, wv_risk)) if wv_risk else 'absent'} before {'.'.join(map(str, RISK_STABLE_FROM))})", None, True)
 
     # 22. continuity join — the scan-plan's join line, its count, its listed ids and their cells
     join_m = re.search(r"^continuity join: (\d+) rows carry a previous verdict(?: — (.*))?$", plan, re.M)
