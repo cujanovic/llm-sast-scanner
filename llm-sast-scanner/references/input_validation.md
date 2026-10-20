@@ -422,6 +422,7 @@ rg -n "URLDecoder\.decode|unquote\(|decodeURIComponent\(|url\.QueryUnescape" -C3
 
 - GraphQL weak typing as an injection/IDOR/DoS **precursor**: `graphql_injection.md` (Schema-Level Input Validation, Custom Scalar Coercion).
 - When the unvalidated value reaches a sink: `sql_injection.md`, `nosql_injection.md`, `ssrf.md`, `path_traversal_lfi_rfi.md`, `open_redirect.md`, `rce.md`, `xss.md`, `log_injection.md`, `regex_injection_redos.md`.
+- **Non-scalar / wrong-type value (CWE-1287)**: a request value that can arrive as an **array/object** (PHP `param[]=`, JSON body) accepted with no scalar/type assertion is this class as a standalone Low — but when it reaches an **auth/credential lookup** it supersedes to `privilege_escalation.md` / `authentication_jwt.md` (fail-open-via-type-confusion → auth bypass), and when it reaches a **query** to `sql_injection.md` / `nosql_injection.md` (non-scalar → `IN`/operator). A wrong-typed value a validator treats as *absent* (silently skipping a check) is the same root.
 - Privileged-field binding: `mass_assignment.md`, `privilege_escalation.md`, `idor.md`.
 - Size/cardinality (not format): `denial_of_service.md`, `graphql_dos.md`.
 

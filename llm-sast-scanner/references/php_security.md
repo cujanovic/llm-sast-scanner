@@ -155,8 +155,12 @@ if ($data->token == $expected_token) {    // if $data->token is integer 0 and $e
     // bypass
 }
 
+// VULNERABLE: strcmp/strpos/substr_compare with an array return NULL (pre-PHP-8), and NULL == 0 is TRUE
+if (strcmp($_POST['password'], $real) == 0) { /* authenticated */ }  // password[]=x -> strcmp()=NULL -> ==0 -> bypass
+
 // SAFE: use strict === comparison
 if ($hash === $expected_hash) { ... }
+if (is_string($token) && strcmp($token, $real) === 0) { ... }   // assert string, then strict === 0
 ```
 
 **Magic hash values** (MD5 hashes starting with `0e` + digits):
@@ -180,6 +184,25 @@ switch ($_GET['status']) {
     case 1: grantAdmin(); break;    // status=true or status="1abc" may match
 }
 ```
+
+### Array where a scalar is expected (`param[]=`)
+
+```php
+// VULNERABLE: an array bypasses the presence check and reaches the credential lookup
+// request:  ?api_token[]=0   ->   $_GET['api_token'] = ['0']   (an array, not a string)
+$token = $request->input('api_token');
+if (! empty($token)) {                                  // passes: a non-empty array is not empty
+    $user = User::where('api_token', $token)->first();  // array value -> WHERE api_token IN ('0')
+    // MySQL/MariaDB coerce a non-numeric column to 0, so IN (0) matches an unintended user -> auth bypass
+}
+
+// SAFE: assert the type before the value reaches the query
+if (is_string($token) && $token !== '') {
+    $user = User::where('api_token', $token)->first();
+}
+```
+
+PHP's native parser turns `param[]=`, `param[key]=`, and `param[$ne]=` (and `multipart` `field[]`) into arrays/maps, so **any** `$_GET`/`$_POST`/`php://input` value can be non-scalar — including a **stored JSON column read back** (second-order). An `empty()`/`isset()`/truthiness check passes for a non-empty array, and the ORM then builds an `IN`/`whereIn` rather than string-comparing — Eloquent's credential provider builds `whereIn`, Doctrine `findBy(['x' => $arr])` builds `IN` — after which MySQL/MariaDB coerce a non-numeric column against the integer value and match an unintended row (a raw PDO/mysqli *prepared* `?` instead **errors** on an array bind, so check the ORM/builder path, not prepared statements). A non-scalar reaching a **comparison** bypasses it too — see the `strcmp`-array case in Type Juggling above. **A framework guard on one accessor is not a fix**: `$request->string()` / `InputBag::get()` reject arrays, but `$request->input()` / `->all()` / `$_GET` do not — check the accessor the handler actually uses. **SAFE**: `is_string()` (or `(string)` cast + re-check) before any request value reaches a query, a credential provider, or a comparison; reject arrays explicitly.
 
 ## PHP Object Injection (Deserialization)
 
@@ -367,6 +390,7 @@ The dangerous flow often does not start at a superglobal on *this* request. When
 - `unserialize(` + superglobal or decoded cookie → **CONFIRM** + check for magic method gadgets
 - `==` (loose) comparison in authentication/token validation → **CONFIRM** (type juggling bypass)
 - `in_array($input, $list)` without `true` third argument in access control → **CONFIRM** (type juggling)
+- a request value (`$_GET`/`$_POST`/`$request->input`) used in a credential/identity query or comparison with no `is_string()`/scalar guard — an array via `param[]=` reaches `where`/`findBy` as an `IN` list or coerces → **CONFIRM** (non-scalar type-confusion auth bypass)
 - `exec/system/passthru/shell_exec/popen/proc_open/pcntl_exec(` + user input → **CONFIRM** (OS command injection)
 - `file_get_contents($_GET['url'])` or similar → **CONFIRM** (SSRF or LFI)
 - `DB::select("...'" . $request->x . "'...")` in Laravel → **CONFIRM** (SQL injection)
