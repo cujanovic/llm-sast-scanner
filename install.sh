@@ -1,11 +1,12 @@
 #!/bin/sh
 # Installer / health check for the llm-sast-scanner skills.
 #
-#   sh install.sh install [agents|claude|all]
-#   sh install.sh doctor  [agents|claude|all]
+#   sh install.sh install [agents|claude|codex|all]
+#   sh install.sh doctor  [agents|claude|codex|all]
 #
 # install  symlinks the three skill directories of THIS checkout into the
-#          selected runtime root(s): ~/.claude/skills and/or ~/.agents/skills.
+#          selected runtime root(s): ~/.claude/skills, ~/.agents/skills and/or
+#          ~/.codex/skills.
 #          $HOME must be an existing directory; the runtime roots are created
 #          when missing. Every destination is checked before anything is
 #          changed, so a refusal during those checks leaves both roots exactly
@@ -19,8 +20,8 @@
 set -eu
 
 usage() {
-    printf 'usage: sh install.sh install [agents|claude|all]\n' >&2
-    printf '       sh install.sh doctor [agents|claude|all]\n' >&2
+    printf 'usage: sh install.sh install [agents|claude|codex|all]\n' >&2
+    printf '       sh install.sh doctor [agents|claude|codex|all]\n' >&2
     exit 1
 }
 
@@ -171,7 +172,7 @@ esac
 target=all
 if [ "$#" -eq 2 ]; then
     case $2 in
-        agents|claude|all) target=$2 ;;
+        agents|claude|codex|all) target=$2 ;;
         *) usage ;;
     esac
 fi
@@ -210,7 +211,8 @@ done
 case $target in
     agents) suffixes='.agents/skills' ;;
     claude) suffixes='.claude/skills' ;;
-    all) suffixes='.claude/skills .agents/skills' ;;
+    codex) suffixes='.codex/skills' ;;
+    all) suffixes='.claude/skills .agents/skills .codex/skills' ;;
     *) fail "unknown target: $target" ;;
 esac
 

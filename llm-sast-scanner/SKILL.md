@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.51.0"
+  version: "1.51.1"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -205,7 +205,8 @@ Determine:
 - **Skipping anything else — name the source file, or keep it.** A file leaves the coverage set ONLY when you can name the in-scope file its security-relevant content is **derived from**; record that path beside the exclusion. Nothing to name → it stays in scope.
   - *Derived, and the source is in scope → skip*: `dist/`/`build/` bundles and minified assets (source in `src/`), ORM migration snapshots (e.g. a `meta/` or `snapshots/` directory beside the migrations, derived from the `.sql` migrations), generated clients/stubs from a checked-in schema or IDL (`*.pb.go`, `*_pb2.py`, OpenAPI/GraphQL codegen output).
   - *Nothing else expresses it → keep, whatever its size, generator, or authorship*: **lock files** (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Gemfile.lock`, `poetry.lock`, `go.sum`, `Cargo.lock`) — the manifest holds no resolved URLs, registry hosts, or integrity hashes, so dependency-confusion, plaintext-registry, and integrity findings exist ONLY in the lock file; vendored or committed third-party code that ships; `.sql` migrations (grants, RLS policies, triggers, definer functions); IaC and CI/CD config.
-  - "Auto-generated", "third-party", "not source code", and "too large" are **not** reasons — each is true of files in both lists above.
+  - *No reader can line-cover it → exclude, listed not read*: a file with any line over 2000 bytes (the per-line reader limit) — a minified or generated bundle, a committed package-manager runtime (`.yarn/releases`, `.yarn/plugins`, `.pnp.cjs`, `.pnp.loader.mjs`) — cannot reach 100% line coverage, so it leaves the coverage set and is listed in `scope-excluded.txt` with its measured byte length. Its supply-chain integrity stays covered by the lock file and `.yarnrc.yml`, which remain in scope.
+  - "Auto-generated", "third-party", "not source code", and "too large" are **not** reasons — each is true of files in both lists above. (A line no reader can read is different: that is the mechanical reader limit just above, not a size judgment.)
 
 ### Step 2: Load Relevant References
 

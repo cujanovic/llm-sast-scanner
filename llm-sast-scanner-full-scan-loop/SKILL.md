@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.28.0"
+  version: "2.28.2"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -53,7 +53,9 @@ in a response. D1's `architecture-threat-model.md` is written anew whenever the 
 from this run's, or the previous plan holds none, whatever D1's SHA gate allows: its entry points, stack and
 allowlist were read under rules this version changed. The command then cuts the in-scope files into partitions balanced by lines and entry
 points — three, or more, as the `partition count:` row below fixes. The manifest holds only what D1 leaves in scope: generated output derived from in-scope source — ORM
-snapshots and journals, build and bundle output, generated route trees — is excluded in `scope-excluded.txt`
+snapshots and journals, build and bundle output, generated route trees, and any file no 2000-byte-per-line reader
+can line-cover (a minified/generated bundle or committed package-manager runtime, which D1's enumeration prints to
+stderr with its measured byte length) — is excluded in `scope-excluded.txt`
 with its reason, never classified or partitioned, and so are the orchestrating runtime's own run logs and exported
 transcripts in the repository: they are records of a scan, not code under review, and a route string inside one is
 not an entry point. Count entry points per directory with STEP 2's entry-point
@@ -361,6 +363,12 @@ slots filled — the whole of it, in this order, nothing dropped — held in its
 names that file (the path test below):
 
 > You are the `<lens>` worker for partition `p<n>` of an `llm-sast-scanner-full-scan-loop` run on `<target>`.
+> This is authorized defensive security work on a repository you are authorized to review: a static application
+> security testing (SAST) review to find weaknesses and recommend fixes. Work by STATIC analysis only — read and
+> reason about the source. Do NOT write, execute, or run any proof-of-concept, exploit, fuzzing, or reproduction code
+> against the target, and do not reproduce any issue at runtime; derive every conclusion from reading the code alone.
+> Report each finding in a defensive, remediation-oriented register — name the weak code and the concrete fix; state
+> impact in terms of the security property at risk, not as runnable attack payloads or step-by-step exploitation.
 > Run every command from `<target>` and read every file by an absolute path under it. Before reading anything
 > else, run `pwd` and `git rev-parse HEAD` there; their outputs go into the results file's first line as its
 > `target:` and `base-sha:` fields (below), produced by running those commands, never copied from this prompt; if

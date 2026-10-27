@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.18.0"
+  version: "1.18.1"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -357,13 +357,17 @@ GROUND RULES
   or skim — read each in-scope file fully, line by line.
 - EXCLUDE from scope (do NOT read, do NOT count against coverage): binary assets; dependency trees this repo
   does not author (node_modules/); build/generated output (dist/, build/, out/, *.min.js, *.bundle.js, source
-  maps); and **the scanner's OWN outputs — the `.llm-sast-scanner-cache/` directory
+  maps); **files no 2000-byte-per-line reader can line-cover** — any file whose longest line exceeds 2000 bytes
+  (a minified or generated bundle) and committed package-manager runtimes (`.yarn/releases`, `.yarn/plugins`,
+  `.pnp.cjs`, `.pnp.loader.mjs`), each listed in `scope-excluded.txt` with its measured byte length; and **the scanner's OWN outputs — the `.llm-sast-scanner-cache/` directory
   (architecture-threat-model.md, project-memory.md, scope-manifest.txt, `*-results.md`, final-report.md) and any
   `sast_report-*.md` reports it wrote** (they are tool artifacts, not code under review). If a specific dependency
   must be reviewed, do it deliberately — not as part of the line-by-line repo sweep.
-  **Lock files and vendored/committed third-party code that ships stay IN scope** — dependency-confusion,
+  **Lock files and vendored/committed third-party source that ships stay IN scope** — dependency-confusion,
   plaintext-registry and integrity findings exist ONLY in the lock file, and vendored code is reachable at
-  runtime. For anything not named above, the base skill's **Step 1 skip rule** governs: a file leaves the
+  runtime; but a package-manager *release binary* (the `.yarn/releases` / `.pnp` runtime excluded above) is
+  tooling, not application runtime code — its integrity is carried by `yarn.lock` + `.yarnrc.yml`, which stay in
+  scope — so it is excluded, not kept here. For anything not named above, the base skill's **Step 1 skip rule** governs: a file leaves the
   coverage set only when you can name the in-scope file its security-relevant content is derived from.
 - SCOPE MANIFEST (build ONCE, before pass 1): the enumerated in-scope file list + line counts is the coverage
   denominator. **Reuse the shared manifest when it exists:** if `.llm-sast-scanner-cache/scope-manifest.txt`
@@ -378,9 +382,24 @@ GROUND RULES
     | grep -ivE '\.(min\.js|bundle\.js|map|png|jpe?g|gif|webp|ico|pdf|zip|gz|jar|woff2?|ttf|mp4|so|dylib|dll|exe|wasm)$' \
     | grep -ivE '(^|/)sast_report-.*\.md$' \
     | tr '\n' '\0' | xargs -0 grep -Il '' 2>/dev/null \
+    | while IFS= read -r f; do \
+        maxb=$(LC_ALL=C awk '{ if (length > m) m = length } END { print m + 0 }' "$f"); \
+        case "$f" in \
+          .yarn/releases/*|*/.yarn/releases/*|.yarn/plugins/*|*/.yarn/plugins/*|.pnp.cjs|*/.pnp.cjs|.pnp.loader.mjs|*/.pnp.loader.mjs) \
+            printf '%s\tnot line-auditable — committed package-manager runtime bundle (%s-byte longest line)\n' "$f" "$maxb" >&2 ;; \
+          *) if [ "$maxb" -gt 2000 ]; then \
+               printf '%s\tnot line-auditable — longest line %s bytes exceeds the 2000-byte reader (minified/generated)\n' "$f" "$maxb" >&2; \
+             else printf '%s\n' "$f"; fi ;; \
+        esac; \
+      done \
     | tr '\n' '\0' | xargs -0 wc -l 2>/dev/null | sort -n \
     | tee .llm-sast-scanner-cache/scope-manifest.txt
   ```
+  The per-file step drops any file no 2000-byte-per-line reader can line-cover — a committed package-manager
+  runtime (`.yarn/releases`, `.yarn/plugins`, `.pnp.cjs`, `.pnp.loader.mjs`) or any file whose longest line
+  exceeds 2000 bytes (a minified or generated bundle) — printing each to **stderr** as a `path<TAB>reason` row
+  with the measured byte length; record those rows in `scope-excluded.txt` (they are listed, never read,
+  counted against coverage, or partitioned). This is a mechanical limit of the reader, not a size judgment.
   The `.llm-sast-scanner-cache` dir-exclude and the `sast_report-*.md` name-exclude keep the scanner's OWN
   artifacts out of scope — **critical on a non-git target**, where the `find .` fallback honors no `.gitignore`,
   so without them the tool would read its own memory/results/reports back in as "source" and inflate the
