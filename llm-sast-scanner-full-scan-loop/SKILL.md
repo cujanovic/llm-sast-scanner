@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.28.2"
+  version: "2.28.3"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -53,7 +53,7 @@ in a response. D1's `architecture-threat-model.md` is written anew whenever the 
 from this run's, or the previous plan holds none, whatever D1's SHA gate allows: its entry points, stack and
 allowlist were read under rules this version changed. The command then cuts the in-scope files into partitions balanced by lines and entry
 points — three, or more, as the `partition count:` row below fixes. The manifest holds only what D1 leaves in scope: generated output derived from in-scope source — ORM
-snapshots and journals, build and bundle output, generated route trees, and any file no 2000-byte-per-line reader
+snapshots and journals, build and bundle output, generated route trees, localization message catalogs (gettext `*.po`/`*.pot`, translated UI strings reviewed at their in-scope render sites), and any file no 2000-byte-per-line reader
 can line-cover (a minified/generated bundle or committed package-manager runtime, which D1's enumeration prints to
 stderr with its measured byte length) — is excluded in `scope-excluded.txt`
 with its reason, never classified or partitioned, and so are the orchestrating runtime's own run logs and exported

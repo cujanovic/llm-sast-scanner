@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.51.1"
+  version: "1.51.5"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -205,7 +205,8 @@ Determine:
 - **Skipping anything else — name the source file, or keep it.** A file leaves the coverage set ONLY when you can name the in-scope file its security-relevant content is **derived from**; record that path beside the exclusion. Nothing to name → it stays in scope.
   - *Derived, and the source is in scope → skip*: `dist/`/`build/` bundles and minified assets (source in `src/`), ORM migration snapshots (e.g. a `meta/` or `snapshots/` directory beside the migrations, derived from the `.sql` migrations), generated clients/stubs from a checked-in schema or IDL (`*.pb.go`, `*_pb2.py`, OpenAPI/GraphQL codegen output).
   - *Nothing else expresses it → keep, whatever its size, generator, or authorship*: **lock files** (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `Gemfile.lock`, `poetry.lock`, `go.sum`, `Cargo.lock`) — the manifest holds no resolved URLs, registry hosts, or integrity hashes, so dependency-confusion, plaintext-registry, and integrity findings exist ONLY in the lock file; vendored or committed third-party code that ships; `.sql` migrations (grants, RLS policies, triggers, definer functions); IaC and CI/CD config.
-  - *No reader can line-cover it → exclude, listed not read*: a file with any line over 2000 bytes (the per-line reader limit) — a minified or generated bundle, a committed package-manager runtime (`.yarn/releases`, `.yarn/plugins`, `.pnp.cjs`, `.pnp.loader.mjs`) — cannot reach 100% line coverage, so it leaves the coverage set and is listed in `scope-excluded.txt` with its measured byte length. Its supply-chain integrity stays covered by the lock file and `.yarnrc.yml`, which remain in scope.
+  - *No reader can line-cover it → exclude, listed not read*: a file with any line over 2000 bytes (the per-line reader limit) — a minified or generated bundle, a committed package-manager runtime (`.yarn/releases`, `.yarn/plugins`, `.pnp.cjs`, `.pnp.loader.mjs`) — cannot reach 100% line coverage, so it leaves the coverage set and is listed in `.llm-sast-scanner-cache/scope-excluded.txt` with its measured byte length. Its supply-chain integrity stays covered by the lock file and `.yarnrc.yml`, which remain in scope.
+  - *Localization message catalogs → exclude, listed not read*: gettext translation catalogs (`*.po`, `*.pot`) are string tables the i18n runtime loads at render time — translated UI text, not authored program logic or configuration — so they leave the coverage set and are listed in `.llm-sast-scanner-cache/scope-excluded.txt`. Coverage is moved, not lost: the format-string/placeholder and markup-injection surface of catalog strings is reviewed where the code looks up and renders them (the gettext / `_()` / i18n lookup and formatting sites), which stays in scope.
   - "Auto-generated", "third-party", "not source code", and "too large" are **not** reasons — each is true of files in both lists above. (A line no reader can read is different: that is the mechanical reader limit just above, not a size judgment.)
 
 ### Step 2: Load Relevant References
@@ -764,6 +765,10 @@ Adversarial Verdict: STANDING / DOWNGRADED / DISPUTED / WITHDRAWN — <rationale
 ---
 
 ### Step 7: Report Findings
+
+#### Output language
+
+**Write all output in English.** Every finding's prose — the `Description`, `Impact`, remediation, and the `Judge:`/`Adversarial:` rationale — and the entire report, including the Executive Summary and all narrative, MUST be written in English, whatever the natural language of the source code, comments, identifiers, file names, documentation, `project-memory.md`, `context/` files, or the per-lens worker result files being consolidated. When a worker result file, an earlier report, or a memory entry is written in another language, **translate its finding prose into English** when you consolidate it — never copy source-language narrative into the report, and do not match the codebase's language. The only non-English text permitted is identifiers, string literals, UI labels and file paths quoted verbatim from the code, each with a short English gloss where the meaning matters; structured tokens — severity labels, CWE ids, class names, and `file:line` citations — are English already. This rule is not overridden by the language of the code or of any input the run reads.
 
 #### Citation & Evidence Verification (mandatory pre-report gate)
 

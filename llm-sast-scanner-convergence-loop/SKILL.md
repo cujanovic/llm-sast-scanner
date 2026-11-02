@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.18.1"
+  version: "1.18.3"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -357,9 +357,9 @@ GROUND RULES
   or skim — read each in-scope file fully, line by line.
 - EXCLUDE from scope (do NOT read, do NOT count against coverage): binary assets; dependency trees this repo
   does not author (node_modules/); build/generated output (dist/, build/, out/, *.min.js, *.bundle.js, source
-  maps); **files no 2000-byte-per-line reader can line-cover** — any file whose longest line exceeds 2000 bytes
+  maps); **localization message catalogs** (gettext `*.po`/`*.pot`) — translated UI strings the i18n runtime loads at render time, whose format-string and markup-injection surface is covered at the in-scope code that looks them up and renders them, not by reading the catalogs; **files no 2000-byte-per-line reader can line-cover** — any file whose longest line exceeds 2000 bytes
   (a minified or generated bundle) and committed package-manager runtimes (`.yarn/releases`, `.yarn/plugins`,
-  `.pnp.cjs`, `.pnp.loader.mjs`), each listed in `scope-excluded.txt` with its measured byte length; and **the scanner's OWN outputs — the `.llm-sast-scanner-cache/` directory
+  `.pnp.cjs`, `.pnp.loader.mjs`), each listed in `.llm-sast-scanner-cache/scope-excluded.txt` with its measured byte length; and **the scanner's OWN outputs — the `.llm-sast-scanner-cache/` directory
   (architecture-threat-model.md, project-memory.md, scope-manifest.txt, `*-results.md`, final-report.md) and any
   `sast_report-*.md` reports it wrote** (they are tool artifacts, not code under review). If a specific dependency
   must be reviewed, do it deliberately — not as part of the line-by-line repo sweep.
@@ -376,7 +376,7 @@ GROUND RULES
   **persist it** to `.llm-sast-scanner-cache/scope-manifest.txt` so later lenses/consolidation reuse the same list:
   ```bash
   cd "dir as argument"
-  mkdir -p .llm-sast-scanner-cache
+  mkdir -p .llm-sast-scanner-cache; : > .llm-sast-scanner-cache/scope-excluded.txt
   { git ls-files --cached --others --exclude-standard 2>/dev/null || find . -type f; } \
     | grep -ivE '(^|/)(node_modules|dist|build|out|\.git|\.llm-sast-scanner-cache|coverage)/' \
     | grep -ivE '\.(min\.js|bundle\.js|map|png|jpe?g|gif|webp|ico|pdf|zip|gz|jar|woff2?|ttf|mp4|so|dylib|dll|exe|wasm)$' \
@@ -386,9 +386,11 @@ GROUND RULES
         maxb=$(LC_ALL=C awk '{ if (length > m) m = length } END { print m + 0 }' "$f"); \
         case "$f" in \
           .yarn/releases/*|*/.yarn/releases/*|.yarn/plugins/*|*/.yarn/plugins/*|.pnp.cjs|*/.pnp.cjs|.pnp.loader.mjs|*/.pnp.loader.mjs) \
-            printf '%s\tnot line-auditable — committed package-manager runtime bundle (%s-byte longest line)\n' "$f" "$maxb" >&2 ;; \
+            printf '%s\tnot line-auditable — committed package-manager runtime bundle (%s-byte longest line)\n' "$f" "$maxb" >> .llm-sast-scanner-cache/scope-excluded.txt ;; \
+          *.po|*.pot) \
+            printf '%s\tlocalization message catalog — translated UI strings the i18n runtime loads, not authored logic; their format-string and markup use is covered where code looks up and renders catalog strings, which stays in scope\n' "$f" >> .llm-sast-scanner-cache/scope-excluded.txt ;; \
           *) if [ "$maxb" -gt 2000 ]; then \
-               printf '%s\tnot line-auditable — longest line %s bytes exceeds the 2000-byte reader (minified/generated)\n' "$f" "$maxb" >&2; \
+               printf '%s\tnot line-auditable — longest line %s bytes exceeds the 2000-byte reader (minified/generated)\n' "$f" "$maxb" >> .llm-sast-scanner-cache/scope-excluded.txt; \
              else printf '%s\n' "$f"; fi ;; \
         esac; \
       done \
@@ -397,8 +399,8 @@ GROUND RULES
   ```
   The per-file step drops any file no 2000-byte-per-line reader can line-cover — a committed package-manager
   runtime (`.yarn/releases`, `.yarn/plugins`, `.pnp.cjs`, `.pnp.loader.mjs`) or any file whose longest line
-  exceeds 2000 bytes (a minified or generated bundle) — printing each to **stderr** as a `path<TAB>reason` row
-  with the measured byte length; record those rows in `scope-excluded.txt` (they are listed, never read,
+  exceeds 2000 bytes (a minified or generated bundle) — writing each as a `path<TAB>reason` row with the
+  measured byte length to `.llm-sast-scanner-cache/scope-excluded.txt` (they are listed there, never read,
   counted against coverage, or partitioned). This is a mechanical limit of the reader, not a size judgment.
   The `.llm-sast-scanner-cache` dir-exclude and the `sast_report-*.md` name-exclude keep the scanner's OWN
   artifacts out of scope — **critical on a non-git target**, where the `find .` fallback honors no `.gitignore`,
