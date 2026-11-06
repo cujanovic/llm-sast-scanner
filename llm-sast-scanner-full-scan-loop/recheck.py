@@ -2098,7 +2098,7 @@ def partition_plan_v2(scope: list[tuple[int, str]], plan: str, root: Path | None
 
 
 COPY_FLOOR = 100  # a file with fewer eight-word phrases of composed prose than this is too short to tell a copy from a re-verification
-COPY_FIELD = re.compile(r"^(?:CWE|Files?|Entry points?|References?|Worker record|Evidence|coverage|passes|convergence|unread ranges|new entry points|procedure)\s*:", re.I)
+COPY_FIELD = re.compile(r"^\**(?:CWE|Files?|Entry points?|References?|Worker record|Evidence|coverage|passes|convergence|unread ranges|new entry points|procedure)\**\s*:", re.I)
 COPY_PRESCRIBED = re.compile(r"SAFE in p\d+ — no .*? in this partition|no in-repository production caller|ledger empty", re.I)
 
 

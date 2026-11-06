@@ -7,7 +7,7 @@ description: >
   code review of any language or framework.   Covers 106 vulnerability classes across web, API, auth, mobile, cloud/infrastructure, AI/LLM, and logic layers.
   Accepts optional tagged arguments, e.g. "llm-sast-scanner adv=critical,high" for adversarial validation.
 metadata:
-  version: "1.51.5"
+  version: "1.51.6"
   domain: application-security
   references: 106 vulnerability knowledge bases
 ---
@@ -818,20 +818,33 @@ A record whose downgrade is voided is rated as if it were absent: from its class
 
 ```
 [SEVERITY] VULN-NNN — <Vulnerability Class>  [CONFIRMED | LIKELY]
-CWE: <CWE-ID(s) for the class, taken from the matching reference file — e.g. CWE-89>
-File: <path>:<line_number>
-Description: <one sentence — what the vulnerability is>
-Impact: <what an attacker can achieve>
-Flow: <source file:line> → <intermediate hop file:line> → … → <sink file:line>
-Evidence:
+
+**CWE:** <CWE-ID(s) for the class, taken from the matching reference file — e.g. CWE-89>
+
+**File:** <path>:<line_number>
+
+**Description:** <one sentence — what the vulnerability is>
+
+**Impact:** <what an attacker can achieve>
+
+**Flow:** <source file:line> → <intermediate hop file:line> → … → <sink file:line>
+
+**Evidence:**
   <relevant code snippet>
-Judge: <one sentence — why this passed re-verification>[; <why the severity is below the class default — only for such a record>]
-Adversarial: <one sentence — why this survived the stress test; for DOWNGRADED, the trigger by name: privileged position / non-default configuration / chained prerequisite, and the named thing the attacker must hold or establish, which is not a hop of the Flow; for DISPUTED, the concrete thing the record cites that the doubt is about and what about it is uncertain> [STANDING | DOWNGRADED | DISPUTED]
-Remediation: <specific fix — not generic advice>
-Reference: references/<vuln>.md (v<version>)
-Also at: <path>:<line>, <path>:<line>, … — <only for one missing control's other sink lines; omit otherwise>
-Context: context/<file>.md — <only if an external-context file influenced this verdict/severity; omit otherwise>
+**Judge:** <one sentence — why this passed re-verification>[; <why the severity is below the class default — only for such a record>]
+
+**Adversarial:** <one sentence — why this survived the stress test; for DOWNGRADED, the trigger by name: privileged position / non-default configuration / chained prerequisite, and the named thing the attacker must hold or establish, which is not a hop of the Flow; for DISPUTED, the concrete thing the record cites that the doubt is about and what about it is uncertain> [STANDING | DOWNGRADED | DISPUTED]
+
+**Remediation:** <specific fix — not generic advice>
+
+**Reference:** references/<vuln>.md (v<version>)
+
+**Also at:** <path>:<line>, <path>:<line>, … — <only for one missing control's other sink lines; omit otherwise>
+
+**Context:** context/<file>.md — <only if an external-context file influenced this verdict/severity; omit otherwise>
 ```
+
+**Render each field on its own line.** Write every field of the record — including `Worker record:`, `Entry point:` and a merge's `Also:` line when a consolidating report adds them — as its own Markdown block: bold the label with the colon inside it (`**CWE:**`, `**File:**`, `**Impact:**`, …) and leave a blank line between fields, so each renders on its own line instead of collapsing into one run-on paragraph. Keep `**Flow:**` on a single line (every hop on that one line) and write `**Evidence:**` as a fenced code block. Never turn a field into a bullet-list item or a heading — the bold label is the only markup a field line carries, and a heading inside a record would end the block.
 
 **`Reference:` — tag the reference with its version.** Append the loaded reference file's frontmatter `version` in parentheses as `(vX.Y)` — e.g. `references/server_side_prototype_pollution.md (v0.1)` — so the report records which knowledge-base version produced the verdict. When a finding cites multiple references on one line, each reference carries its own version tag.
 

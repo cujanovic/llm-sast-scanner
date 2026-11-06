@@ -10,7 +10,7 @@ description: >
   citations against the source, and writes a timestamped consolidated report.
   With mode=single it runs the entire convergence loop in one context (strongest convergence/coverage guarantee).
 metadata:
-  version: "1.18.3"
+  version: "1.18.4"
   domain: application-security
   wraps: llm-sast-scanner
 ---
@@ -294,7 +294,7 @@ Launch one subagent:
 > sequence of that severity's findings, each written as one complete Finding Format record (base skill Step 7) in
 > plain markdown — the code fence around the template in Step 7 delimits the template, not the report — with the
 > `[SEVERITY] VULN-NNN — <Class> [verdict]` line, then CWE, File, Description, Impact, Flow, an Evidence code block,
-> Judge, Adversarial, Remediation and Reference. The number of records in a section equals that severity's count in
+> Judge, Adversarial, Remediation and Reference — and write **each of these fields on its own line**: bold its label with the colon inside (`**CWE:**`, `**File:**`, `**Impact:**`, …) and put ONE blank line between every field, so each renders on its own line instead of collapsing into one run-on paragraph (two field lines with no blank line between them are malformed). Keep `**Flow:**` on a single line and write `**Evidence:**` as the fenced code block; this is base Step 7's *Render each field on its own line*. The number of records in a section equals that severity's count in
 > the Severity Histogram — the histogram is derived by counting the records, never the other way round — and the
 > report's appendix ends with a **Body/histogram reconciliation** block of five plain lines,
 > `<severity>: <records counted in body> / <histogram count>`, all equal, written after the recount and before the
@@ -670,7 +670,7 @@ OUTPUT (single-agent mode)
   sequence of that severity's findings, each written as one complete Finding Format record (base skill Step 7) in
   plain markdown — the code fence around the template in Step 7 delimits the template, not the report — with the
   `[SEVERITY] VULN-NNN — <Class> [verdict]` line, then CWE, File, Description, Impact, Flow, an Evidence code block,
-  Judge, Adversarial, Remediation and Reference. The number of records in a section equals that severity's count in
+  Judge, Adversarial, Remediation and Reference — and write **each of these fields on its own line**: bold its label with the colon inside (`**CWE:**`, `**File:**`, `**Impact:**`, …) and put ONE blank line between every field, so each renders on its own line instead of collapsing into one run-on paragraph (two field lines with no blank line between them are malformed). Keep `**Flow:**` on a single line and write `**Evidence:**` as the fenced code block; this is base Step 7's *Render each field on its own line*. The number of records in a section equals that severity's count in
   the Severity Histogram — the histogram is derived by counting the records, never the other way round — and the
   report's appendix ends with a **Body/histogram reconciliation** block of five plain lines,
   `<severity>: <records counted in body> / <histogram count>`, all equal, written after the recount and before the

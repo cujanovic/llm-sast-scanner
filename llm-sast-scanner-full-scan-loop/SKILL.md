@@ -5,7 +5,7 @@ description: >
   "llm-sast-scanner-full-scan-loop <dir> [adv=critical,high,medium] [new-scan]" where <dir> is the target
   repository/directory path; if <dir> is omitted it defaults to the current working directory.
 metadata:
-  version: "2.28.3"
+  version: "2.28.4"
   domain: application-security
   wraps: llm-sast-scanner-convergence-loop
 ---
@@ -1389,7 +1389,7 @@ rendered from the table: one Finding Format record per `body` row, in severity o
 Every block has one layout, so two runs' blocks diff line for line: the severity line, then
 `Worker record: <worker record id>` — or, for a carried block, its `Carried:` line in that position — then `Entry point: <the row's entry point>`, then the base skill's fields in its
 order — CWE, File, Description, Impact, Flow, Evidence as a fenced code block, Judge, Adversarial, Remediation,
-Reference — with no other line between them; and the `Adversarial:` line opens with the row's `verdict` cell —
+Reference — each field on its own line, its label bolded with the colon inside (`**File:**`) and ONE blank line between every field (so each renders separately, not as a run-on paragraph), and no other non-blank content line between them; and the `Adversarial:` line opens with the row's `verdict` cell —
 the verdict word, and for a downgrade its trigger and named thing, for a voided downgrade its hop — followed by ` — `
 and the base skill's one-sentence rationale, which is never omitted; a `not run` row's line reads
 `Adversarial: not run (severity outside adv=)`. A block whose opening differs from its row's cell, or whose line ends
