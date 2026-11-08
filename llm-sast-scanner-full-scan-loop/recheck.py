@@ -2296,9 +2296,24 @@ def gate_lines(target: Path, cache: Path, plan: str, skills: Path | None, only: 
             rel_ = under(pth) if pth.startswith("/") else pth
             return rel_ is not None and (target / rel_).is_file()
         records_paths = []
+        def _clean_fp(s: str) -> str:
+            return re.sub(r":\d+(?:-\d+)?$", "", s)
+        def best_fp(tok: str, backtick: bool) -> str:
+            # a `File:` token → the cited path. Backticks delimit the path, so one with spaces inside them is kept whole;
+            # a bare token is bounded at the first space, but the full remainder is tried when that first token does not
+            # resolve, so an unquoted spaced path still matches. Strictly widening: only ever turns a miss into a hit,
+            # so a path that resolved before resolves to the same string now (the gate stays monotonic).
+            c = tok.strip().strip("*").rstrip(",;.)")
+            parts = c.split()
+            first = _clean_fp(parts[0]) if parts else ""
+            full = _clean_fp(c)
+            if backtick:
+                return full if exists(full) else first
+            return full if (not exists(first) and exists(full)) else first
         for m in re.finditer(r"^\**Files?:\**\s*(.+)$", text, re.M):
-            toks = re.findall(r"`([^`]+)`", m.group(1)) or [m.group(1).split()[0]]
-            records_paths.append([re.sub(r":\d+(?:-\d+)?$", "", tok.strip().strip("*").rstrip(",;.)").split()[0]) for tok in toks if tok.strip()])
+            bt = re.findall(r"`([^`]+)`", m.group(1))
+            toks = [(t, True) for t in bt] if bt else [(m.group(1), False)]
+            records_paths.append([best_fp(t, b) for (t, b) in toks if t.strip()])
         m_ = len(records_paths)
         k = sum(1 for ps in records_paths if ps and all(exists(pth) for pth in ps))
         a = sum(1 for ps in records_paths if any(pth.startswith("/") and under(pth) is not None for pth in ps))

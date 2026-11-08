@@ -1,7 +1,7 @@
 ---
 name: business_logic
-version: "0.7"
-description: Business logic testing for workflow bypass, state manipulation, and domain invariant violations, including soft-deleted records still readable through a path that skips the deleted filter
+version: "0.8"
+description: Business logic testing for workflow bypass, state manipulation, and domain invariant violations, including soft-deleted records still readable through a path that skips the deleted filter, contradictory simultaneous states from independent status flags, and irreversible side effects that survive a transaction rollback
 ---
 
 # Business Logic Flaws
@@ -118,6 +118,16 @@ def free_download():
 - Skip or reorder steps via direct API calls; verify server enforces preconditions on each transition
 - Replay prior steps with altered parameters (e.g., swap price after approval but before capture)
 - Split a single constrained action into many sub-actions under the threshold (limit slicing)
+
+### Contradictory Simultaneous States (independent-flag representation)
+
+A resource's lifecycle is stored as **several independent booleans/timestamps** (`is_active` + `is_banned`, `shipped` + `refunded`, `paid` + `voided`, `published` + `deleted_at`, `approved` + `rejected`) instead of one `status` field, and each transition handler guards only against **its own** flag, never the mutually-exclusive one. Two operations the domain treats as exclusive both succeed on the same record, leaving it in a combination the business rules forbid — which in turn unlocks actions neither state alone would allow. This is a representation defect **at rest**: the contradiction is reachable by ordinary **sequential** requests with no concurrency, which separates it from the TOCTOU timing race in `race_conditions.md`.
+
+- **Mechanism**: `ship()` rejects only `if shipped` and `refund()` rejects only `if refunded`; neither excludes the other, so an order ends up `shipped AND refunded` (goods dispatched and money returned). Same shape: an account `active AND banned` (a banned user still authenticates), an invoice `paid AND voided`, a document `published AND deleted`, a ticket `approved AND rejected`.
+- **SAST signal**: a model whose status is more than one independent boolean / `*_at` column rather than a single state field, with per-operation handlers that check only the flag they set. Recon: `rg -ni "\b(is_|has_)?(active|banned|deleted|refunded|shipped|paid|voided?|approved|cancelled)\b" --glob '*.{py,js,ts,go,rb,java,cs}'` (bare or `is_`/`has_`-prefixed flags), then check whether the mutually-exclusive operations cross-check each other's flag before their side effect.
+- **Severity**: rate by the action the contradiction unlocks — **High** when the combination is a direct financial loss or a security-control bypass (shipped+refunded, paid+voided, active+banned); downgrade only for a genuine likelihood barrier (e.g. one leg requires a privileged role), not because each handler "looked fine" in isolation.
+- **Safe**: model the lifecycle as **one** status field with an explicit allowed-transition table (enum + `WHERE status = ?` / CAS), derive any display booleans from it, and make the mutually-exclusive terminal states unreachable from each other; a DB `CHECK` or partial-unique constraint can enforce the exclusivity app code misses. Deriving each view-flag from a single `status` is **not** this bug.
+- **Not this**: a pure concurrency/TOCTOU double-apply of ONE operation (`race_conditions.md`); forward step-skipping / replay (State Machine Abuse, above); a single enum already guarded by a transition check.
 
 ### Ownership / Resource-Claim Verification via Attacker-Controlled Proof
 
@@ -269,6 +279,7 @@ send_password_reset(user.email)
 
 - Saga/compensation gaps: trigger compensation without original success; or execute success twice without compensation
 - Outbox/Inbox patterns missing idempotency → duplicate downstream side effects
+- **Irreversible side effect inside a transaction (survives rollback)**: a mailer/SMS/push send, outbound HTTP or payment charge, or queue publish is issued **inside** a DB transaction (`BEGIN…COMMIT`, `transaction.atomic()`, `@Transactional`, an ORM session before `commit`) while the guard that should throttle or dedupe it — the rate-limit counter, the "already sent" row, the idempotency key, the audit record — is written **in the same transaction**. When a later step rolls back (a constraint violation, a validation that runs after the send, a failed commit), the external effect has already happened but the guard row is erased, so the same request re-fires the effect with the counter never advancing → repeatable send-flood, OTP/SMS bombing, denial-of-wallet, or double-charge, bypassing a limit that *looks* enforced. **SAST signal**: an external/irreversible call textually between a transaction open (`atomic(`/`BEGIN`/`transaction(`) and its `commit`, with the throttle/dedup/audit write in the same block and a reachable rollback/except path after the call. Recon: `rg -n "atomic\(|BEGIN|transaction\(|@Transactional" --glob '*.{py,js,ts,go,rb,java}'`, then check whether a send/charge/publish precedes the commit in the same scope. **Tag by the control the rollback erased**: `verification_code_abuse.md` for an OTP/resend limit, `denial_of_service.md` for denial-of-wallet with no other invariant, `business_logic` when the erased record is a ledger/idempotency/quota invariant. **Safe**: commit the guard first and fire the effect only after a successful commit — an after-commit hook (`transaction.on_commit`, `AFTER COMMIT`), a **transactional outbox** drained by a separate idempotent worker, or an idempotency key committed before the call; an effect placed strictly after `commit` is correct. **Not this**: a rejected request that still mutates with **no** transaction involved (the broader "fails but still changes state" shape — see the guard-after-mutation note in `idor.md`); here the distinguishing mechanism is the **rollback erasing the gate**.
 - Cron/backfill jobs operating outside request-time authorization; mutate state broadly
 
 ### Microservices Boundaries
