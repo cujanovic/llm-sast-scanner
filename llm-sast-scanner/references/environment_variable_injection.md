@@ -1,6 +1,6 @@
 ---
 name: environment_variable_injection
-version: "0.1"
+version: "0.2"
 description: Detect user-controlled data flowing into process environment-variable assignment (name and/or value) — os.environ/os.putenv, process.env, setenv/putenv, ENV[]=, Environment.SetEnvironmentVariable, ProcessBuilder.environment().put — where attacker control of a variable name or a security-relevant variable's value enables loader/runtime hijack (LD_PRELOAD, NODE_OPTIONS, PYTHONPATH, PATH) or override of app secrets/flags (JWT_SECRET, DEBUG, DATABASE_URL). Covers CWE-99 / CWE-454 across all languages.
 ---
 
@@ -17,7 +17,7 @@ This is distinct from command injection (no shell metacharacters needed — the 
 - Filenames/metadata from uploads, message-queue payloads, webhook bodies
 - Any externally controlled string that reaches the variable name or value below
 
-**Sinks** (environment-setting APIs — flag when the *name* is tainted, or the *value* of a security-relevant name is tainted):
+**Sinks** (environment-setting APIs — flag when the *name* is tainted, or the *value* of a Tier 1–3 variable is tainted, rated by tier — loader/runtime → RCE, config/secret → Tier-3 impact. A tainted value of a name in **none** of the tiers is not this finding on its own — at most Low, and only where a reader that acts on the value is in view; see Common False Alarms):
 - **Node.js**: `process.env.X = v`, `process.env[userKey] = v`, `Object.assign(process.env, userObj)`, and `env:` maps built from user input passed to `child_process.spawn/exec/execFile/fork`
 - **Python**: `os.environ[k] = v`, `os.environ.setdefault(k, v)`, `os.environ.update(mapping)`, `os.putenv(k, v)`, and `env=` passed to `subprocess.run/Popen/call`
 - **Java**: `ProcessBuilder.environment().put(k, v)` / `.putAll(map)` (affects spawned children; the JDK has no portable setenv for the current process)
@@ -37,13 +37,16 @@ This is distinct from command injection (no shell metacharacters needed — the 
    - `NODE_OPTIONS` (e.g. `--require /tmp/x.js`, `--experimental-loader`), `BASH_ENV` / `ENV`, `IFS`, `PATH`
    - `PYTHONPATH`, `PYTHONSTARTUP`, `PYTHONINSPECT`; `RUBYOPT` (e.g. `-r`); `PERL5LIB`, `PERL5OPT`
    - `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `CLASSPATH`; `GIT_SSH`, `GIT_EXTERNAL_DIFF`, `GIT_PAGER`, `GIT_CONFIG_*` hook commands
+   - **Other server-side runtimes the `PYTHON*`/`*_OPTIONS`/`NODE_*`/`JAVA_*` globs miss** (same mechanism — the child interpreter runs code named by the var): PHP `PHPRC` / `PHP_INI_SCAN_DIR` (loads an attacker `.ini` whose `auto_prepend_file` runs before the script); .NET `DOTNET_STARTUP_HOOKS` (loads a startup-hook assembly); Erlang/Elixir `ERL_AFLAGS` / `ERL_FLAGS` / `ERL_ZFLAGS` carrying `-eval <expr>`; Lua `LUA_INIT` (`='code'` or `=@file`); R `R_PROFILE` / `R_PROFILE_USER` (sourced as R at startup); the Python `PYTHONWARNINGS` **+** `BROWSER` pair (a `-W` dotted-category import reaches `webbrowser.open()`, whose command template is `BROWSER` — flag only when both are attacker-controlled); and the shell-startup family beyond `BASH_ENV` — zsh `ZDOTDIR`, fish/pwsh `XDG_CONFIG_HOME`
 3. **Application-config / secret override → auth bypass, account takeover, SSRF, data exfiltration**. If the app reads its own config from the environment, overriding it at runtime is a direct compromise even with no loader/runtime trick:
    - `JWT_SECRET`, `SESSION_SECRET`, `SECRET_KEY` → forge tokens / sessions
    - `ADMIN_*`, `DISABLE_AUTH`, `AUTH_ENABLED`, feature flags → privilege escalation
    - `DATABASE_URL`, `REDIS_URL`, `SMTP_HOST` → redirect to attacker infrastructure (SSRF / credential capture)
    - `DEBUG`, `NODE_ENV` → enable verbose errors / stack traces (information disclosure)
 
-**Tainted variable name = High by default** (attacker can choose any of the above). **Tainted value of a fixed, non-security variable = Medium/Low** depending on what reads it.
+**Tainted variable name = High by default** (attacker can choose any of the above). **Tainted value of a recognized loader/runtime var (Tiers 1–2) = RCE-tier** (subject to the fileless/file-backed confidence note below); of a config/secret var (Tier 3) = that tier's impact; **a tainted value of a genuinely non-security variable is not this finding on its own** — at most Low, and only where a reader that acts on the value is in view.
+
+**Fileless vs file-backed** (sets the confidence of a tainted value on a Tier 1–2 var): a few run attacker code from the env value alone — `PYTHONWARNINGS`+`BROWSER`, Lua `LUA_INIT='code'`, Erlang `ERL_*FLAGS=-eval` — so a tainted assignment is a full finding needing no other primitive. The rest need the attacker to also control a file/module the process reads — `LD_PRELOAD` (a planted `.so`), `PYTHONPATH`+`sitecustomize.py`, `NODE_OPTIONS=--require`, `DOTNET_STARTUP_HOOKS`, `PHP_INI_SCAN_DIR`+`auto_prepend_file`. For the file-backed set the attacker-controlled preload file/module is a second-order precondition that **caps confidence at LIKELY** — apply the base skill's stored-input cap (`Exploitability PASS — store population not shown`, the "store" being the file/module the variable names) — never a reason to drop or to mark NEEDS CONTEXT; raise to CONFIRMED once a writable path / upload / dependency-cache the attacker reaches is identified.
 
 ## Adjacent smell: insecure env-flag parsing (a config bug, not injection)
 
@@ -93,7 +96,7 @@ subprocess.run(["python", "worker.py"], env=child_env)
 ## Sanitizers / Barriers
 
 - **Allowlist variable names.** Never let user input choose the variable name; compare against a fixed set of non-security names.
-- **Denylist is a fallback, not primary.** If you must, reject `LD_*`, `DYLD_*`, `*_OPTIONS`, `PATH`, `IFS`, `BASH_ENV`, `ENV`, `GIT_*`, `PYTHON*`, `NODE_*`, `JAVA_*`, `PERL5*`, `RUBYOPT`, `CLASSPATH`, and your app's own secret/flag names — but allowlisting is safer because this list is incomplete by nature.
+- **Denylist is a fallback, not primary.** If you must, reject `LD_*`, `DYLD_*`, `*_OPTIONS`, `PATH`, `IFS`, `BASH_ENV`, `ENV`, `GIT_*`, `PYTHON*`, `NODE_*`, `JAVA_*`, `PERL5*`, `RUBYOPT`, `CLASSPATH`, `PHPRC`, `PHP_INI_SCAN_DIR`, `DOTNET_*`, `ERL_AFLAGS`/`ERL_FLAGS`/`ERL_ZFLAGS`, `LUA_INIT`, `R_PROFILE`/`R_PROFILE_USER`, `ZDOTDIR`, `XDG_CONFIG_HOME`, and your app's own secret/flag names — but allowlisting is safer because this list is incomplete by nature.
 - **Validate the value** against the expected format for that specific known variable.
 - **Give children an explicit, minimal environment** instead of inheriting the (now-tainted) parent environment or merging user-provided maps.
 - **Restrict to privileged users / build-time config**, never an unauthenticated request path.

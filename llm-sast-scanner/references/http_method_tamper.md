@@ -1,6 +1,6 @@
 ---
 name: http_method_tamper
-version: "0.2"
+version: "0.3"
 description: Detect HTTP method tampering vulnerabilities where GET requests trigger state-changing operations, method override headers/fields are accepted without restriction, or authorization covers only some verbs or content types (web.xml constraints and request matchers that list methods, HEAD running doGet, checks that depend on the request Content-Type).
 ---
 
@@ -65,7 +65,7 @@ A `<web-resource-collection>` that lists `<http-method>` elements protects only 
 
 ### Authorization that depends on the request's Content-Type
 
-The same action reachable under two content types can carry two policies. Spring `consumes` narrows a mapping by `Content-Type`, so `@PostMapping(path = "/settings", consumes = "application/json")` with `@PreAuthorize` and a sibling `@PostMapping(path = "/settings", consumes = "application/x-www-form-urlencoded")` without it serve the same action to anyone who sends a form body. In handler code, a check inside `if request.is_json:` (Flask; also true for `+json` types) or `if (req.is('application/json'))` (Express) is skipped when the client sends the same fields form-encoded.
+The same action reachable under two content types can carry two policies. Spring `consumes` narrows a mapping by `Content-Type`, so `@PostMapping(path = "/settings", consumes = "application/json")` with `@PreAuthorize` and a sibling `@PostMapping(path = "/settings", consumes = "application/x-www-form-urlencoded")` without it serve the same action to anyone who sends a form body. In handler code, a check inside `if request.is_json:` (Flask; also true for `+json` types) or `if (req.is('application/json'))` (Express) is skipped when the client sends the same fields form-encoded. The **SOAP analogue**: authorization gated on the `SOAPAction` HTTP header (or WS-Addressing `wsa:Action`) while the SOAP engine dispatches on the body's first child element — a mismatched `SOAPAction` routes to an operation the caller was not authorized for (same root cause: the authz attribute and the dispatch attribute are different parts of the request).
 
 ```js
 // VULN — the role check runs only for JSON bodies; a form-encoded POST updates the setting

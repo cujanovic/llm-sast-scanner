@@ -1,7 +1,7 @@
 ---
 name: subdomain_takeover
-version: "0.1"
-description: Subdomain takeover — flag CANDIDATE dangling DNS records in Infrastructure-as-Code (Route53/Azure DNS/Cloud DNS/CNAME to SaaS) that point at takeover-prone external services with no co-declared backing resource (CWE-350 / dangling DNS). Use when reviewing *.tf, CloudFormation/ARM/Bicep/Pulumi, zone files, or DNS config for dangling CNAME/ALIAS to deprovisionable cloud/SaaS endpoints.
+version: "0.2"
+description: Subdomain takeover — flag CANDIDATE dangling DNS records in Infrastructure-as-Code (Route53/Azure DNS/Cloud DNS/CNAME to SaaS) that point at takeover-prone external services with no co-declared backing resource (CWE-350 / dangling DNS); also CANDIDATE dangling data-export/stream destinations (log sink / Firehose / diagnostic setting writing to a globally-unique storage name with no co-declared bucket = storage name-takeover). Use when reviewing *.tf, CloudFormation/ARM/Bicep/Pulumi, zone files, or DNS config for dangling CNAME/ALIAS to deprovisionable cloud/SaaS endpoints.
 ---
 
 # Subdomain Takeover (IaC candidate flagging)
@@ -67,6 +67,17 @@ Treat a record as a candidate when its target host matches a deprovisionable pro
 - **CANDIDATE**: a `CNAME`/`ALIAS` line whose right-hand side is a fingerprint host. Zone files carry **no resource binding at all**, so every external CNAME is a candidate to reconcile against live provider ownership.
 
 ---
+
+## Dangling export / stream destinations (storage name-takeover, beyond DNS)
+
+The dangling-resource condition is not limited to DNS records. A **data-export sink** that writes to a **globally-unique storage namespace** (S3/GCS bucket, Azure storage-account DNS name) by **literal name/ARN with no co-declared backing resource** is the same takeover candidate: if the destination is deleted (or lives in an account this tree does not manage), an attacker who re-creates the globally-unique name intercepts the delivered data — logs, audit trails, backups, often sensitive. S3 bucket ARNs carry no account id (`arn:aws:s3:::name`), and GCS bucket / Azure storage-account names are global, so a freed name is re-claimable by anyone.
+
+**CANDIDATE condition** — same deciding signal as the DNS rule above (a string literal is a candidate; an attribute reference to a co-managed resource is safe) and, like DNS takeover, static analysis cannot prove the destination is actually unclaimed, so flag as a **candidate, never confirmed** (resolve by confirming the bucket/name exists and is owned by this account — `aws s3api head-bucket` / `gsutil ls` on the literal name; a `NoSuchBucket`/404 means the name is currently free). Trigger resources whose destination is a **literal** name/ARN rather than a reference to a bucket/account created in the same tree:
+- **AWS** — `aws_kinesis_firehose_delivery_stream` `*_s3_configuration.bucket_arn`; `aws_cloudtrail.s3_bucket_name`; `aws_s3_bucket_replication_configuration` destination `bucket`; `aws_s3_bucket_logging.target_bucket`; VPC flow-log / Config-recorder S3 targets.
+- **GCP** — `google_logging_project_sink`/`_folder_sink`/`_organization_sink` `destination = "storage.googleapis.com/<bucket>"`; `google_storage_transfer_job` sink bucket.
+- **Azure** — *generally not this class*: `azurerm_monitor_diagnostic_setting.storage_account_id` and export rules reference a storage account by its **subscription-pinned resource ID**, not by global name, so a re-created same-name account lands under the attacker's own subscription with a different ID. (The account's DNS name is globally unique, but these attributes don't reference it by name — don't flag them here.)
+
+**SAFE** (drop): the destination is an **attribute reference to a resource managed in the same tree** — `bucket_arn = aws_s3_bucket.logs.arn` (and for name-based fields like `target_bucket`/`s3_bucket_name`, `aws_s3_bucket.logs.id`/`.bucket`), or `destination = "storage.googleapis.com/${google_storage_bucket.audit.name}"` — so the sink and its store are created and destroyed together and the name cannot dangle independently; or the target is pinned to an in-account resource via a data source / account-scoped id rather than a globally-squattable bare name.
 
 ## FALSE POSITIVE Rules
 

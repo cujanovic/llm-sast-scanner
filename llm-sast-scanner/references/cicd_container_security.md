@@ -1,7 +1,7 @@
 ---
 name: cicd_container_security
-version: "0.2"
-description: CI/CD pipeline, security-control workflow, and container/Docker misconfiguration — PPE, untrusted workflow inputs, mutable action tags, overprivileged tokens, secret leakage, incomplete-run cache markers, attacker-forgeable scan exemptions, and insecure image build patterns
+version: "0.4"
+description: CI/CD pipeline, security-control workflow, and container/Docker misconfiguration — PPE, untrusted workflow inputs, mutable action tags, overprivileged tokens, secret leakage, incomplete-run cache markers, attacker-forgeable scan exemptions, insecure image build patterns, Argo CD GitOps (ApplicationSet fork-PR auto-deploy, over-permissive AppProject), and Atlantis (PR-comment `$COMMENT_ARGS` in run-steps, missing apply gate)
 ---
 
 # CI/CD Pipeline & Container Security
@@ -55,6 +55,8 @@ Build pipelines and container images are high-value supply-chain targets. Attack
 | Artifact poisoning | `actions/download-artifact` / `dawidd6/action-download-artifact` in a `workflow_run`-triggered job — it pulls the *triggering* (fork) run's artifacts, then extracts/executes/deploys their content |
 | Self-hosted runner | `runs-on:\s*\[?\s*self-hosted` (or a custom label) on a repo whose workflows are fork-PR-reachable — non-ephemeral runners give persistence + secret reuse across jobs |
 | Mutable-ref checkout (TOCTOU) | `actions/checkout` with `ref:` = `github.event.pull_request.head.ref`, `refs/pull/`, `inputs.ref`/`inputs.branch` (mutable) rather than `*.head.sha`/`github.sha`/`*.merge_commit_sha` (immutable) — esp. after a label/approval/`workflow_dispatch` gate |
+| Argo CD GitOps manifests | `apiVersion: argoproj.io`, `kind: (Application\|ApplicationSet\|AppProject)` in `*.yaml` — open these even though they are not workflow files |
+| Atlantis (Terraform PR automation) | `atlantis.yaml`, `repos.yaml` with `workflows:`/`apply_requirements:` — open even though not in the workflow-path list |
 
 ### Dockerfile / compose / K8s
 
@@ -93,6 +95,18 @@ rg -n '@dev:|@volatile|ACTIONS_ALLOW_UNSECURE_COMMANDS' .circleci/config.yml .gi
 ```
 
 **Other CI platforms (same classes, different syntax):** the supply-chain / secret-exposure / privilege classes above are GitHub-Actions-centric but apply across CI. On **CircleCI**, mutable **orbs** (`@dev:`/`@volatile`/unpinned) are the action-ref analogue, and `executors`/`docker` images should be pinned by `@sha256:` not `:latest`. On **Azure Pipelines**, `container:`/`resources.containers` follow the same digest-pinning rule, and avoid passing secrets through `##vso[task.setvariable …]` logging commands. On **Argo Workflows**, a `Workflow`/`WorkflowTemplate` `spec` with no `serviceAccountName` (or `default`) gives pods the namespace default SA token, and templates should set `securityContext.runAsNonRoot: true` — the Kubernetes securityContext rules in `kubernetes_cloud_security.md` apply to Argo template pods.
+
+### Argo CD (GitOps continuous delivery)
+
+Argo CD config lives in repo YAML the GitHub-Actions-centric recon above never opens — route to files with `apiVersion: argoproj.io/*` and `kind: Application` / `ApplicationSet` / `AppProject` (commonly under `**/argocd/**`, `**/apps/**`, `**/gitops/**`). Two finding classes:
+- **ApplicationSet PR/SCM generator with no filters = GitOps poisoned-pipeline-execution.** A `pullRequest` or `scmProvider` generator with no `filters`/label-allowlist renders one `Application` per open PR — forks included — and if the template's `source.targetRevision`/`path` is the PR's own (`{{head_sha}}`, `{{branch}}`, `{{head_short_sha}}`), Argo CD **syncs the fork's manifests into the cluster**: untrusted fork content crossing into a deploy path — the PPE pattern above, in GitOps form. Report at **LIKELY** (`Exploitability PASS — automated sync not shown`); raise to CONFIRMED when `syncPolicy.automated` is set. The destination sets *severity*, not confidence — a privileged / `kube-system` / cluster-wide destination is High, an isolated preview namespace lower. **SAFE**: `filters` limiting to trusted branches/labels, a template pinned to a reviewed branch (not the PR head), or manual sync behind review.
+- **Over-permissive `AppProject` / unrestricted `Application`.** An `AppProject` with wildcard `sourceRepos: ['*']`, `destinations: [{server:'*',namespace:'*'}]`, or `clusterResourceWhitelist: [{group:'*',kind:'*'}]` lets any app in it deploy anything anywhere. **The shipped `default` AppProject manifest itself is not a finding** (it ships wildcard and is usually left for platform use) — flag a **renamed** project carrying these wildcards, or an **`Application` whose `spec.project` is `default`/a wildcard project and whose `source.repoURL` is an app-team (non-platform) repo** — the app team deploying under the unrestricted project. **Report both**: the wildcard project is over-provisioning; each Application under it is the escalation path. **SAFE**: scope `sourceRepos` to the team's repos, `destinations` to its server+namespace, leave `clusterResourceWhitelist` empty (namespace-scoped whitelist only).
+
+### Atlantis (Terraform PR automation)
+
+`atlantis.yaml` / `repos.yaml` are not in the workflow-path list above — open them when present (Atlantis runs `terraform plan`/`apply` on PRs). Two classes:
+- **PR-sourced variable in a `run:` step = untrusted-input injection.** A `workflows.<name>.{plan,apply}.steps[].run` string interpolating an Atlantis PR-sourced variable — `$COMMENT_ARGS` (the `atlantis plan -- <args>` **comment body**) or `$HEAD_BRANCH_NAME` (a fork's branch name) — is attacker-controlled. The "a shell `$VAR` in `run:` is usually trusted data" false-positive above does **not** apply to these: an unquoted `$COMMENT_ARGS` in a `run:` command is argument / word-splitting injection at minimum, and command injection if the wrapper splices it before the shell — the untrusted-workflow-input class, in Atlantis form. **SAFE**: never interpolate `$COMMENT_ARGS`/PR-sourced vars into a `run:` command (pass fixed args); restrict who may issue `atlantis` comment commands.
+- **Missing apply gate.** A project (or the server `repos.yaml`) whose `apply_requirements` lacks `approved` **and** `mergeable` — or `automerge: true` without them — lets a PR's Terraform **apply without human review**, so an unreviewed/forged PR deploys infrastructure. Report at **LIKELY** (`Exploitability PASS — server-side default not shown`: a repo `atlantis.yaml` may inherit a server-side `repos.yaml` `apply_requirements`); CONFIRMED when the server config also omits it. **SAFE**: `apply_requirements: [approved, mergeable]` (plus `undiverged`), enforced server-side so a repo `atlantis.yaml` cannot weaken it.
 
 ## Vulnerable Conditions
 

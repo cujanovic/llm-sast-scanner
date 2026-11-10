@@ -1,6 +1,6 @@
 ---
 name: xxe
-version: "0.3"
+version: "0.4"
 description: XXE testing for external entity injection, file disclosure, and SSRF via XML parsers; also XSLT injection and Java XML-factory bypass via direct parser-implementation constructors (user-controlled stylesheet → file read/write, SSRF, and RCE via XSLTProcessor/registerPHPFunctions, .NET msxsl:script, Xalan/Saxon Java bridge, EXSLT)
 ---
 
@@ -471,7 +471,7 @@ dbf.setExpandEntityReferences(false);
 
 **VULN indicator**: `DocumentBuilderFactory.newInstance()` without any call to `setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)` parsing user-supplied XML.
 
-**False SAFE — `FEATURE_SECURE_PROCESSING` alone on DocumentBuilder/SAX (not a substitute for entity hardening):** `XMLConstants.FEATURE_SECURE_PROCESSING=true` on `DocumentBuilderFactory` / `SAXParserFactory` does **not** replace `disallow-doctype-decl` + disabling external general/parameter entities. Do **not** clear a DOM/SAX XXE finding because FSP is set. (FSP on `TransformerFactory` for XSLT is a different control surface — see XSLT section; do not stretch that mitigation bullet to DocumentBuilder/SAX.)
+**False SAFE — `FEATURE_SECURE_PROCESSING` alone on DocumentBuilder/SAX (not a substitute for entity hardening):** `XMLConstants.FEATURE_SECURE_PROCESSING=true` on `DocumentBuilderFactory` / `SAXParserFactory` does **not** replace `disallow-doctype-decl` + disabling external general/parameter entities. Do **not** clear a DOM/SAX XXE finding because FSP is set. (FSP on `TransformerFactory` for XSLT is a different control surface — see XSLT section; do not stretch that mitigation bullet to DocumentBuilder/SAX.) Neither FSP nor `disallow-doctype-decl` stops **MTOM/XOP `xop:Include`** resolution in CXF/JAX-WS — a separate attachment-deserializer path that dereferences the `href` (`file://`, `http://`) on inbound SOAP → local file read / SSRF; disable MTOM (`mtom-enabled=false`) or restrict the attachment-deserializer schemes/size.
 
 **False SAFE — swallowed / logged `setFeature` failures (fail-open):** wrapping entity-hardening `setFeature(...)` calls in `try/catch` that logs and continues, then still calling `parse()`, is **fail-open**. If the JVM/parser rejects a feature, the catch leaves DTD/entities at defaults and untrusted XML still parses. **SAFE**: hardening must fail closed — if any required feature cannot be set, refuse to construct/parse (throw / return error); never catch-and-continue into `parse()`.
 
